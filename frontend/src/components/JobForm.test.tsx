@@ -126,6 +126,44 @@ describe('JobForm', () => {
       )
     })
 
+    it('includes source_subpath in the onSubmit payload when filled', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      await user.type(screen.getByLabelText(/subfolder|subpath/i), 'photos')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ source_subpath: 'photos' }))
+    })
+
+    it('sends source_subpath=null when left blank', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ source_subpath: null }))
+    })
+
+    it('rejects a subpath containing "/"', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      await user.type(screen.getByLabelText(/subfolder|subpath/i), 'a/b')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(screen.getByText(/subpath.*must not contain|cannot contain/i)).toBeInTheDocument()
+      expect(onSubmit).not.toHaveBeenCalled()
+    })
+
+    it('sends the password under the restic_password key the backend expects', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      await user.type(screen.getByLabelText(/password/i), 'hunter2')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      const payload = onSubmit.mock.calls[0][0] as Record<string, unknown>
+      expect(payload.restic_password).toBe('hunter2')
+      expect(payload.password).toBeUndefined()
+    })
+
     it('shows schedule input', () => {
       render(<JobForm onSubmit={vi.fn()} />)
       expect(screen.getByTestId('schedule-input')).toBeInTheDocument()
@@ -166,6 +204,24 @@ describe('JobForm', () => {
     it('shows tooltip about restic key rotation when locked', () => {
       render(<JobForm job={{ ...baseJob, has_successful_run: true }} onSubmit={vi.fn()} />)
       expect(screen.getByText(/restic key/i)).toBeInTheDocument()
+    })
+  })
+
+  describe('edit mode — source_subpath round-trip', () => {
+    it('seeds the subpath input from the existing job and submits the same value when unchanged', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(
+        <JobForm
+          job={{ ...baseJob, source_subpath: 'photos' }}
+          onSubmit={onSubmit}
+          sourceMounts={['documents']}
+          destinationMounts={['main']}
+        />
+      )
+      expect((screen.getByLabelText(/subfolder|subpath/i) as HTMLInputElement).value).toBe('photos')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ source_subpath: 'photos' }))
     })
   })
 
@@ -245,6 +301,106 @@ describe('JobForm', () => {
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(screen.getByText(/percent.*required|subset_percent/i)).toBeInTheDocument()
       expect(onSubmit).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('backup options', () => {
+    it('exposes exclude_patterns as a textarea (one pattern per line)', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      const textarea = screen.getByLabelText(/exclude patterns/i)
+      await user.type(textarea, '*.tmp{enter}node_modules/')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ exclude_patterns: ['*.tmp', 'node_modules/'] })
+      )
+    })
+
+    it('sends null for exclude_patterns when textarea is blank', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ exclude_patterns: null }))
+    })
+
+    it('exposes exclude_caches as a checkbox (default off)', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      const cb = screen.getByLabelText(/exclude caches/i) as HTMLInputElement
+      expect(cb.checked).toBe(false)
+      await user.click(cb)
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ exclude_caches: true }))
+    })
+
+    it('exposes tags as a comma-separated input', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      await user.type(screen.getByLabelText(/^tags/i), 'daily, important')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ tags: ['daily', 'important'] })
+      )
+    })
+
+    it('exposes compression as a select (auto/off/max)', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      await user.selectOptions(screen.getByLabelText(/^compression/i), 'max')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ compression: 'max' }))
+    })
+
+    it('exposes timeout_hours as a number input', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      await user.type(screen.getByLabelText(/^timeout \(hours\)/i), '12')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ timeout_hours: 12 }))
+    })
+
+    it('round-trips backup options when editing an existing job', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(
+        <JobForm
+          job={{
+            ...baseJob,
+            exclude_patterns: ['*.tmp'],
+            exclude_caches: true,
+            tags: ['daily'],
+            compression: 'max',
+            timeout_hours: 6,
+          }}
+          onSubmit={onSubmit}
+          sourceMounts={['documents']}
+          destinationMounts={['main']}
+        />
+      )
+      expect((screen.getByLabelText(/exclude patterns/i) as HTMLTextAreaElement).value).toBe(
+        '*.tmp'
+      )
+      expect((screen.getByLabelText(/exclude caches/i) as HTMLInputElement).checked).toBe(true)
+      expect((screen.getByLabelText(/^tags/i) as HTMLInputElement).value).toBe('daily')
+      expect((screen.getByLabelText(/^compression/i) as HTMLSelectElement).value).toBe('max')
+      expect((screen.getByLabelText(/^timeout \(hours\)/i) as HTMLInputElement).value).toBe('6')
+
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          exclude_patterns: ['*.tmp'],
+          exclude_caches: true,
+          tags: ['daily'],
+          compression: 'max',
+          timeout_hours: 6,
+        })
+      )
     })
   })
 

@@ -12,6 +12,7 @@ export default function Jobs() {
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [runError, setRunError] = useState<string | null>(null)
   const [showCreateForm, setShowCreateForm] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
 
   const {
     data: jobs,
@@ -192,16 +193,31 @@ export default function Jobs() {
       )}
 
       {showCreateForm && (
-        <div className="mt-6">
+        <div className="mt-6 space-y-3">
+          {createError && (
+            <div className="bg-red-50 border border-red-200 rounded p-3 text-sm text-red-700">
+              {createError}
+            </div>
+          )}
           <JobForm
             sourceMounts={sourceMounts ?? []}
             destinationMounts={destinationMounts ?? []}
             onSubmit={async (data) => {
-              await api.createJob(data)
-              setShowCreateForm(false)
-              refetch()
+              setCreateError(null)
+              try {
+                await api.createJob(data)
+                setShowCreateForm(false)
+                refetch()
+              } catch (err: unknown) {
+                // Surface 422 detail strings from the BE; fall back to a generic message.
+                const detail = (err as { data?: { detail?: string } }).data?.detail
+                setCreateError(detail || 'Failed to create job.')
+              }
             }}
-            onCancel={() => setShowCreateForm(false)}
+            onCancel={() => {
+              setCreateError(null)
+              setShowCreateForm(false)
+            }}
           />
         </div>
       )}

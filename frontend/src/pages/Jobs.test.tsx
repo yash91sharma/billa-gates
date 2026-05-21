@@ -262,6 +262,26 @@ describe('Jobs', () => {
       await waitFor(() => expect(screen.getByRole('form')).toBeInTheDocument())
     })
 
+    it('shows an error banner and keeps the form open when create fails', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.createJob).mockRejectedValue(
+        Object.assign(new Error('Validation failed'), {
+          status: 422,
+          data: { detail: 'restic_password: field required' },
+        })
+      )
+      renderWithProviders(<Jobs />)
+      await waitFor(() => screen.getByRole('button', { name: /create.*job|new.*job/i }))
+      await user.click(screen.getByRole('button', { name: /create.*job|new.*job/i }))
+      const form = await screen.findByRole('form')
+      // Submit the form (the page also has a "Create Job" button — scope to the form).
+      await user.click(within(form).getByRole('button', { name: /save|create|submit/i }))
+      await waitFor(() => {
+        expect(screen.getByText(/restic_password.*required/i)).toBeInTheDocument()
+      })
+      expect(screen.getByRole('form')).toBeInTheDocument()
+    })
+
     it('populates source and destination dropdowns from the mounts API', async () => {
       const user = userEvent.setup()
       renderWithProviders(<Jobs />)

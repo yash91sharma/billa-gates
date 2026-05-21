@@ -100,6 +100,12 @@ beforeEach(() => {
   vi.mocked(api.getJobSnapshots).mockResolvedValue([])
   vi.mocked(api.unlockJob).mockResolvedValue({ output: 'unlock successful' })
   vi.mocked(api.triggerRun).mockResolvedValue({ run_id: 'run-new' })
+  vi.mocked(api.listSourceMounts).mockResolvedValue(['documents', 'photos'])
+  vi.mocked(api.listDestinationMounts).mockResolvedValue(['main'])
+  vi.mocked(api.updateJob).mockImplementation(async (_id, data) => ({
+    ...makeJob(),
+    ...(data as object),
+  }))
 })
 
 describe('JobDetail', () => {
@@ -327,6 +333,63 @@ describe('JobDetail', () => {
       await waitFor(() =>
         expect(screen.getByText(/removed.*lock|successfully|output/i)).toBeInTheDocument()
       )
+    })
+  })
+
+  describe('edit job flow', () => {
+    it('opens the edit form when Edit is clicked', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() => screen.getByRole('button', { name: /edit/i }))
+      await user.click(screen.getByRole('button', { name: /edit/i }))
+      await waitFor(() => expect(screen.getByRole('form')).toBeInTheDocument())
+    })
+
+    it('calls updateJob with the form payload and closes on success', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() => screen.getByRole('button', { name: /edit/i }))
+      await user.click(screen.getByRole('button', { name: /edit/i }))
+      const form = await screen.findByRole('form')
+      // Change the name then submit.
+      const nameInput = screen.getByLabelText(/name/i) as HTMLInputElement
+      await user.clear(nameInput)
+      await user.type(nameInput, 'Renamed Job')
+      // Use the form-scoped submit button (header has its own Edit button).
+      const submitBtn = Array.from(form.querySelectorAll('button')).find((b) =>
+        /save|create|submit/i.test(b.textContent ?? '')
+      )!
+      await user.click(submitBtn)
+      await waitFor(() =>
+        expect(vi.mocked(api.updateJob)).toHaveBeenCalledWith(
+          'job-1',
+          expect.objectContaining({ name: 'Renamed Job' })
+        )
+      )
+      // Form closes on success.
+      await waitFor(() => expect(screen.queryByRole('form')).not.toBeInTheDocument())
+    })
+
+    it('shows an error and keeps the form open when update fails', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.updateJob).mockRejectedValue(
+        Object.assign(new Error('Validation failed'), {
+          status: 422,
+          data: { detail: 'destination_label: immutable' },
+        })
+      )
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() => screen.getByRole('button', { name: /edit/i }))
+      await user.click(screen.getByRole('button', { name: /edit/i }))
+      const form = await screen.findByRole('form')
+      const submitBtn = Array.from(form.querySelectorAll('button')).find((b) =>
+        /save|create|submit/i.test(b.textContent ?? '')
+      )!
+      await user.click(submitBtn)
+      await waitFor(() =>
+        expect(screen.getByText(/destination_label.*immutable/i)).toBeInTheDocument()
+      )
+      expect(screen.getByRole('form')).toBeInTheDocument()
     })
   })
 })

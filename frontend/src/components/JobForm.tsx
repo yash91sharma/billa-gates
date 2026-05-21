@@ -2,6 +2,25 @@ import { useState } from 'react'
 import type { BackupJob } from '../lib/types'
 import ScheduleInput, { type ScheduleValue } from './ScheduleInput'
 
+// Split a textarea of "one item per line" into a string array, or null when empty.
+// Blank lines are dropped so a stray newline doesn't become a "" pattern.
+function parseLines(text: string): string[] | null {
+  const items = text
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  return items.length === 0 ? null : items
+}
+
+// Split a comma-separated input into a string array, or null when empty.
+function parseCsv(text: string): string[] | null {
+  const items = text
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  return items.length === 0 ? null : items
+}
+
 export interface JobFormProps {
   job?: BackupJob
   onSubmit: (data: unknown) => void
@@ -26,6 +45,7 @@ export default function JobForm({
   // Basic fields
   const [name, setName] = useState(job?.name ?? '')
   const [sourceLabel, setSourceLabel] = useState(job?.source_label ?? '')
+  const [sourceSubpath, setSourceSubpath] = useState(job?.source_subpath ?? '')
   const [destinationLabel, setDestinationLabel] = useState(job?.destination_label ?? '')
   const [password, setPassword] = useState('')
   const [enabled, setEnabled] = useState(job?.enabled ?? true)
@@ -49,6 +69,14 @@ export default function JobForm({
   const [keepWithinMonthly, setKeepWithinMonthly] = useState(job?.retain_keep_within_monthly ?? '')
   const [keepWithinYearly, setKeepWithinYearly] = useState(job?.retain_keep_within_yearly ?? '')
 
+  // Backup option fields. Lists are stored as text in local state and serialised
+  // back to arrays on submit so the input controls stay simple.
+  const [excludePatterns, setExcludePatterns] = useState((job?.exclude_patterns ?? []).join('\n'))
+  const [excludeCaches, setExcludeCaches] = useState(job?.exclude_caches ?? false)
+  const [tagsText, setTagsText] = useState((job?.tags ?? []).join(', '))
+  const [compression, setCompression] = useState<string>(job?.compression ?? '')
+  const [timeoutHoursText, setTimeoutHoursText] = useState(job?.timeout_hours?.toString() ?? '')
+
   // Verification fields
   const [checkEnabled, setCheckEnabled] = useState(job?.check_enabled ?? false)
   const [checkMode, setCheckMode] = useState(job?.check_mode ?? '')
@@ -70,6 +98,10 @@ export default function JobForm({
     e.preventDefault()
     setSubmitError(null)
 
+    if (sourceSubpath && sourceSubpath.includes('/')) {
+      setSubmitError('source_subpath must not contain "/"')
+      return
+    }
     if (checkEnabled && !checkMode) {
       setSubmitError(
         'verification mode required: check_mode is required when verification is enabled'
@@ -84,8 +116,9 @@ export default function JobForm({
     onSubmit({
       name,
       source_label: sourceLabel,
+      source_subpath: sourceSubpath || null,
       destination_label: destinationLabel,
-      password: password || undefined,
+      restic_password: password || undefined,
       enabled,
       schedule_type: schedule.type,
       schedule_value: schedule.value,
@@ -101,6 +134,11 @@ export default function JobForm({
       retain_keep_within_weekly: keepWithinWeekly || null,
       retain_keep_within_monthly: keepWithinMonthly || null,
       retain_keep_within_yearly: keepWithinYearly || null,
+      exclude_patterns: parseLines(excludePatterns),
+      exclude_caches: excludeCaches,
+      tags: parseCsv(tagsText),
+      compression: compression || null,
+      timeout_hours: timeoutHoursText ? parseInt(timeoutHoursText) : null,
       check_enabled: checkEnabled,
       check_mode: checkMode || null,
       check_subset_percent: checkSubsetPercent ? parseInt(checkSubsetPercent) : null,
@@ -179,6 +217,23 @@ export default function JobForm({
                 in your docker compose.
               </p>
             )}
+          </div>
+
+          <div>
+            <label htmlFor="source-subpath" className="block text-sm font-medium mb-1">
+              Subfolder <span className="text-gray-500 text-xs">(optional)</span>
+            </label>
+            <input
+              id="source-subpath"
+              type="text"
+              value={sourceSubpath}
+              onChange={(e) => setSourceSubpath(e.target.value)}
+              placeholder="e.g. photos"
+              className="border rounded px-2 py-1 text-sm w-full"
+            />
+            <p className="text-gray-500 text-xs mt-1">
+              Back up a single folder inside the source mount. No slashes — just the folder name.
+            </p>
           </div>
 
           <div>
@@ -436,10 +491,93 @@ export default function JobForm({
         )}
       </section>
 
-      {/* Backup Options section (collapsible, content always in DOM for accessibility) */}
       <section>
         <h2 className="text-base font-semibold mb-3">Backup Options</h2>
-        <p className="text-sm text-gray-500">Exclude patterns, tags, compression, and more.</p>
+        <div className="space-y-3">
+          <div>
+            <label htmlFor="exclude-patterns" className="block text-sm font-medium mb-1">
+              Exclude patterns
+            </label>
+            <textarea
+              id="exclude-patterns"
+              value={excludePatterns}
+              onChange={(e) => setExcludePatterns(e.target.value)}
+              rows={3}
+              placeholder={'*.tmp\nnode_modules/'}
+              className="border rounded px-2 py-1 text-sm w-full font-mono"
+            />
+            <p className="text-gray-500 text-xs mt-1">
+              One pattern per line. Restic glob syntax (e.g. <code>*.log</code>, <code>cache/</code>
+              ).
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input
+              id="exclude-caches"
+              type="checkbox"
+              checked={excludeCaches}
+              onChange={(e) => setExcludeCaches(e.target.checked)}
+            />
+            <label htmlFor="exclude-caches" className="text-sm font-medium">
+              Exclude caches (folders containing a <code>CACHEDIR.TAG</code>)
+            </label>
+          </div>
+
+          <div>
+            <label htmlFor="job-tags" className="block text-sm font-medium mb-1">
+              Tags
+            </label>
+            <input
+              id="job-tags"
+              type="text"
+              value={tagsText}
+              onChange={(e) => setTagsText(e.target.value)}
+              placeholder="daily, important"
+              className="border rounded px-2 py-1 text-sm w-full"
+            />
+            <p className="text-gray-500 text-xs mt-1">
+              Comma-separated. Applied to each snapshot, useful for filtering with{' '}
+              <code>restic snapshots --tag</code>.
+            </p>
+          </div>
+
+          <div>
+            <label htmlFor="job-compression" className="block text-sm font-medium mb-1">
+              Compression
+            </label>
+            <select
+              id="job-compression"
+              value={compression}
+              onChange={(e) => setCompression(e.target.value)}
+              className="border rounded px-2 py-1 text-sm w-full bg-background"
+            >
+              <option value="">Default (auto)</option>
+              <option value="auto">auto</option>
+              <option value="off">off</option>
+              <option value="max">max</option>
+            </select>
+          </div>
+
+          <div>
+            <label htmlFor="job-timeout-hours" className="block text-sm font-medium mb-1">
+              Timeout (hours)
+            </label>
+            <input
+              id="job-timeout-hours"
+              type="number"
+              min={1}
+              value={timeoutHoursText}
+              onChange={(e) => setTimeoutHoursText(e.target.value)}
+              placeholder="24"
+              className="border rounded px-2 py-1 text-sm w-full"
+            />
+            <p className="text-gray-500 text-xs mt-1">
+              Kill the backup if it runs longer than this. Leave blank to use the default from
+              Settings.
+            </p>
+          </div>
+        </div>
       </section>
 
       {/* Verification section (content always in DOM so tests can interact) */}

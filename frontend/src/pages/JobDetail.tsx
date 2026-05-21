@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
+import JobForm from '../components/JobForm'
 import RunStatusBadge from '../components/RunStatusBadge'
 import * as api from '../lib/api'
 import type { BackupRun } from '../lib/types'
@@ -14,10 +15,13 @@ function shouldPoll(runs: BackupRun[]): boolean {
 export default function JobDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [tab, setTab] = useState<Tab>('runs')
   const [runError, setRunError] = useState<string | null>(null)
   const [unlockOutput, setUnlockOutput] = useState<string | null>(null)
   const [unlockError, setUnlockError] = useState<string | null>(null)
+  const [isEditing, setIsEditing] = useState(false)
+  const [editError, setEditError] = useState<string | null>(null)
 
   const { data: job, error: jobError } = useQuery({
     queryKey: ['job', id],
@@ -33,6 +37,17 @@ export default function JobDetail() {
   const { data: snapshots } = useQuery({
     queryKey: ['jobSnapshots', id],
     queryFn: () => api.getJobSnapshots(id ?? ''),
+  })
+
+  // Mounts feed the source/destination dropdowns in the edit form. Fetched
+  // unconditionally so the data is ready the moment the user clicks Edit.
+  const { data: sourceMounts } = useQuery({
+    queryKey: ['mounts', 'sources'],
+    queryFn: api.listSourceMounts,
+  })
+  const { data: destinationMounts } = useQuery({
+    queryKey: ['mounts', 'destinations'],
+    queryFn: api.listDestinationMounts,
   })
 
   if (jobError) {
@@ -100,7 +115,16 @@ export default function JobDetail() {
         <button onClick={handleRunNow} className="bg-blue-600 text-white px-3 py-1 rounded text-sm">
           Run Now
         </button>
-        <button className="border px-3 py-1 rounded text-sm">Edit</button>
+        <button
+          onClick={() => {
+            setEditError(null)
+            setIsEditing((v) => !v)
+          }}
+          aria-pressed={isEditing}
+          className="border px-3 py-1 rounded text-sm"
+        >
+          {isEditing ? 'Cancel Edit' : 'Edit'}
+        </button>
         <button
           onClick={handleUnlock}
           disabled={unlockDisabled}
@@ -113,6 +137,37 @@ export default function JobDetail() {
       {runError && <p className="text-red-600 text-sm">{runError}</p>}
       {unlockOutput && <p className="text-sm text-green-700">Output: {unlockOutput}</p>}
       {unlockError && <p className="text-sm text-red-600">{unlockError}</p>}
+
+      {isEditing && (
+        <div className="space-y-3 border-t border-b border-border py-4">
+          {editError && (
+            <div className="bg-red-50 border border-red-200 rounded p-3 text-sm text-red-700">
+              {editError}
+            </div>
+          )}
+          <JobForm
+            job={job}
+            sourceMounts={sourceMounts ?? []}
+            destinationMounts={destinationMounts ?? []}
+            onSubmit={async (data) => {
+              setEditError(null)
+              try {
+                await api.updateJob(job.id, data)
+                // Pull a fresh copy so the header + tabs reflect the change.
+                await queryClient.invalidateQueries({ queryKey: ['job', id] })
+                setIsEditing(false)
+              } catch (err: unknown) {
+                const detail = (err as { data?: { detail?: string } }).data?.detail
+                setEditError(detail || 'Failed to save changes.')
+              }
+            }}
+            onCancel={() => {
+              setEditError(null)
+              setIsEditing(false)
+            }}
+          />
+        </div>
+      )}
 
       <div role="tablist" className="flex gap-2 border-b">
         <button
