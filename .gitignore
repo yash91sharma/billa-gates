@@ -30,6 +30,7 @@ htmlcov/
 .dmypy.json
 dmypy.json
 .hypothesis/
+.ruff_cache/
 
 # Alembic — keep versions/ directory but ignore auto-generated leftovers
 # (versions/*.py files are intentionally tracked)
@@ -76,3 +77,5 @@ Thumbs.db
 CLAUDE.md
 GEMINI.md
 .claude/
+
+gaps.md
