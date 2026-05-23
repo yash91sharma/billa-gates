@@ -13,9 +13,11 @@ import { render } from '@testing-library/react'
 import { page } from '@vitest/browser/context'
 import { afterEach, test } from 'vitest'
 
+import FieldLabel from '../components/FieldLabel'
 import RunStatusBadge from '../components/RunStatusBadge'
 import ScheduleInput from '../components/ScheduleInput'
 import SnapshotList from '../components/SnapshotList'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../components/ui/tooltip'
 import type { Snapshot } from '../lib/types'
 
 // All paths are relative to this test file; ../../screenshots resolves to
@@ -84,6 +86,66 @@ test('SnapshotList - empty', async () => {
   const result = render(<SnapshotList snapshots={[]} />)
   cleanup = result.unmount
   await page.screenshot({ path: `${OUT}/SnapshotList--empty.png` })
+})
+
+// ── Tooltip — opened, with FieldLabel for context ────────────────────────────
+
+test('FieldLabel - tooltip open', async () => {
+  // Render the field label next to a real input, with the tooltip forced open
+  // so the new styling (opaque popover, border, shadow) is captured along with
+  // the full help structure: description, Options, Default, Example.
+  const result = render(
+    <TooltipProvider>
+      <div style={{ padding: 80 }}>
+        <Tooltip defaultOpen>
+          <TooltipTrigger asChild>
+            <button type="button" aria-label="More info">
+              ⓘ
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>
+            <p>
+              Options: auto | max | off. <code>auto</code> compresses compressible data.{' '}
+              <code>max</code> tries harder but is slower. <code>off</code> disables compression.
+              Default: auto.
+            </p>
+            <p>
+              <span style={{ fontWeight: 600 }}>Example:</span> auto
+            </p>
+          </TooltipContent>
+        </Tooltip>
+      </div>
+    </TooltipProvider>
+  )
+  cleanup = result.unmount
+  await page.screenshot({ path: `${OUT}/Tooltip--open.png` })
+})
+
+test('FieldLabel - row preview', async () => {
+  // Just the label row composition: label + (optional) chip + info icon.
+  const result = render(
+    <TooltipProvider>
+      <div style={{ padding: 24, width: 360 }}>
+        <FieldLabel
+          htmlFor="example-field"
+          help={{
+            label: 'Keep Last',
+            optional: true,
+            description: 'Keep the N most recent snapshots regardless of age.',
+            example: '5',
+          }}
+        />
+        <input
+          id="example-field"
+          type="number"
+          aria-describedby="example-field-help"
+          className="border rounded px-2 py-1 text-sm w-full"
+        />
+      </div>
+    </TooltipProvider>
+  )
+  cleanup = result.unmount
+  await page.screenshot({ path: `${OUT}/FieldLabel--row.png` })
 })
 
 test('SnapshotList - populated', async () => {

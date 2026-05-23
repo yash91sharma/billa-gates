@@ -302,7 +302,9 @@ describe('JobForm', () => {
       await user.click(screen.getByLabelText(/enable.*check/i))
       await user.selectOptions(screen.getByLabelText(/check mode/i), 'subset')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      expect(screen.getByText(/percent.*required|subset_percent/i)).toBeInTheDocument()
+      // Match the exact validation error string emitted by the form, since the
+      // word "required" also appears in the tooltip text for this field.
+      expect(screen.getByText(/subset_percent is required/i)).toBeInTheDocument()
       expect(onSubmit).not.toHaveBeenCalled()
     })
   })
@@ -528,6 +530,51 @@ describe('JobForm', () => {
         expect(screen.getByLabelText(re)).toHaveAccessibleDescription(/example/i)
       }
     })
+
+    // The user asked tooltips to clearly communicate the "default" value when
+    // a field has one. Every entry below describes a field whose blank/unchecked
+    // state has a real semantic meaning the user should know about.
+    const fieldsWithDefaults: Array<{ label: RegExp; defaultMatcher: RegExp }> = [
+      { label: /^enabled$/i, defaultMatcher: /default:\s*on/i },
+      { label: /^exclude caches$/i, defaultMatcher: /default:\s*off/i },
+      { label: /^one file system$/i, defaultMatcher: /default:\s*off/i },
+      { label: /^no scan$/i, defaultMatcher: /default:\s*off/i },
+      { label: /^compression$/i, defaultMatcher: /default:\s*auto/i },
+      { label: /^pack size/i, defaultMatcher: /default:\s*128/i },
+      { label: /^read concurrency$/i, defaultMatcher: /default:.*restic/i },
+      { label: /^timeout \(hours\)$/i, defaultMatcher: /default:.*global|default:.*settings/i },
+      { label: /enable.*integrity check/i, defaultMatcher: /default:\s*off/i },
+      { label: /^check timeout/i, defaultMatcher: /default:.*global|default:.*settings/i },
+    ]
+
+    it.each(fieldsWithDefaults)(
+      'field $label tooltip explicitly states its Default value',
+      async ({ label, defaultMatcher }) => {
+        await renderAndExpandAll()
+        expect(screen.getByLabelText(label)).toHaveAccessibleDescription(defaultMatcher)
+      }
+    )
+
+    // Fields whose value is one of a fixed set of choices should list the
+    // choices under an explicit "Options:" label so users know what to pick.
+    const fieldsWithEnumOptions: Array<{ label: RegExp; optionsMatcher: RegExp }> = [
+      {
+        label: /^compression$/i,
+        optionsMatcher: /options:.*auto.*max.*off|options:.*auto.*off.*max/i,
+      },
+      {
+        label: /^check mode$/i,
+        optionsMatcher: /options:.*structural.*subset.*full/i,
+      },
+    ]
+
+    it.each(fieldsWithEnumOptions)(
+      'field $label tooltip lists its Options',
+      async ({ label, optionsMatcher }) => {
+        await renderAndExpandAll()
+        expect(screen.getByLabelText(label)).toHaveAccessibleDescription(optionsMatcher)
+      }
+    )
   })
 
   describe('previously-missing design-doc fields', () => {

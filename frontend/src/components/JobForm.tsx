@@ -59,7 +59,7 @@ const HELP: Record<string, FieldHelp> = {
   enabled: {
     label: 'Enabled',
     description:
-      'When on, the scheduler runs this job on its schedule. Disabled jobs can still be run manually.',
+      'When on, the scheduler runs this job on its schedule. Disabled jobs can still be run manually. Default: on.',
   },
   keepLast: {
     label: 'Keep Last',
@@ -154,19 +154,19 @@ const HELP: Record<string, FieldHelp> = {
     label: 'Exclude caches',
     optional: true,
     description:
-      'Skip directories that contain a CACHEDIR.TAG file — the standard marker used by browsers, package managers, and build tools.',
+      'Skip directories that contain a CACHEDIR.TAG file — the standard marker used by browsers, package managers, and build tools. Default: off.',
   },
   oneFileSystem: {
     label: 'One file system',
     optional: true,
     description:
-      'Do not cross filesystem mount boundaries during backup. Useful when the source contains nested mounts you want to skip.',
+      'Do not cross filesystem mount boundaries during backup. Useful when the source contains nested mounts you want to skip. Default: off.',
   },
   noScan: {
     label: 'No scan',
     optional: true,
     description:
-      'Skip the pre-scan step that estimates the total size. The backup starts faster but no progress percentage is shown.',
+      'Skip the pre-scan step that estimates the total size. The backup starts faster but no progress percentage is shown. Default: off.',
   },
   tags: {
     label: 'Tags',
@@ -179,54 +179,55 @@ const HELP: Record<string, FieldHelp> = {
     label: 'Compression',
     optional: true,
     description:
-      '`auto` compresses compressible data (recommended). `max` tries harder but is slower. `off` disables compression entirely.',
+      'Options: auto | max | off. `auto` compresses compressible data (recommended). `max` tries harder but is slower. `off` disables compression entirely. Default: auto.',
     example: 'auto',
   },
   packSize: {
     label: 'Pack size (MiB)',
     optional: true,
     description:
-      'Internal pack file size in MiB. Leave blank for restic’s default (128). Increase for large repos to reduce the destination file count.',
+      'Internal pack file size in MiB. Increase for large repos to reduce the destination file count. Default: 128 MiB (leave blank).',
     example: '512',
   },
   readConcurrency: {
     label: 'Read concurrency',
     optional: true,
     description:
-      'Number of source files read in parallel. Leave blank for restic’s automatic default.',
+      'Number of source files read in parallel. Default: restic’s automatic value (leave blank).',
     example: '2',
   },
   timeoutHours: {
     label: 'Timeout (hours)',
     optional: true,
     description:
-      'Maximum hours the backup may run before it is killed and marked failed. Leave blank to use the global default from Settings.',
+      'Maximum hours the backup may run before it is killed and marked failed. Default: the global value from Settings (leave blank).',
     example: '12',
   },
   checkEnabled: {
     label: 'Enable integrity check',
     optional: true,
-    description: 'Run `restic check` after every successful backup to verify repository integrity.',
+    description:
+      'Run `restic check` after every successful backup to verify repository integrity. Default: off.',
   },
   checkMode: {
     label: 'Check mode',
     optional: true,
     description:
-      '`structural`: index-only check (seconds). `subset`: reads a random % of pack files (~25–30 min on 3 TB at 5%). `full`: reads every pack file (~8–11 h on 3 TB).',
+      'Options: structural | subset | full. `structural`: index-only check (seconds). `subset`: reads a random % of pack files (~25–30 min on 3 TB at 5%). `full`: reads every pack file (~8–11 h on 3 TB). No default — required when integrity check is enabled.',
     example: 'subset',
   },
   checkSubsetPercent: {
     label: 'Subset percent',
     optional: true,
     description:
-      'Percentage of pack files to read when check mode is `subset`. Range 1–100. At 5% the whole repo is covered statistically over 20 runs.',
+      'Percentage of pack files to read when check mode is `subset`. Range 1–100. At 5% the whole repo is covered statistically over 20 runs. No default — required when check mode is subset.',
     example: '5',
   },
   checkTimeoutHours: {
     label: 'Check timeout (hours)',
     optional: true,
     description:
-      'Maximum hours the integrity check may run before it is killed. A failed check is non-fatal — backup status stays success. Blank uses the global default.',
+      'Maximum hours the integrity check may run before it is killed. A failed check is non-fatal — backup status stays success. Default: the global value from Settings (leave blank).',
     example: '24',
   },
 }
