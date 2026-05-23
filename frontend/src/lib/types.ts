@@ -1,5 +1,5 @@
 export type ScheduleType = 'cron' | 'interval'
-export type RunStatus = 'running' | 'success' | 'failed' | 'skipped'
+export type RunStatus = 'running' | 'success' | 'warning' | 'failed' | 'skipped'
 export type RunReason = 'overlapping_run' | 'container_restart'
 export type TriggeredBy = 'scheduler' | 'manual'
 export type PruneStatus = 'passed' | 'failed' | 'skipped'
@@ -109,9 +109,11 @@ export interface AppSettings {
   notify_on_start: boolean
   notify_on_success: boolean
   notify_on_failure: boolean
+  notify_on_warning: boolean
   notify_on_verification: boolean
   restic_version: string | null
   default_job_timeout_hours: number
+  keep_last_runs: number
 }
 
 export interface HealthStatus {

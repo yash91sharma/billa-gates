@@ -22,6 +22,18 @@ describe('RunStatusBadge', () => {
     expect(screen.getByText('skipped')).toBeInTheDocument()
   })
 
+  it('renders "warning" text for warning status (rc=3, partial backup)', () => {
+    render(<RunStatusBadge status="warning" />)
+    expect(screen.getByText('warning')).toBeInTheDocument()
+  })
+
+  it('applies pastel amber styling for warning', () => {
+    render(<RunStatusBadge status="warning" />)
+    const badge = screen.getByText('warning')
+    expect(badge.className).toMatch(/\bbg-amber-100\b/)
+    expect(badge.className).toMatch(/\btext-amber-(800|900)\b/)
+  })
+
   it('renders "pending" text for null status (check not yet complete)', () => {
     render(<RunStatusBadge status={null} />)
     expect(screen.getByText('pending')).toBeInTheDocument()

@@ -9,8 +9,10 @@ export default function Settings() {
   const [notifyStart, setNotifyStart] = useState(false)
   const [notifySuccess, setNotifySuccess] = useState(false)
   const [notifyFailure, setNotifyFailure] = useState(false)
+  const [notifyWarning, setNotifyWarning] = useState(false)
   const [notifyVerification, setNotifyVerification] = useState(false)
   const [timeoutHours, setTimeoutHours] = useState(24)
+  const [keepLastRuns, setKeepLastRuns] = useState(100)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [ntfyMessage, setNtfyMessage] = useState<string | null>(null)
   const [oldLabel, setOldLabel] = useState('')
@@ -43,8 +45,10 @@ export default function Settings() {
       setNotifyStart(settings.notify_on_start)
       setNotifySuccess(settings.notify_on_success)
       setNotifyFailure(settings.notify_on_failure)
+      setNotifyWarning(settings.notify_on_warning)
       setNotifyVerification(settings.notify_on_verification)
       setTimeoutHours(settings.default_job_timeout_hours)
+      setKeepLastRuns(settings.keep_last_runs)
       setTimeout(() => setNtfyVisible(true), 100)
     }
   }, [settings])
@@ -82,8 +86,10 @@ export default function Settings() {
         notify_on_start: notifyStart,
         notify_on_success: notifySuccess,
         notify_on_failure: notifyFailure,
+        notify_on_warning: notifyWarning,
         notify_on_verification: notifyVerification,
         default_job_timeout_hours: timeoutHours,
+        keep_last_runs: keepLastRuns,
       })
     } catch {
       setSaveError('Error: failed to save settings.')
@@ -205,6 +211,17 @@ export default function Settings() {
               </div>
               <div className="flex items-center gap-2">
                 <input
+                  id="notify-warning"
+                  type="checkbox"
+                  checked={notifyWarning}
+                  onChange={(e) => setNotifyWarning(e.target.checked)}
+                />
+                <label htmlFor="notify-warning" className="text-sm">
+                  Notify on warning
+                </label>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
                   id="notify-verification"
                   type="checkbox"
                   checked={notifyVerification}
@@ -226,6 +243,24 @@ export default function Settings() {
                 onChange={(e) => setTimeoutHours(Number(e.target.value))}
                 className="border rounded px-2 py-1 text-sm w-24"
               />
+            </div>
+            <div>
+              <label htmlFor="keep-last-runs" className="block text-sm font-medium">
+                Keep last runs (per job)
+              </label>
+              <input
+                id="keep-last-runs"
+                type="number"
+                value={keepLastRuns}
+                onChange={(e) => setKeepLastRuns(Number(e.target.value))}
+                className="border rounded px-2 py-1 text-sm w-24"
+                min={1}
+                max={10000}
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Older run records past this count are deleted after each run. Restic snapshots are
+                not affected.
+              </p>
             </div>
           </div>
 

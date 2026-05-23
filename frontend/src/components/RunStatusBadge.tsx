@@ -13,6 +13,10 @@ const STATUS_CONFIG: Record<string, { label: string; className: string }> = {
     label: 'success',
     className: `badge-success bg-green-100 text-green-800 ${BADGE_BASE}`,
   },
+  warning: {
+    label: 'warning',
+    className: `badge-warning bg-amber-100 text-amber-800 ${BADGE_BASE}`,
+  },
   failed: {
     label: 'failed',
     className: `badge-failed bg-red-100 text-red-800 ${BADGE_BASE}`,

@@ -15,9 +15,11 @@ const makeSettings = (overrides: Partial<AppSettings> = {}): AppSettings => ({
   notify_on_start: false,
   notify_on_success: true,
   notify_on_failure: true,
+  notify_on_warning: true,
   notify_on_verification: false,
   restic_version: '0.17.3',
   default_job_timeout_hours: 24,
+  keep_last_runs: 100,
   ...overrides,
 })
 
@@ -305,6 +307,38 @@ describe('Settings', () => {
       await waitFor(() =>
         expect(screen.getByLabelText(/notify.*verif|on.*verif/i)).toBeInTheDocument()
       )
+    })
+
+    it('shows notify_on_warning checkbox', async () => {
+      renderWithProviders(<Settings />)
+      await waitFor(() =>
+        expect(screen.getByLabelText(/notify.*warning|on.*warning/i)).toBeInTheDocument()
+      )
+    })
+
+    it('reflects notify_on_warning setting', async () => {
+      vi.mocked(api.getSettings).mockResolvedValue(makeSettings({ notify_on_warning: false }))
+      renderWithProviders(<Settings />)
+      await waitFor(() => {
+        const checkbox = screen.getByLabelText(/notify.*warning|on.*warning/i)
+        expect(checkbox).not.toBeChecked()
+      })
+    })
+
+    it('shows keep_last_runs input', async () => {
+      renderWithProviders(<Settings />)
+      await waitFor(() =>
+        expect(screen.getByLabelText(/keep.*last.*run|run.*history/i)).toBeInTheDocument()
+      )
+    })
+
+    it('reflects keep_last_runs setting', async () => {
+      vi.mocked(api.getSettings).mockResolvedValue(makeSettings({ keep_last_runs: 250 }))
+      renderWithProviders(<Settings />)
+      await waitFor(() => {
+        const input = screen.getByLabelText(/keep.*last.*run|run.*history/i) as HTMLInputElement
+        expect(input.value).toBe('250')
+      })
     })
   })
 
