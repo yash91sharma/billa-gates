@@ -91,7 +91,10 @@ async def restic_backup(
         "RESTIC_CACHE_DIR": "/app/data/restic-cache",
     }
 
-    args: List[str] = ["restic", "backup"]
+    # --host is pinned to a fixed string so retention isn't silently split
+    # per container ID (each rebuild gets a new hostname, and `restic forget`
+    # groups by host+paths by default).
+    args: List[str] = ["restic", "backup", "--host", "backup-server"]
 
     # Add flags from kwargs
     if kwargs.get("exclude_patterns"):
@@ -154,15 +157,19 @@ async def restic_backup(
     # Strip password from stdout
     stdout_str = stdout_str.replace(password, "")
 
-    # Parse JSON summary from last line
+    # Parse JSON summary from last line. rc=3 is restic's "partial backup
+    # completed; snapshot was created" code — the summary line is present and
+    # must be parsed so the snapshot can be recorded as a warning run.
     summary: Optional[Dict[str, Any]] = None
     assert proc.returncode is not None
-    if proc.returncode == 0:
+    if proc.returncode in (0, 3):
         for line in reversed(stdout_str.split("\n")):
             if line.strip().startswith("{"):
                 try:
-                    summary = json.loads(line)
-                    break
+                    parsed = json.loads(line)
+                    if parsed.get("message_type") == "summary":
+                        summary = parsed
+                        break
                 except json.JSONDecodeError:
                     pass
 
@@ -216,7 +223,9 @@ async def restic_forget_prune(
         "RESTIC_CACHE_DIR": "/app/data/restic-cache",
     }
 
-    args: List[str] = ["restic", "forget"]
+    # --group-by paths so retention applies across container rebuilds
+    # (default grouping includes host, which is the container ID).
+    args: List[str] = ["restic", "forget", "--group-by", "paths"]
 
     # Map retention_flags kwargs to CLI arguments
     flag_map: Dict[str, str] = {

@@ -42,6 +42,7 @@ class ScheduleType(str, Enum):
 class RunStatus(str, Enum):
     running = "running"
     success = "success"
+    warning = "warning"
     failed = "failed"
     skipped = "skipped"
 
@@ -248,6 +249,9 @@ class AppSettings(Base):
     notify_on_failure: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True
     )
+    notify_on_warning: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
     notify_on_verification: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True
     )
@@ -255,3 +259,6 @@ class AppSettings(Base):
     default_job_timeout_hours: Mapped[int] = mapped_column(
         Integer, nullable=False, default=24
     )
+    # Cap on rows kept in `backup_runs` per job — older rows are trimmed
+    # oldest-first after each run finishes. Does not affect restic snapshots.
+    keep_last_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=100)

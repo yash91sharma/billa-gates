@@ -179,6 +179,21 @@ async def test_backup_failure_nonzero():
     assert summary is None
 
 
+async def test_backup_rc3_returns_summary_partial_backup():
+    """restic exit code 3 means partial backup but snapshot was created. The
+    JSON summary line is present in stdout and must be parsed just like rc=0."""
+    proc = _make_process(0, stdout=BACKUP_SUMMARY)
+    proc.returncode = 3
+    proc.communicate = AsyncMock(return_value=(BACKUP_SUMMARY.encode(), b""))
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        code, stdout, stderr, summary = await restic_backup(
+            REPO, PASSWORD, "/sources/documents", timeout_seconds=3600
+        )
+    assert code == 3
+    assert summary is not None
+    assert summary["snapshot_id"]
+
+
 async def test_backup_timeout_kills_process():
     killed = {"called": False}
 
@@ -520,6 +535,47 @@ async def test_unlock_passes_correct_env():
 
 
 # ── restic_backup: flag coverage ──────────────────────────────────────────────
+
+
+async def test_backup_includes_pinned_host_flag():
+    """Every backup must run with --host backup-server so retention does not get
+    silently split across container rebuilds (each new container otherwise gets a
+    random hostname, and `restic forget --keep-last N` groups by host+paths)."""
+    proc = _make_process(0, stdout=BACKUP_SUMMARY)
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = args
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await restic_backup(REPO, PASSWORD, "/sources/documents", timeout_seconds=3600)
+
+    args_list = list(captured["args"])
+    assert "--host" in args_list
+    host_idx = args_list.index("--host")
+    assert args_list[host_idx + 1] == "backup-server"
+
+
+async def test_forget_prune_includes_group_by_paths():
+    """`restic forget` must use --group-by paths so retention applies regardless
+    of which container hostname wrote the snapshot."""
+    proc = _make_process(0)
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = args
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await restic_forget_prune(
+            REPO, PASSWORD, timeout_seconds=3600, retain_keep_last=5
+        )
+
+    args_list = list(captured["args"])
+    assert "--group-by" in args_list
+    gb_idx = args_list.index("--group-by")
+    assert args_list[gb_idx + 1] == "paths"
 
 
 async def test_backup_json_flag_included():

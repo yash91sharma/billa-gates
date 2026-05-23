@@ -18,8 +18,10 @@ class SettingsUpdate(BaseModel):
     notify_on_start: bool = True
     notify_on_success: bool = True
     notify_on_failure: bool = True
+    notify_on_warning: bool = True
     notify_on_verification: bool = True
     default_job_timeout_hours: int = Field(24, ge=1, le=168)
+    keep_last_runs: int = Field(100, ge=1, le=10000)
 
     @field_validator("ntfy_server_url")
     @classmethod
@@ -57,8 +59,10 @@ class SettingsResponse(BaseModel):
     notify_on_start: bool
     notify_on_success: bool
     notify_on_failure: bool
+    notify_on_warning: bool
     notify_on_verification: bool
     default_job_timeout_hours: int
+    keep_last_runs: int
     restic_version: Optional[str] = None
 
 

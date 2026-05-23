@@ -1,7 +1,8 @@
 import asyncio
+import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Set, cast
+from typing import Any, Dict, List, Optional, Set, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,6 +26,30 @@ logger = get_logger(__name__)
 
 active_jobs: Set[uuid.UUID] = set()
 job_locks: Dict[uuid.UUID, asyncio.Lock] = {}
+
+
+def _extract_failed_items(backup_stdout: str) -> List[str]:
+    """Pull per-file error messages out of restic's --json output stream so
+    the run record can show *which* files failed, not just that something did.
+    """
+    items: List[str] = []
+    for line in backup_stdout.split("\n"):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("message_type") == "error":
+            err = obj.get("error", {})
+            msg = err.get("message") if isinstance(err, dict) else str(err)
+            item = obj.get("item")
+            if item:
+                items.append(f"{item}: {msg}")
+            elif msg:
+                items.append(str(msg))
+    return items
 
 
 async def run_backup(job_id: uuid.UUID, run_id: Optional[uuid.UUID] = None) -> None:
@@ -143,6 +168,7 @@ async def run_backup(job_id: uuid.UUID, run_id: Optional[uuid.UUID] = None) -> N
                     "notify_on_start": settings_obj.notify_on_start,
                     "notify_on_success": settings_obj.notify_on_success,
                     "notify_on_failure": settings_obj.notify_on_failure,
+                    "notify_on_warning": settings_obj.notify_on_warning,
                     "notify_on_verification": settings_obj.notify_on_verification,
                     "default_job_timeout_hours": settings_obj.default_job_timeout_hours,
                 }
@@ -256,6 +282,10 @@ async def run_backup(job_id: uuid.UUID, run_id: Optional[uuid.UUID] = None) -> N
         }
 
         backup_success: bool = False
+        # rc=3 means restic ran but some files couldn't be read; the snapshot
+        # was still saved. We treat it as success-with-warnings: prune + sync
+        # still run, but the final status is `warning` (not `success`).
+        backup_warning: bool = False
         summary: Optional[Dict[str, Any]] = None
         stdout: str = ""
 
@@ -273,6 +303,24 @@ async def run_backup(job_id: uuid.UUID, run_id: Optional[uuid.UUID] = None) -> N
                     f"job_id={job_id} run_id={current_run_id} step=backup_execution "
                     f"status=success"
                 )
+            elif rc == 3:
+                backup_success = True
+                backup_warning = True
+                failed_items = _extract_failed_items(stdout)
+                logger.warning(
+                    f"job_id={job_id} run_id={current_run_id} step=backup_execution "
+                    f"status=warning rc=3 failed_items={len(failed_items)}"
+                )
+                async with factory() as s:
+                    warn_run: BackupRun | None = await s.get(
+                        BackupRun, str(current_run_id)
+                    )
+                    if warn_run:
+                        warn_run.error_output = (
+                            "Partial backup: some files could not be read.\n"
+                            + "\n".join(failed_items)
+                        )
+                        await s.commit()
             else:
                 logger.error(
                     f"job_id={job_id} run_id={current_run_id} step=backup_execution "
@@ -477,7 +525,9 @@ async def run_backup(job_id: uuid.UUID, run_id: Optional[uuid.UUID] = None) -> N
             if final_run:
                 final_status: Any = final_run.status
                 if final_status == RunStatus.running:
-                    final_run.status = RunStatus.success
+                    final_run.status = (
+                        RunStatus.warning if backup_warning else RunStatus.success
+                    )
                 final_run.finished_at = now
                 now_naive: datetime = now.replace(tzinfo=None)
                 duration_secs: int = int(
@@ -505,6 +555,20 @@ async def run_backup(job_id: uuid.UUID, run_id: Optional[uuid.UUID] = None) -> N
                     ntfy_topic_send,
                     f"Backup succeeded: {job.name}",
                     msg,
+                    token=cast(str | None, settings_dict.get("ntfy_token")),
+                )
+            elif final_status_notify == RunStatus.warning and settings_dict.get(
+                "notify_on_warning"
+            ):
+                warn_msg: str = (
+                    f"Duration: {final_run.duration_seconds}s — some files "
+                    f"could not be read; snapshot was still saved."
+                )
+                await send_notification(
+                    cast(str | None, settings_dict.get("ntfy_server_url")),
+                    ntfy_topic_send,
+                    f"Backup completed with warnings: {job.name}",
+                    warn_msg,
                     token=cast(str | None, settings_dict.get("ntfy_token")),
                 )
             elif final_status_notify == RunStatus.failed and settings_dict.get(
@@ -595,4 +659,41 @@ async def run_backup(job_id: uuid.UUID, run_id: Optional[uuid.UUID] = None) -> N
         # Cleanup: remove job from active set
         active_jobs.discard(job_id)
         if current_run_id is not None:
+            await _trim_run_history(factory, str(job_id))
             logger.info(f"job_id={job_id} run_id={current_run_id} backup_completed")
+
+
+async def _trim_run_history(
+    factory: async_sessionmaker[AsyncSession], job_id: str
+) -> None:
+    """Delete the oldest backup_runs rows beyond AppSettings.keep_last_runs.
+
+    Snapshots in the restic repo are untouched — this only bounds the row
+    count in the `backup_runs` table so it doesn't grow forever.
+    """
+    from sqlalchemy import select
+
+    async with factory() as s:
+        settings: AppSettings | None = await s.get(AppSettings, 1)
+        keep_n: int = settings.keep_last_runs if settings else 100
+
+        ids_newest_first = (
+            (
+                await s.execute(
+                    select(BackupRun.id)
+                    .where(BackupRun.job_id == job_id)
+                    .order_by(BackupRun.started_at.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if len(ids_newest_first) <= keep_n:
+            return
+        excess = ids_newest_first[keep_n:]
+        for old_id in excess:
+            old = await s.get(BackupRun, old_id)
+            if old is not None:
+                await s.delete(old)
+        await s.commit()
+        logger.info(f"job_id={job_id} trimmed_runs deleted={len(excess)} kept={keep_n}")

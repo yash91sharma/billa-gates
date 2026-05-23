@@ -14,8 +14,73 @@ async def test_get_settings_default_values(client):
     assert data["notify_on_start"] is True
     assert data["notify_on_success"] is True
     assert data["notify_on_failure"] is True
+    assert data["notify_on_warning"] is True
     assert data["notify_on_verification"] is True
     assert data["default_job_timeout_hours"] == 24
+
+
+async def test_get_settings_keep_last_runs_default(client):
+    resp = await client.get("/api/settings")
+    assert resp.status_code == 200
+    assert resp.json()["keep_last_runs"] == 100
+
+
+async def test_update_settings_keep_last_runs(client):
+    resp = await client.put(
+        "/api/settings",
+        json={
+            "ntfy_server_url": "https://ntfy.sh",
+            "ntfy_topic": "x",
+            "ntfy_token": None,
+            "notify_on_start": True,
+            "notify_on_success": True,
+            "notify_on_failure": True,
+            "notify_on_warning": True,
+            "notify_on_verification": True,
+            "default_job_timeout_hours": 24,
+            "keep_last_runs": 50,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["keep_last_runs"] == 50
+
+
+async def test_update_settings_keep_last_runs_rejects_below_minimum(client):
+    resp = await client.put(
+        "/api/settings",
+        json={
+            "ntfy_server_url": "https://ntfy.sh",
+            "ntfy_topic": "x",
+            "ntfy_token": None,
+            "notify_on_start": True,
+            "notify_on_success": True,
+            "notify_on_failure": True,
+            "notify_on_warning": True,
+            "notify_on_verification": True,
+            "default_job_timeout_hours": 24,
+            "keep_last_runs": 0,
+        },
+    )
+    assert resp.status_code == 422
+
+
+async def test_update_settings_notify_on_warning(client):
+    resp = await client.put(
+        "/api/settings",
+        json={
+            "ntfy_server_url": "https://ntfy.sh",
+            "ntfy_topic": "x",
+            "ntfy_token": None,
+            "notify_on_start": True,
+            "notify_on_success": True,
+            "notify_on_failure": True,
+            "notify_on_warning": False,
+            "notify_on_verification": True,
+            "default_job_timeout_hours": 24,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["notify_on_warning"] is False
 
 
 async def test_get_settings_ntfy_token_masked_or_null(client):

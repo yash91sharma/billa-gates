@@ -127,9 +127,11 @@ async def test_migration_creates_all_tables():
             "notify_on_start",
             "notify_on_success",
             "notify_on_failure",
+            "notify_on_warning",
             "notify_on_verification",
             "restic_version",
             "default_job_timeout_hours",
+            "keep_last_runs",
         }
         assert expected_settings.issubset(settings_cols)
 
@@ -149,6 +151,45 @@ async def test_migration_creates_all_tables():
             for fk in inspector.get_foreign_keys("snapshots")
         ), "Missing FK: snapshots.run_id"
 
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_migration_allows_warning_status_in_backup_runs():
+    """After migration 002, `backup_runs.status` must accept the value
+    'warning' (added for restic's exit code 3 / partial-backup case)."""
+    import uuid as _uuid
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db_url = f"sqlite:///{db_path}"
+
+        cfg = Config(Path(__file__).parent.parent / "alembic.ini")
+        cfg.set_main_option("sqlalchemy.url", db_url)
+        command.upgrade(cfg, "head")
+
+        engine = sa.create_engine(db_url, echo=False)
+        with engine.begin() as conn:
+            job_id = str(_uuid.uuid4())
+            conn.execute(
+                sa.text(
+                    "INSERT INTO backup_jobs (id, name, source_label, "
+                    "destination_label, restic_password, schedule_type, "
+                    "schedule_value, enabled, exclude_caches, one_file_system, "
+                    "no_scan, check_enabled, created_at, updated_at) "
+                    "VALUES (:id, 'j', 'src', 'dst', 'pw', 'interval', '1h', "
+                    "1, 0, 0, 0, 0, '2026-01-01', '2026-01-01')"
+                ),
+                {"id": job_id},
+            )
+            conn.execute(
+                sa.text(
+                    "INSERT INTO backup_runs (id, job_id, status, "
+                    "started_at, triggered_by) VALUES "
+                    "(:id, :job_id, 'warning', '2026-01-01', 'manual')"
+                ),
+                {"id": str(_uuid.uuid4()), "job_id": job_id},
+            )
         engine.dispose()
 
 

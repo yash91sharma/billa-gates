@@ -51,8 +51,10 @@ def _settings_response(settings: AppSettings) -> dict[str, object]:
         "notify_on_start": settings.notify_on_start,
         "notify_on_success": settings.notify_on_success,
         "notify_on_failure": settings.notify_on_failure,
+        "notify_on_warning": settings.notify_on_warning,
         "notify_on_verification": settings.notify_on_verification,
         "default_job_timeout_hours": settings.default_job_timeout_hours,
+        "keep_last_runs": settings.keep_last_runs,
         "restic_version": settings.restic_version,
     }
 
@@ -89,8 +91,10 @@ async def update_settings(
     settings.notify_on_start = body.notify_on_start
     settings.notify_on_success = body.notify_on_success
     settings.notify_on_failure = body.notify_on_failure
+    settings.notify_on_warning = body.notify_on_warning
     settings.notify_on_verification = body.notify_on_verification
     settings.default_job_timeout_hours = body.default_job_timeout_hours
+    settings.keep_last_runs = body.keep_last_runs
 
     await session.commit()
     logger.info(
