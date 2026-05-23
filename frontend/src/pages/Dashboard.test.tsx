@@ -139,18 +139,40 @@ describe('Dashboard', () => {
       await waitFor(() => expect(screen.getByText('Documents Backup')).toBeInTheDocument())
     })
 
-    it('shows status badge for each run', async () => {
-      vi.mocked(api.getRecentRuns).mockResolvedValue([makeRun({ status: 'success' })])
+    it('renders separate Backup and Verification column headers', async () => {
       renderWithProviders(<Dashboard />)
-      await waitFor(() => expect(screen.getByText('success')).toBeInTheDocument())
+      await waitFor(() => {
+        expect(screen.getByRole('columnheader', { name: /^backup$/i })).toBeInTheDocument()
+        expect(screen.getByRole('columnheader', { name: /^verification$/i })).toBeInTheDocument()
+      })
     })
 
-    it('shows check_status badge alongside run status', async () => {
+    it('renders backup status and verification status in separate cells', async () => {
       vi.mocked(api.getRecentRuns).mockResolvedValue([
         makeRun({ status: 'success', check_status: 'failed' }),
       ])
       renderWithProviders(<Dashboard />)
-      await waitFor(() => expect(screen.getByText('failed')).toBeInTheDocument())
+      await waitFor(() => {
+        const row = screen.getByText('Test Job').closest('tr')!
+        const cells = row.querySelectorAll('td')
+        expect(cells[1]).toHaveTextContent('success')
+        expect(cells[2]).toHaveTextContent('failed')
+        expect(cells[1]).not.toHaveTextContent('failed')
+        expect(cells[2]).not.toHaveTextContent('success')
+      })
+    })
+
+    it('shows a placeholder in the verification cell when check_status is null', async () => {
+      vi.mocked(api.getRecentRuns).mockResolvedValue([
+        makeRun({ status: 'running', check_status: null }),
+      ])
+      renderWithProviders(<Dashboard />)
+      await waitFor(() => {
+        const row = screen.getByText('Test Job').closest('tr')!
+        const cells = row.querySelectorAll('td')
+        expect(cells[1]).toHaveTextContent('running')
+        expect(cells[2]).toHaveTextContent('—')
+      })
     })
 
     it('shows next run times per job', async () => {

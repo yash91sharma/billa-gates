@@ -85,7 +85,8 @@ export default function Dashboard() {
           <thead>
             <tr className="text-left border-b">
               <th className="py-2 pr-4">Job</th>
-              <th className="py-2 pr-4">Status</th>
+              <th className="py-2 pr-4">Backup</th>
+              <th className="py-2 pr-4">Verification</th>
               <th className="py-2 pr-4">Duration</th>
               <th className="py-2 pr-4">Started</th>
               <th className="py-2">Triggered By</th>
@@ -99,9 +100,11 @@ export default function Dashboard() {
                     {run.job_name ?? run.job_id}
                   </Link>
                 </td>
-                <td className="py-2 pr-4 flex gap-1">
+                <td className="py-2 pr-4">
                   <RunStatusBadge status={run.status} />
-                  {run.check_status && <RunStatusBadge status={run.check_status} />}
+                </td>
+                <td className="py-2 pr-4">
+                  {run.check_status ? <RunStatusBadge status={run.check_status} /> : '—'}
                 </td>
                 <td className="py-2 pr-4">
                   {run.duration_seconds != null ? `${run.duration_seconds}s` : '—'}
