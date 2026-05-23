@@ -39,7 +39,7 @@ export default function Jobs() {
   if (jobsError) {
     return (
       <div className="p-6">
-        <p className="text-red-600">Error: could not load jobs.</p>
+        <p className="text-destructive">Error: could not load jobs.</p>
       </div>
     )
   }
@@ -90,18 +90,18 @@ export default function Jobs() {
       <div className="flex justify-between items-center mb-4">
         <h1 className="text-2xl font-bold">Jobs</h1>
         <button
-          className="bg-blue-600 text-white px-4 py-2 rounded"
+          className="bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded-sm"
           onClick={() => setShowCreateForm(true)}
         >
           Create Job
         </button>
       </div>
 
-      {runError && <p className="text-red-600 mb-2">{runError}</p>}
-      {deleteError && <p className="text-red-600 mb-2">{deleteError}</p>}
+      {runError && <p className="text-destructive mb-2">{runError}</p>}
+      {deleteError && <p className="text-destructive mb-2">{deleteError}</p>}
 
       {!jobToDelete && jobs?.length === 0 && (
-        <p className="text-gray-500">No backup jobs configured yet.</p>
+        <p className="text-muted-foreground">No backup jobs configured yet.</p>
       )}
 
       {!jobToDelete && jobs && jobs.length > 0 && (
@@ -117,11 +117,11 @@ export default function Jobs() {
               <th className="py-2">Actions</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="[&>tr:nth-child(even)]:bg-muted/40">
             {jobs.map((job) => (
-              <tr key={job.id} className="border-b">
+              <tr key={job.id} className="border-b hover:bg-muted/60">
                 <td className="py-2 pr-4">
-                  <Link to={`/jobs/${job.id}`} className="text-blue-600 hover:underline">
+                  <Link to={`/jobs/${job.id}`} className="text-primary hover:underline">
                     {job.name}
                   </Link>
                 </td>
@@ -149,13 +149,13 @@ export default function Jobs() {
                 </td>
                 <td className="py-2 flex gap-2">
                   <button
-                    className="text-sm text-blue-600 hover:underline"
+                    className="text-sm text-primary hover:underline"
                     onClick={() => handleRunNow(job)}
                   >
                     Run Now
                   </button>
                   <button
-                    className="text-sm text-red-600 hover:underline"
+                    className="text-sm text-destructive hover:underline"
                     onClick={() => setJobToDelete(job)}
                   >
                     Delete
@@ -179,7 +179,7 @@ export default function Jobs() {
             </p>
             <div className="flex gap-2 justify-end">
               <button
-                className="px-4 py-2 bg-red-600 text-white rounded"
+                className="px-4 py-2 bg-destructive text-destructive-foreground hover:bg-destructive/90 rounded-sm"
                 onClick={handleConfirmDelete}
               >
                 Yes, Delete
@@ -195,7 +195,7 @@ export default function Jobs() {
       {showCreateForm && (
         <div className="mt-6 space-y-3">
           {createError && (
-            <div className="bg-red-50 border border-red-200 rounded p-3 text-sm text-red-700">
+            <div className="bg-destructive/10 border border-destructive/30 rounded-sm p-3 text-sm text-destructive">
               {createError}
             </div>
           )}

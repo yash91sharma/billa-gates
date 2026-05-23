@@ -106,13 +106,16 @@ export default function JobDetail() {
         <span
           className={
             job.enabled
-              ? 'bg-green-100 text-green-800 rounded px-2 py-0.5 text-sm'
-              : 'bg-gray-100 text-gray-600 rounded px-2 py-0.5 text-sm'
+              ? 'bg-green-100 text-green-800 rounded-sm px-2 py-0.5 text-sm'
+              : 'bg-slate-100 text-slate-600 rounded-sm px-2 py-0.5 text-sm'
           }
         >
           {job.enabled ? 'Enabled' : 'Disabled'}
         </span>
-        <button onClick={handleRunNow} className="bg-blue-600 text-white px-3 py-1 rounded text-sm">
+        <button
+          onClick={handleRunNow}
+          className="bg-primary text-primary-foreground hover:bg-primary/90 px-3 py-1 rounded-sm text-sm"
+        >
           Run Now
         </button>
         <button
@@ -134,14 +137,14 @@ export default function JobDetail() {
         </button>
       </div>
 
-      {runError && <p className="text-red-600 text-sm">{runError}</p>}
+      {runError && <p className="text-destructive text-sm">{runError}</p>}
       {unlockOutput && <p className="text-sm text-green-700">Output: {unlockOutput}</p>}
-      {unlockError && <p className="text-sm text-red-600">{unlockError}</p>}
+      {unlockError && <p className="text-sm text-destructive">{unlockError}</p>}
 
       {isEditing && (
         <div className="space-y-3 border-t border-b border-border py-4">
           {editError && (
-            <div className="bg-red-50 border border-red-200 rounded p-3 text-sm text-red-700">
+            <div className="bg-destructive/10 border border-destructive/30 rounded-sm p-3 text-sm text-destructive">
               {editError}
             </div>
           )}
@@ -174,7 +177,7 @@ export default function JobDetail() {
           role="tab"
           aria-selected={tab === 'runs'}
           onClick={() => setTab('runs')}
-          className={`px-3 py-1 text-sm ${tab === 'runs' ? 'border-b-2 border-blue-600 font-medium' : ''}`}
+          className={`px-3 py-1 text-sm ${tab === 'runs' ? 'border-b-2 border-primary text-primary font-medium' : ''}`}
         >
           Runs
         </button>
@@ -182,7 +185,7 @@ export default function JobDetail() {
           role="tab"
           aria-selected={tab === 'snapshots'}
           onClick={() => setTab('snapshots')}
-          className={`px-3 py-1 text-sm ${tab === 'snapshots' ? 'border-b-2 border-blue-600 font-medium' : ''}`}
+          className={`px-3 py-1 text-sm ${tab === 'snapshots' ? 'border-b-2 border-primary text-primary font-medium' : ''}`}
         >
           Snapshots
         </button>
@@ -190,7 +193,7 @@ export default function JobDetail() {
           role="tab"
           aria-selected={tab === 'settings'}
           onClick={() => setTab('settings')}
-          className={`px-3 py-1 text-sm ${tab === 'settings' ? 'border-b-2 border-blue-600 font-medium' : ''}`}
+          className={`px-3 py-1 text-sm ${tab === 'settings' ? 'border-b-2 border-primary text-primary font-medium' : ''}`}
         >
           Settings
         </button>
@@ -199,7 +202,7 @@ export default function JobDetail() {
       {tab === 'runs' && (
         <div>
           {(runs ?? []).length === 0 ? (
-            <p className="text-gray-500 text-sm">No runs yet.</p>
+            <p className="text-muted-foreground text-sm">No runs yet.</p>
           ) : (
             <table className="w-full text-sm">
               <thead>
@@ -210,9 +213,9 @@ export default function JobDetail() {
                   <th className="py-2">Triggered By</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="[&>tr:nth-child(even)]:bg-muted/40">
                 {(runs ?? []).map((r) => (
-                  <tr key={r.id} className="border-b">
+                  <tr key={r.id} className="border-b hover:bg-muted/60">
                     <td className="py-2 pr-4">
                       <Link to={`/runs/${r.id}`} className="hover:underline">
                         <RunStatusBadge status={r.status} />
@@ -234,7 +237,7 @@ export default function JobDetail() {
       {tab === 'snapshots' && (
         <div>
           {(snapshots ?? []).length === 0 ? (
-            <p className="text-gray-500 text-sm">No snapshots yet.</p>
+            <p className="text-muted-foreground text-sm">No snapshots yet.</p>
           ) : (
             <ul className="space-y-1 text-sm">
               {(snapshots ?? []).map((s) => (
@@ -265,7 +268,7 @@ export default function JobDetail() {
 
       <div className="mt-6">
         <h2 className="text-lg font-semibold mb-2">Restore</h2>
-        <pre className="bg-gray-50 rounded p-3 text-xs overflow-auto">
+        <pre className="bg-muted rounded-sm p-3 text-xs overflow-auto">
           {`# Restore with restic
 export RESTIC_REPOSITORY=/destinations/${job.destination_label}
 export RESTIC_PASSWORD=your-password-here

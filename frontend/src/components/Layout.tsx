@@ -52,7 +52,7 @@ export default function Layout() {
         data-expanded={expanded ? 'true' : 'false'}
         data-mobile-open={mobileOpen ? 'true' : 'false'}
         className={cn(
-          'fixed inset-y-0 left-0 z-40 border-r border-border bg-card transition-[width,transform] duration-200 ease-in-out',
+          'fixed inset-y-0 left-0 z-40 border-r border-border bg-sidebar text-sidebar-foreground transition-[width,transform] duration-200 ease-in-out',
           'md:relative md:translate-x-0',
           expanded ? 'w-60' : 'w-16',
           mobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'

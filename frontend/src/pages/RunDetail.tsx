@@ -55,13 +55,13 @@ export default function RunDetail() {
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center gap-3 flex-wrap">
-        <Link to={`/jobs/${run.job_id}`} className="text-blue-600 hover:underline font-medium">
+        <Link to={`/jobs/${run.job_id}`} className="text-primary hover:underline font-medium">
           {run.job_name ?? run.job_id}
         </Link>
         <RunStatusBadge status={run.status} />
       </div>
 
-      <div className="text-sm text-gray-600 space-y-1">
+      <div className="text-sm text-muted-foreground space-y-1">
         <div>Started: {new Date(run.started_at).toLocaleString()}</div>
         <div>Triggered by: {run.triggered_by}</div>
         {run.duration_seconds != null && (
@@ -73,19 +73,19 @@ export default function RunDetail() {
       </div>
 
       {run.reason === 'container_restart' && (
-        <div className="bg-blue-50 border border-blue-200 rounded p-3 text-sm">
+        <div className="bg-primary/10 border border-primary/30 text-foreground rounded-sm p-3 text-sm">
           This run was skipped because of a container restart.
         </div>
       )}
 
       {run.reason === 'overlapping_run' && (
-        <div className="bg-blue-50 border border-blue-200 rounded p-3 text-sm">
+        <div className="bg-primary/10 border border-primary/30 text-foreground rounded-sm p-3 text-sm">
           This run was skipped — a previous run was already running (overlapping).
         </div>
       )}
 
       {run.error_output?.includes('locked') && (
-        <div className="bg-amber-50 border border-amber-200 rounded p-3 text-sm">
+        <div className="bg-warning/15 border border-warning/40 rounded-sm p-3 text-sm">
           The repository is locked. Use the unlock button to remove the lock.
         </div>
       )}
@@ -103,29 +103,33 @@ export default function RunDetail() {
       )}
 
       {run.backup_output && (
-        <pre className="bg-gray-50 rounded p-3 text-xs overflow-auto max-h-64">
+        <pre className="bg-muted rounded-sm p-3 text-xs overflow-auto max-h-64">
           {run.backup_output}
         </pre>
       )}
 
       {run.error_output && !run.error_output.includes('locked') && (
-        <pre className="bg-red-50 rounded p-3 text-xs overflow-auto max-h-64">
+        <pre className="bg-destructive/10 text-destructive rounded-sm p-3 text-xs overflow-auto max-h-64">
           {run.error_output}
         </pre>
       )}
 
       <div className="text-sm">
-        <span className="text-gray-500 mr-2">Prune:</span>
+        <span className="text-muted-foreground mr-2">Prune:</span>
         <RunStatusBadge status={run.prune_status} />
         {run.prune_status === 'failed' && run.prune_error_output && (
-          <pre className="mt-2 bg-red-50 rounded p-2 text-xs">{run.prune_error_output}</pre>
+          <pre className="mt-2 bg-destructive/10 text-destructive rounded-sm p-2 text-xs">
+            {run.prune_error_output}
+          </pre>
         )}
       </div>
 
       <div className="text-sm">
         Verification: {run.check_status ?? '—'}
         {run.check_status === 'failed' && run.check_error_output && (
-          <pre className="mt-2 bg-red-50 rounded p-2 text-xs">{run.check_error_output}</pre>
+          <pre className="mt-2 bg-destructive/10 text-destructive rounded-sm p-2 text-xs">
+            {run.check_error_output}
+          </pre>
         )}
       </div>
     </div>

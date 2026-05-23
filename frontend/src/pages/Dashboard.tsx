@@ -28,7 +28,7 @@ export default function Dashboard() {
   if (jobsError || runsError) {
     return (
       <div className="p-6">
-        <p className="text-red-600">Error: could not load dashboard data.</p>
+        <p className="text-destructive">Error: could not load dashboard data.</p>
       </div>
     )
   }
@@ -39,7 +39,7 @@ export default function Dashboard() {
   return (
     <div className="p-6 space-y-6">
       {health && !health.scheduler_running && (
-        <div className="bg-red-100 border border-red-300 text-red-800 rounded p-4">
+        <div className="bg-destructive/10 border border-destructive/30 text-destructive rounded-sm p-4">
           Scheduler is not running. Check the container logs for details.
         </div>
       )}
@@ -47,7 +47,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-3 gap-4">
         <div className="border rounded p-4">
           <div className="text-2xl font-bold">{totalJobs}</div>
-          <div className="text-sm text-gray-500">Total Jobs</div>
+          <div className="text-sm text-muted-foreground">Total Jobs</div>
         </div>
         <div className="border rounded p-4">
           <div>{enabledCount} enabled</div>
@@ -57,7 +57,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div className="bg-yellow-50 border border-yellow-200 rounded p-3 text-sm text-yellow-800">
+      <div className="bg-warning/15 border border-warning/40 rounded-sm p-3 text-sm text-foreground">
         Note: disk space is not monitored by this application.
       </div>
 
@@ -91,11 +91,11 @@ export default function Dashboard() {
               <th className="py-2">Triggered By</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="[&>tr:nth-child(even)]:bg-muted/40">
             {(runs ?? []).map((run) => (
-              <tr key={run.id} className="border-b">
+              <tr key={run.id} className="border-b hover:bg-muted/60">
                 <td className="py-2 pr-4">
-                  <Link to={`/runs/${run.id}`} className="text-blue-600 hover:underline">
+                  <Link to={`/runs/${run.id}`} className="text-primary hover:underline">
                     {run.job_name ?? run.job_id}
                   </Link>
                 </td>

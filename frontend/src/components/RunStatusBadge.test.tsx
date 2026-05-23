@@ -32,34 +32,40 @@ describe('RunStatusBadge', () => {
     expect(screen.getByText('passed')).toBeInTheDocument()
   })
 
-  it('applies green styling for success', () => {
+  // Soft pastel pairs from the Arctic theme: bg-<tone>-100 + text-<tone>-800.
+  it('applies pastel green styling for success', () => {
     render(<RunStatusBadge status="success" />)
     const badge = screen.getByText('success')
-    expect(badge.className).toMatch(/green|success/)
+    expect(badge.className).toMatch(/\bbg-green-100\b/)
+    expect(badge.className).toMatch(/\btext-green-800\b/)
   })
 
-  it('applies red styling for failed', () => {
+  it('applies pastel red styling for failed', () => {
     render(<RunStatusBadge status="failed" />)
     const badge = screen.getByText('failed')
-    expect(badge.className).toMatch(/red|danger|failed/)
+    expect(badge.className).toMatch(/\bbg-red-100\b/)
+    expect(badge.className).toMatch(/\btext-red-800\b/)
   })
 
-  it('applies yellow/amber styling for running', () => {
+  it('applies pastel blue styling for running (Arctic-theme accent family)', () => {
     render(<RunStatusBadge status="running" />)
     const badge = screen.getByText('running')
-    expect(badge.className).toMatch(/yellow|amber|running/)
+    expect(badge.className).toMatch(/\bbg-blue-100\b/)
+    expect(badge.className).toMatch(/\btext-blue-800\b/)
   })
 
-  it('applies muted/gray styling for skipped', () => {
+  it('applies muted slate styling for skipped', () => {
     render(<RunStatusBadge status="skipped" />)
     const badge = screen.getByText('skipped')
-    expect(badge.className).toMatch(/gray|muted|skipped/)
+    expect(badge.className).toMatch(/\bbg-slate-100\b/)
+    expect(badge.className).toMatch(/\btext-slate-(600|700)\b/)
   })
 
-  it('applies muted styling for pending (null)', () => {
+  it('applies muted slate styling for pending (null)', () => {
     render(<RunStatusBadge status={null} />)
     const badge = screen.getByText('pending')
-    expect(badge.className).toMatch(/gray|muted|pending/)
+    expect(badge.className).toMatch(/\bbg-slate-100\b/)
+    expect(badge.className).toMatch(/\btext-slate-(500|600)\b/)
   })
 
   it('accepts an additional className prop', () => {

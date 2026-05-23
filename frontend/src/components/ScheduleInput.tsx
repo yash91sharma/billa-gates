@@ -102,10 +102,10 @@ export default function ScheduleInput({ value, onChange }: ScheduleInputProps) {
           onChange={handleInputChange}
           className="border rounded px-2 py-1 text-sm w-full"
         />
-        {intervalError && <p className="text-red-600 text-xs mt-1">{intervalError}</p>}
-        {cronError && <p className="text-red-600 text-xs mt-1">{cronError}</p>}
-        {intervalPreview && <p className="text-gray-500 text-xs mt-1">{intervalPreview}</p>}
-        {cronPreview && <p className="text-gray-500 text-xs mt-1">{cronPreview}</p>}
+        {intervalError && <p className="text-destructive text-xs mt-1">{intervalError}</p>}
+        {cronError && <p className="text-destructive text-xs mt-1">{cronError}</p>}
+        {intervalPreview && <p className="text-muted-foreground text-xs mt-1">{intervalPreview}</p>}
+        {cronPreview && <p className="text-muted-foreground text-xs mt-1">{cronPreview}</p>}
       </div>
     </div>
   )

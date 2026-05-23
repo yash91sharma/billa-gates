@@ -229,11 +229,11 @@ export default function Settings() {
             </div>
           </div>
 
-          {saveError && <p className="text-red-600 mt-2 text-sm">{saveError}</p>}
+          {saveError && <p className="text-destructive mt-2 text-sm">{saveError}</p>}
 
           <div className="flex gap-2 mt-4">
             <button
-              className="bg-blue-600 text-white px-4 py-2 rounded text-sm"
+              className="bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded-sm text-sm"
               onClick={handleSave}
             >
               Save
@@ -298,7 +298,7 @@ export default function Settings() {
           Rename
         </button>
         {renameResult && <p className="mt-2 text-sm text-green-700">{renameResult}</p>}
-        {renameError && <p className="mt-2 text-sm text-red-600">{renameError}</p>}
+        {renameError && <p className="mt-2 text-sm text-destructive">{renameError}</p>}
       </div>
     </div>
   )

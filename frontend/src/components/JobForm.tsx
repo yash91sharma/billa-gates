@@ -377,9 +377,9 @@ export default function JobForm({
       <form role="form" aria-label="Backup job form" onSubmit={handleSubmit} className="space-y-6">
         {/* Conflict banner */}
         {conflictingJob && (
-          <div className="bg-yellow-50 border border-yellow-200 rounded p-3 text-sm">
+          <div className="bg-warning/15 border border-warning/40 rounded-sm p-3 text-sm">
             <p>There is already a job using this source and destination.</p>
-            <a href={`/jobs/${conflictingJob.id}`} className="text-blue-600 underline">
+            <a href={`/jobs/${conflictingJob.id}`} className="text-primary underline">
               {conflictingJob.name}
             </a>
           </div>
@@ -387,14 +387,14 @@ export default function JobForm({
 
         {/* Source change warning */}
         {sourceChanged && (
-          <div className="bg-amber-50 border border-amber-200 rounded p-3 text-sm">
+          <div className="bg-warning/15 border border-warning/40 rounded-sm p-3 text-sm">
             Changing the source label will redirect future backups to the new source path.
           </div>
         )}
 
         {/* Submit error */}
         {submitError && (
-          <div className="bg-red-50 border border-red-200 rounded p-3 text-sm text-red-700">
+          <div className="bg-destructive/10 border border-destructive/30 rounded-sm p-3 text-sm text-destructive">
             {submitError}
           </div>
         )}
@@ -437,7 +437,7 @@ export default function JobForm({
                 ))}
               </select>
               {sourceMounts.length === 0 && (
-                <p className="text-gray-500 text-xs mt-1">
+                <p className="text-muted-foreground text-xs mt-1">
                   No source mounts configured. Add a volume under{' '}
                   <code>/sources/&lt;label&gt;</code> in your docker compose.
                 </p>
@@ -480,18 +480,18 @@ export default function JobForm({
                 ))}
               </select>
               {!isEdit && destinationMounts.length === 0 && (
-                <p className="text-gray-500 text-xs mt-1">
+                <p className="text-muted-foreground text-xs mt-1">
                   No destination mounts configured. Add a volume under{' '}
                   <code>/destinations/&lt;label&gt;</code> in your docker compose.
                 </p>
               )}
               {isEdit && (
                 <>
-                  <p className="text-gray-500 text-xs mt-1">
+                  <p className="text-muted-foreground text-xs mt-1">
                     This cannot be changed after creation.
                   </p>
-                  <p className="text-gray-500 text-xs">
-                    <a href="/settings" className="text-blue-600 underline">
+                  <p className="text-muted-foreground text-xs">
+                    <a href="/settings" className="text-primary underline">
                       Rename destination tool
                     </a>
                     {' — use this if remounted with a new label'}
@@ -512,13 +512,13 @@ export default function JobForm({
                 className={inputCls}
               />
               {passwordLocked ? (
-                <p className="text-gray-500 text-xs mt-1">
+                <p className="text-muted-foreground text-xs mt-1">
                   🔒 Password cannot change after the first successful backup. To rotate, use{' '}
                   <code>restic key</code>.
                 </p>
               ) : (
                 isEdit && (
-                  <p className="text-gray-500 text-xs mt-1">
+                  <p className="text-muted-foreground text-xs mt-1">
                     No backups run yet — you can still change this password.
                   </p>
                 )
@@ -827,7 +827,7 @@ export default function JobForm({
 
         <button
           type="submit"
-          className="px-4 py-2 bg-blue-600 text-white rounded text-sm font-medium"
+          className="px-4 py-2 bg-primary text-primary-foreground hover:bg-primary/90 rounded-sm text-sm font-medium"
         >
           {isEdit ? 'Save' : 'Create'}
         </button>
