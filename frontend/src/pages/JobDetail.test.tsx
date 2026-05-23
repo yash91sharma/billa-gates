@@ -169,6 +169,17 @@ describe('JobDetail', () => {
       renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
       await waitFor(() => expect(screen.getByText('success')).toBeInTheDocument())
     })
+
+    it('explains the run-history cap and clarifies snapshots are separate', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([makeRun({ id: 'run-1' })])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      // The Runs-tab note must reference the global cap setting and call out
+      // that the per-job Retention Policy controls snapshot retention.
+      await waitFor(() =>
+        expect(screen.getByText(/run history is capped.*keep last runs/i)).toBeInTheDocument()
+      )
+      expect(screen.getByText(/retention policy/i)).toBeInTheDocument()
+    })
   })
 
   describe('Unlock button', () => {

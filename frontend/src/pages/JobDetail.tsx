@@ -201,6 +201,11 @@ export default function JobDetail() {
 
       {tab === 'runs' && (
         <div>
+          <p className="text-xs text-muted-foreground mb-2">
+            Run history is capped by the global "Keep last runs" setting (default 100). Older run
+            records are deleted automatically after each run. Backup snapshots in the repo are not
+            affected — those are governed by this job's Retention Policy.
+          </p>
           {(runs ?? []).length === 0 ? (
             <p className="text-muted-foreground text-sm">No runs yet.</p>
           ) : (

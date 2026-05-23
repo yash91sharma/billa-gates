@@ -428,6 +428,15 @@ describe('JobForm', () => {
       expect(screen.getByLabelText(/keep last/i)).toBeVisible()
     })
 
+    it('explains that retention controls restic snapshots, not run history', async () => {
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={vi.fn()} />)
+      await user.click(screen.getByText(/retention policy/i))
+      // The note must reference run history + the global "Keep last runs"
+      // setting so the user knows where the other knob lives.
+      expect(screen.getByText(/run history.*keep last runs/i)).toBeInTheDocument()
+    })
+
     it('shows Backup Options section', () => {
       render(<JobForm onSubmit={vi.fn()} />)
       expect(screen.getByText(/backup options/i)).toBeInTheDocument()

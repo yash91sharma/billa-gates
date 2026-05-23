@@ -554,6 +554,11 @@ export default function JobForm({
           </button>
           {retentionExpanded && (
             <div className="space-y-3 mt-3">
+              <p className="text-xs text-muted-foreground">
+                Controls how many backup snapshots this job keeps in the repository (via{' '}
+                <code>restic forget</code>). This is separate from run history, which is capped
+                globally on the Settings page under "Keep last runs".
+              </p>
               {(
                 [
                   ['retain-keep-last', keepLast, setKeepLast, HELP.keepLast],
