@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import type { BackupJob } from '../lib/types'
+import FieldLabel, { helpId, type FieldHelp } from './FieldLabel'
 import ScheduleInput, { type ScheduleValue } from './ScheduleInput'
+import { TooltipProvider } from './ui/tooltip'
 
 // Split a textarea of "one item per line" into a string array, or null when empty.
 // Blank lines are dropped so a stray newline doesn't become a "" pattern.
@@ -20,6 +22,216 @@ function parseCsv(text: string): string[] | null {
     .filter(Boolean)
   return items.length === 0 ? null : items
 }
+
+// Help text for every form field — kept in one place so labels, optional
+// flags, descriptions, and examples are easy to read and update.
+const HELP: Record<string, FieldHelp> = {
+  name: {
+    label: 'Name',
+    description: 'Friendly name shown in the dashboard, notifications, and logs.',
+    example: 'Documents — Daily',
+  },
+  source: {
+    label: 'Source',
+    description:
+      'Mounted folder to back up. Sources come from /sources/<label> in docker-compose and are mounted read-only.',
+    example: 'documents',
+  },
+  subfolder: {
+    label: 'Subfolder',
+    optional: true,
+    description:
+      'Back up a single direct subfolder of the source mount instead of the whole mount. No slashes — one level only.',
+    example: 'photos',
+  },
+  destination: {
+    label: 'Destination',
+    description:
+      'Where to store the restic repository. Permanent — the destination becomes part of the repo path on disk and cannot be changed later.',
+    example: 'main',
+  },
+  password: {
+    label: 'Password',
+    description:
+      'Encryption password for this job’s restic repository. Cannot be changed after the first successful backup — use `restic key add/remove` to rotate.',
+    example: 'a long, unique passphrase',
+  },
+  enabled: {
+    label: 'Enabled',
+    description:
+      'When on, the scheduler runs this job on its schedule. Disabled jobs can still be run manually.',
+  },
+  keepLast: {
+    label: 'Keep Last',
+    optional: true,
+    description: 'Keep the N most recent snapshots regardless of age. Restic flag: --keep-last.',
+    example: '5',
+  },
+  keepHourly: {
+    label: 'Keep Hourly',
+    optional: true,
+    description:
+      'Keep the most recent snapshot for each of the last N hours that contain a snapshot.',
+    example: '24',
+  },
+  keepDaily: {
+    label: 'Keep Daily',
+    optional: true,
+    description:
+      'Keep the most recent snapshot for each of the last N days that contain a snapshot.',
+    example: '7',
+  },
+  keepWeekly: {
+    label: 'Keep Weekly',
+    optional: true,
+    description:
+      'Keep the most recent snapshot for each of the last N weeks that contain a snapshot.',
+    example: '4',
+  },
+  keepMonthly: {
+    label: 'Keep Monthly',
+    optional: true,
+    description:
+      'Keep the most recent snapshot for each of the last N months that contain a snapshot.',
+    example: '12',
+  },
+  keepYearly: {
+    label: 'Keep Yearly',
+    optional: true,
+    description:
+      'Keep the most recent snapshot for each of the last N years that contain a snapshot.',
+    example: '5',
+  },
+  keepWithin: {
+    label: 'Keep Within',
+    optional: true,
+    description: 'Keep every snapshot taken within this window. Format: Nh, Nd, Nm, or Ny.',
+    example: '30d',
+  },
+  keepWithinHourly: {
+    label: 'Keep Within Hourly',
+    optional: true,
+    description: 'Keep one snapshot per hour for the snapshots within this window.',
+    example: '48h',
+  },
+  keepWithinDaily: {
+    label: 'Keep Within Daily',
+    optional: true,
+    description: 'Keep one snapshot per day for the snapshots within this window.',
+    example: '14d',
+  },
+  keepWithinWeekly: {
+    label: 'Keep Within Weekly',
+    optional: true,
+    description: 'Keep one snapshot per week for the snapshots within this window.',
+    example: '8w',
+  },
+  keepWithinMonthly: {
+    label: 'Keep Within Monthly',
+    optional: true,
+    description: 'Keep one snapshot per month for the snapshots within this window.',
+    example: '6m',
+  },
+  keepWithinYearly: {
+    label: 'Keep Within Yearly',
+    optional: true,
+    description: 'Keep one snapshot per year for the snapshots within this window.',
+    example: '2y',
+  },
+  excludePatterns: {
+    label: 'Exclude patterns',
+    optional: true,
+    description: 'Glob patterns to skip. One per line.',
+    example: 'node_modules/, *.tmp, .DS_Store',
+  },
+  excludeIfPresent: {
+    label: 'Exclude if present',
+    optional: true,
+    description: 'Skip a directory when it contains a file with this name. One filename per line.',
+    example: '.nobackup',
+  },
+  excludeCaches: {
+    label: 'Exclude caches',
+    optional: true,
+    description:
+      'Skip directories that contain a CACHEDIR.TAG file — the standard marker used by browsers, package managers, and build tools.',
+  },
+  oneFileSystem: {
+    label: 'One file system',
+    optional: true,
+    description:
+      'Do not cross filesystem mount boundaries during backup. Useful when the source contains nested mounts you want to skip.',
+  },
+  noScan: {
+    label: 'No scan',
+    optional: true,
+    description:
+      'Skip the pre-scan step that estimates the total size. The backup starts faster but no progress percentage is shown.',
+  },
+  tags: {
+    label: 'Tags',
+    optional: true,
+    description:
+      'Labels attached to each snapshot — useful for filtering with `restic snapshots --tag`. Comma-separated.',
+    example: 'daily, important',
+  },
+  compression: {
+    label: 'Compression',
+    optional: true,
+    description:
+      '`auto` compresses compressible data (recommended). `max` tries harder but is slower. `off` disables compression entirely.',
+    example: 'auto',
+  },
+  packSize: {
+    label: 'Pack size (MiB)',
+    optional: true,
+    description:
+      'Internal pack file size in MiB. Leave blank for restic’s default (128). Increase for large repos to reduce the destination file count.',
+    example: '512',
+  },
+  readConcurrency: {
+    label: 'Read concurrency',
+    optional: true,
+    description:
+      'Number of source files read in parallel. Leave blank for restic’s automatic default.',
+    example: '2',
+  },
+  timeoutHours: {
+    label: 'Timeout (hours)',
+    optional: true,
+    description:
+      'Maximum hours the backup may run before it is killed and marked failed. Leave blank to use the global default from Settings.',
+    example: '12',
+  },
+  checkEnabled: {
+    label: 'Enable integrity check',
+    optional: true,
+    description: 'Run `restic check` after every successful backup to verify repository integrity.',
+  },
+  checkMode: {
+    label: 'Check mode',
+    optional: true,
+    description:
+      '`structural`: index-only check (seconds). `subset`: reads a random % of pack files (~25–30 min on 3 TB at 5%). `full`: reads every pack file (~8–11 h on 3 TB).',
+    example: 'subset',
+  },
+  checkSubsetPercent: {
+    label: 'Subset percent',
+    optional: true,
+    description:
+      'Percentage of pack files to read when check mode is `subset`. Range 1–100. At 5% the whole repo is covered statistically over 20 runs.',
+    example: '5',
+  },
+  checkTimeoutHours: {
+    label: 'Check timeout (hours)',
+    optional: true,
+    description:
+      'Maximum hours the integrity check may run before it is killed. A failed check is non-fatal — backup status stays success. Blank uses the global default.',
+    example: '24',
+  },
+}
+
+const inputCls = 'border rounded px-2 py-1 text-sm w-full'
 
 export interface JobFormProps {
   job?: BackupJob
@@ -69,12 +281,20 @@ export default function JobForm({
   const [keepWithinMonthly, setKeepWithinMonthly] = useState(job?.retain_keep_within_monthly ?? '')
   const [keepWithinYearly, setKeepWithinYearly] = useState(job?.retain_keep_within_yearly ?? '')
 
-  // Backup option fields. Lists are stored as text in local state and serialised
-  // back to arrays on submit so the input controls stay simple.
+  // Backup option fields
   const [excludePatterns, setExcludePatterns] = useState((job?.exclude_patterns ?? []).join('\n'))
+  const [excludeIfPresent, setExcludeIfPresent] = useState(
+    (job?.exclude_if_present ?? []).join('\n')
+  )
   const [excludeCaches, setExcludeCaches] = useState(job?.exclude_caches ?? false)
+  const [oneFileSystem, setOneFileSystem] = useState(job?.one_file_system ?? false)
+  const [noScan, setNoScan] = useState(job?.no_scan ?? false)
   const [tagsText, setTagsText] = useState((job?.tags ?? []).join(', '))
   const [compression, setCompression] = useState<string>(job?.compression ?? '')
+  const [packSizeText, setPackSizeText] = useState(job?.pack_size?.toString() ?? '')
+  const [readConcurrencyText, setReadConcurrencyText] = useState(
+    job?.read_concurrency?.toString() ?? ''
+  )
   const [timeoutHoursText, setTimeoutHoursText] = useState(job?.timeout_hours?.toString() ?? '')
 
   // Verification fields
@@ -135,9 +355,14 @@ export default function JobForm({
       retain_keep_within_monthly: keepWithinMonthly || null,
       retain_keep_within_yearly: keepWithinYearly || null,
       exclude_patterns: parseLines(excludePatterns),
+      exclude_if_present: parseLines(excludeIfPresent),
       exclude_caches: excludeCaches,
+      one_file_system: oneFileSystem,
+      no_scan: noScan,
       tags: parseCsv(tagsText),
       compression: compression || null,
+      pack_size: packSizeText ? parseInt(packSizeText) : null,
+      read_concurrency: readConcurrencyText ? parseInt(readConcurrencyText) : null,
       timeout_hours: timeoutHoursText ? parseInt(timeoutHoursText) : null,
       check_enabled: checkEnabled,
       check_mode: checkMode || null,
@@ -147,511 +372,465 @@ export default function JobForm({
   }
 
   return (
-    <form role="form" aria-label="Backup job form" onSubmit={handleSubmit} className="space-y-6">
-      {/* Conflict banner */}
-      {conflictingJob && (
-        <div className="bg-yellow-50 border border-yellow-200 rounded p-3 text-sm">
-          <p>There is already a job using this source and destination.</p>
-          <a href={`/jobs/${conflictingJob.id}`} className="text-blue-600 underline">
-            {conflictingJob.name}
-          </a>
-        </div>
-      )}
-
-      {/* Source change warning */}
-      {sourceChanged && (
-        <div className="bg-amber-50 border border-amber-200 rounded p-3 text-sm">
-          Changing the source label will redirect future backups to the new source path.
-        </div>
-      )}
-
-      {/* Submit error */}
-      {submitError && (
-        <div className="bg-red-50 border border-red-200 rounded p-3 text-sm text-red-700">
-          {submitError}
-        </div>
-      )}
-
-      {/* Basic section */}
-      <section>
-        <h2 className="text-base font-semibold mb-3">Basic</h2>
-        <div className="space-y-3">
-          <div>
-            <label htmlFor="job-name" className="block text-sm font-medium mb-1">
-              Name
-            </label>
-            <input
-              id="job-name"
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="border rounded px-2 py-1 text-sm w-full"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="source-label" className="block text-sm font-medium mb-1">
-              Source
-            </label>
-            <select
-              id="source-label"
-              value={sourceLabel}
-              onChange={(e) => setSourceLabel(e.target.value)}
-              className="border rounded px-2 py-1 text-sm w-full bg-background"
-            >
-              <option value="">Select a source…</option>
-              {/* Preserve the saved label even if it's no longer in the mounts list
-                  (e.g. the volume was unmounted) so the user can see what it was. */}
-              {sourceLabel && !sourceMounts.includes(sourceLabel) && (
-                <option value={sourceLabel}>{sourceLabel} (not currently mounted)</option>
-              )}
-              {sourceMounts.map((label) => (
-                <option key={label} value={label}>
-                  {label}
-                </option>
-              ))}
-            </select>
-            {sourceMounts.length === 0 && (
-              <p className="text-gray-500 text-xs mt-1">
-                No source mounts configured. Add a volume under <code>/sources/&lt;label&gt;</code>{' '}
-                in your docker compose.
-              </p>
-            )}
-          </div>
-
-          <div>
-            <label htmlFor="source-subpath" className="block text-sm font-medium mb-1">
-              Subfolder <span className="text-gray-500 text-xs">(optional)</span>
-            </label>
-            <input
-              id="source-subpath"
-              type="text"
-              value={sourceSubpath}
-              onChange={(e) => setSourceSubpath(e.target.value)}
-              placeholder="e.g. photos"
-              className="border rounded px-2 py-1 text-sm w-full"
-            />
-            <p className="text-gray-500 text-xs mt-1">
-              Back up a single folder inside the source mount. No slashes — just the folder name.
-            </p>
-          </div>
-
-          <div>
-            <label htmlFor="destination-label" className="block text-sm font-medium mb-1">
-              Destination
-            </label>
-            <select
-              id="destination-label"
-              value={destinationLabel}
-              onChange={(e) => setDestinationLabel(e.target.value)}
-              disabled={isEdit}
-              className="border rounded px-2 py-1 text-sm w-full bg-background disabled:opacity-60"
-            >
-              <option value="">Select a destination…</option>
-              {/* Same fallback as Source: preserve the saved label if it disappeared from mounts. */}
-              {destinationLabel && !destinationMounts.includes(destinationLabel) && (
-                <option value={destinationLabel}>{destinationLabel} (not currently mounted)</option>
-              )}
-              {destinationMounts.map((label) => (
-                <option key={label} value={label}>
-                  {label}
-                </option>
-              ))}
-            </select>
-            {!isEdit && destinationMounts.length === 0 && (
-              <p className="text-gray-500 text-xs mt-1">
-                No destination mounts configured. Add a volume under{' '}
-                <code>/destinations/&lt;label&gt;</code> in your docker compose.
-              </p>
-            )}
-            {isEdit && (
-              <>
-                <p className="text-gray-500 text-xs mt-1">This cannot be changed after creation.</p>
-                <p className="text-gray-500 text-xs">
-                  <a href="/settings" className="text-blue-600 underline">
-                    Rename destination tool
-                  </a>
-                  {' — use this if remounted with a new label'}
-                </p>
-              </>
-            )}
-          </div>
-
-          <div>
-            <label htmlFor="job-password" className="block text-sm font-medium mb-1">
-              Password
-            </label>
-            <input
-              id="job-password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={passwordLocked}
-              className="border rounded px-2 py-1 text-sm w-full"
-            />
-            {passwordLocked ? (
-              <p className="text-gray-500 text-xs mt-1">
-                🔒 Password cannot change after the first successful backup. To rotate, use{' '}
-                <code>restic key</code>.
-              </p>
-            ) : (
-              isEdit && (
-                <p className="text-gray-500 text-xs mt-1">
-                  No backups run yet — you can still change this password.
-                </p>
-              )
-            )}
-          </div>
-
-          <div className="flex items-center gap-2">
-            <input
-              id="job-enabled"
-              type="checkbox"
-              checked={enabled}
-              onChange={(e) => setEnabled(e.target.checked)}
-            />
-            <label htmlFor="job-enabled" className="text-sm font-medium">
-              Enabled
-            </label>
-          </div>
-        </div>
-      </section>
-
-      {/* Schedule section */}
-      <section>
-        <ScheduleInput value={schedule} onChange={setSchedule} />
-      </section>
-
-      {/* Retention Policy section (collapsible, default closed) */}
-      <section>
-        <button
-          type="button"
-          onClick={() => setRetentionExpanded(!retentionExpanded)}
-          className="text-base font-semibold w-full text-left py-1"
-        >
-          Retention Policy
-        </button>
-        {retentionExpanded && (
-          <div className="space-y-3 mt-3">
-            <div>
-              <label htmlFor="retain-keep-last" className="block text-sm font-medium mb-1">
-                Keep Last
-              </label>
-              <input
-                id="retain-keep-last"
-                type="number"
-                value={keepLast}
-                onChange={(e) => setKeepLast(e.target.value)}
-                className="border rounded px-2 py-1 text-sm w-full"
-                min={1}
-              />
-            </div>
-            <div>
-              <label htmlFor="retain-keep-hourly" className="block text-sm font-medium mb-1">
-                Keep Hourly
-              </label>
-              <input
-                id="retain-keep-hourly"
-                type="number"
-                value={keepHourly}
-                onChange={(e) => setKeepHourly(e.target.value)}
-                className="border rounded px-2 py-1 text-sm w-full"
-                min={1}
-              />
-            </div>
-            <div>
-              <label htmlFor="retain-keep-daily" className="block text-sm font-medium mb-1">
-                Keep Daily
-              </label>
-              <input
-                id="retain-keep-daily"
-                type="number"
-                value={keepDaily}
-                onChange={(e) => setKeepDaily(e.target.value)}
-                className="border rounded px-2 py-1 text-sm w-full"
-                min={1}
-              />
-            </div>
-            <div>
-              <label htmlFor="retain-keep-weekly" className="block text-sm font-medium mb-1">
-                Keep Weekly
-              </label>
-              <input
-                id="retain-keep-weekly"
-                type="number"
-                value={keepWeekly}
-                onChange={(e) => setKeepWeekly(e.target.value)}
-                className="border rounded px-2 py-1 text-sm w-full"
-                min={1}
-              />
-            </div>
-            <div>
-              <label htmlFor="retain-keep-monthly" className="block text-sm font-medium mb-1">
-                Keep Monthly
-              </label>
-              <input
-                id="retain-keep-monthly"
-                type="number"
-                value={keepMonthly}
-                onChange={(e) => setKeepMonthly(e.target.value)}
-                className="border rounded px-2 py-1 text-sm w-full"
-                min={1}
-              />
-            </div>
-            <div>
-              <label htmlFor="retain-keep-yearly" className="block text-sm font-medium mb-1">
-                Keep Yearly
-              </label>
-              <input
-                id="retain-keep-yearly"
-                type="number"
-                value={keepYearly}
-                onChange={(e) => setKeepYearly(e.target.value)}
-                className="border rounded px-2 py-1 text-sm w-full"
-                min={1}
-              />
-            </div>
-            <div>
-              <label htmlFor="retain-keep-within" className="block text-sm font-medium mb-1">
-                Keep Within
-              </label>
-              <input
-                id="retain-keep-within"
-                type="text"
-                value={keepWithin}
-                onChange={(e) => setKeepWithin(e.target.value)}
-                className="border rounded px-2 py-1 text-sm w-full"
-                placeholder="e.g. 1y"
-              />
-            </div>
-            <div>
-              <label htmlFor="retain-keep-within-hourly" className="block text-sm font-medium mb-1">
-                Keep Within Hourly
-              </label>
-              <input
-                id="retain-keep-within-hourly"
-                type="text"
-                value={keepWithinHourly}
-                onChange={(e) => setKeepWithinHourly(e.target.value)}
-                className="border rounded px-2 py-1 text-sm w-full"
-              />
-            </div>
-            <div>
-              <label htmlFor="retain-keep-within-daily" className="block text-sm font-medium mb-1">
-                Keep Within Daily
-              </label>
-              <input
-                id="retain-keep-within-daily"
-                type="text"
-                value={keepWithinDaily}
-                onChange={(e) => setKeepWithinDaily(e.target.value)}
-                className="border rounded px-2 py-1 text-sm w-full"
-              />
-            </div>
-            <div>
-              <label htmlFor="retain-keep-within-weekly" className="block text-sm font-medium mb-1">
-                Keep Within Weekly
-              </label>
-              <input
-                id="retain-keep-within-weekly"
-                type="text"
-                value={keepWithinWeekly}
-                onChange={(e) => setKeepWithinWeekly(e.target.value)}
-                className="border rounded px-2 py-1 text-sm w-full"
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="retain-keep-within-monthly"
-                className="block text-sm font-medium mb-1"
-              >
-                Keep Within Monthly
-              </label>
-              <input
-                id="retain-keep-within-monthly"
-                type="text"
-                value={keepWithinMonthly}
-                onChange={(e) => setKeepWithinMonthly(e.target.value)}
-                className="border rounded px-2 py-1 text-sm w-full"
-              />
-            </div>
-            <div>
-              <label htmlFor="retain-keep-within-yearly" className="block text-sm font-medium mb-1">
-                Keep Within Yearly
-              </label>
-              <input
-                id="retain-keep-within-yearly"
-                type="text"
-                value={keepWithinYearly}
-                onChange={(e) => setKeepWithinYearly(e.target.value)}
-                className="border rounded px-2 py-1 text-sm w-full"
-              />
-            </div>
+    <TooltipProvider>
+      <form role="form" aria-label="Backup job form" onSubmit={handleSubmit} className="space-y-6">
+        {/* Conflict banner */}
+        {conflictingJob && (
+          <div className="bg-yellow-50 border border-yellow-200 rounded p-3 text-sm">
+            <p>There is already a job using this source and destination.</p>
+            <a href={`/jobs/${conflictingJob.id}`} className="text-blue-600 underline">
+              {conflictingJob.name}
+            </a>
           </div>
         )}
-      </section>
 
-      <section>
-        <h2 className="text-base font-semibold mb-3">Backup Options</h2>
-        <div className="space-y-3">
-          <div>
-            <label htmlFor="exclude-patterns" className="block text-sm font-medium mb-1">
-              Exclude patterns
-            </label>
-            <textarea
-              id="exclude-patterns"
-              value={excludePatterns}
-              onChange={(e) => setExcludePatterns(e.target.value)}
-              rows={3}
-              placeholder={'*.tmp\nnode_modules/'}
-              className="border rounded px-2 py-1 text-sm w-full font-mono"
-            />
-            <p className="text-gray-500 text-xs mt-1">
-              One pattern per line. Restic glob syntax (e.g. <code>*.log</code>, <code>cache/</code>
-              ).
-            </p>
+        {/* Source change warning */}
+        {sourceChanged && (
+          <div className="bg-amber-50 border border-amber-200 rounded p-3 text-sm">
+            Changing the source label will redirect future backups to the new source path.
           </div>
+        )}
 
-          <div className="flex items-center gap-2">
-            <input
-              id="exclude-caches"
-              type="checkbox"
-              checked={excludeCaches}
-              onChange={(e) => setExcludeCaches(e.target.checked)}
-            />
-            <label htmlFor="exclude-caches" className="text-sm font-medium">
-              Exclude caches (folders containing a <code>CACHEDIR.TAG</code>)
-            </label>
+        {/* Submit error */}
+        {submitError && (
+          <div className="bg-red-50 border border-red-200 rounded p-3 text-sm text-red-700">
+            {submitError}
           </div>
+        )}
 
-          <div>
-            <label htmlFor="job-tags" className="block text-sm font-medium mb-1">
-              Tags
-            </label>
-            <input
-              id="job-tags"
-              type="text"
-              value={tagsText}
-              onChange={(e) => setTagsText(e.target.value)}
-              placeholder="daily, important"
-              className="border rounded px-2 py-1 text-sm w-full"
-            />
-            <p className="text-gray-500 text-xs mt-1">
-              Comma-separated. Applied to each snapshot, useful for filtering with{' '}
-              <code>restic snapshots --tag</code>.
-            </p>
-          </div>
-
-          <div>
-            <label htmlFor="job-compression" className="block text-sm font-medium mb-1">
-              Compression
-            </label>
-            <select
-              id="job-compression"
-              value={compression}
-              onChange={(e) => setCompression(e.target.value)}
-              className="border rounded px-2 py-1 text-sm w-full bg-background"
-            >
-              <option value="">Default (auto)</option>
-              <option value="auto">auto</option>
-              <option value="off">off</option>
-              <option value="max">max</option>
-            </select>
-          </div>
-
-          <div>
-            <label htmlFor="job-timeout-hours" className="block text-sm font-medium mb-1">
-              Timeout (hours)
-            </label>
-            <input
-              id="job-timeout-hours"
-              type="number"
-              min={1}
-              value={timeoutHoursText}
-              onChange={(e) => setTimeoutHoursText(e.target.value)}
-              placeholder="24"
-              className="border rounded px-2 py-1 text-sm w-full"
-            />
-            <p className="text-gray-500 text-xs mt-1">
-              Kill the backup if it runs longer than this. Leave blank to use the default from
-              Settings.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      {/* Verification section (content always in DOM so tests can interact) */}
-      <section>
-        <h2 className="text-base font-semibold mb-3">Verification</h2>
-        <div className="space-y-3">
-          <div className="flex items-center gap-2">
-            <input
-              id="check-enabled"
-              type="checkbox"
-              checked={checkEnabled}
-              onChange={(e) => setCheckEnabled(e.target.checked)}
-            />
-            <label htmlFor="check-enabled" className="text-sm font-medium">
-              Enable Integrity Check
-            </label>
-          </div>
-
-          <div>
-            <label htmlFor="check-mode" className="block text-sm font-medium mb-1">
-              Check Mode
-            </label>
-            <select
-              id="check-mode"
-              value={checkMode}
-              onChange={(e) => setCheckMode(e.target.value)}
-              className="border rounded px-2 py-1 text-sm w-full"
-            >
-              <option value="">Select mode...</option>
-              <option value="structural">Structural</option>
-              <option value="subset">Subset</option>
-              <option value="full">Full</option>
-            </select>
-          </div>
-
-          {checkMode === 'subset' && (
+        {/* Basic section */}
+        <section>
+          <h2 className="text-base font-semibold mb-3">Basic</h2>
+          <div className="space-y-3">
             <div>
-              <label htmlFor="check-subset-percent" className="block text-sm font-medium mb-1">
-                Subset Percent
-              </label>
+              <FieldLabel htmlFor="job-name" help={HELP.name} />
               <input
-                id="check-subset-percent"
-                type="number"
-                value={checkSubsetPercent}
-                onChange={(e) => setCheckSubsetPercent(e.target.value)}
-                className="border rounded px-2 py-1 text-sm w-full"
-                min={1}
-                max={100}
+                id="job-name"
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                aria-describedby={helpId('job-name')}
+                className={inputCls}
               />
             </div>
-          )}
 
-          <div>
-            <label htmlFor="check-timeout-hours" className="block text-sm font-medium mb-1">
-              Check Timeout (hours)
-            </label>
-            <input
-              id="check-timeout-hours"
-              type="number"
-              value={checkTimeoutHours}
-              onChange={(e) => setCheckTimeoutHours(e.target.value)}
-              className="border rounded px-2 py-1 text-sm w-full"
-              min={1}
-            />
+            <div>
+              <FieldLabel htmlFor="source-label" help={HELP.source} />
+              <select
+                id="source-label"
+                value={sourceLabel}
+                onChange={(e) => setSourceLabel(e.target.value)}
+                aria-describedby={helpId('source-label')}
+                className={`${inputCls} bg-background`}
+              >
+                <option value="">Select a source…</option>
+                {/* Preserve the saved label even if it's no longer in the mounts list
+                    (e.g. the volume was unmounted) so the user can see what it was. */}
+                {sourceLabel && !sourceMounts.includes(sourceLabel) && (
+                  <option value={sourceLabel}>{sourceLabel} (not currently mounted)</option>
+                )}
+                {sourceMounts.map((label) => (
+                  <option key={label} value={label}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+              {sourceMounts.length === 0 && (
+                <p className="text-gray-500 text-xs mt-1">
+                  No source mounts configured. Add a volume under{' '}
+                  <code>/sources/&lt;label&gt;</code> in your docker compose.
+                </p>
+              )}
+            </div>
+
+            <div>
+              <FieldLabel htmlFor="source-subpath" help={HELP.subfolder} />
+              <input
+                id="source-subpath"
+                type="text"
+                value={sourceSubpath}
+                onChange={(e) => setSourceSubpath(e.target.value)}
+                placeholder="e.g. photos"
+                aria-describedby={helpId('source-subpath')}
+                className={inputCls}
+              />
+            </div>
+
+            <div>
+              <FieldLabel htmlFor="destination-label" help={HELP.destination} />
+              <select
+                id="destination-label"
+                value={destinationLabel}
+                onChange={(e) => setDestinationLabel(e.target.value)}
+                disabled={isEdit}
+                aria-describedby={helpId('destination-label')}
+                className={`${inputCls} bg-background disabled:opacity-60`}
+              >
+                <option value="">Select a destination…</option>
+                {destinationLabel && !destinationMounts.includes(destinationLabel) && (
+                  <option value={destinationLabel}>
+                    {destinationLabel} (not currently mounted)
+                  </option>
+                )}
+                {destinationMounts.map((label) => (
+                  <option key={label} value={label}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+              {!isEdit && destinationMounts.length === 0 && (
+                <p className="text-gray-500 text-xs mt-1">
+                  No destination mounts configured. Add a volume under{' '}
+                  <code>/destinations/&lt;label&gt;</code> in your docker compose.
+                </p>
+              )}
+              {isEdit && (
+                <>
+                  <p className="text-gray-500 text-xs mt-1">
+                    This cannot be changed after creation.
+                  </p>
+                  <p className="text-gray-500 text-xs">
+                    <a href="/settings" className="text-blue-600 underline">
+                      Rename destination tool
+                    </a>
+                    {' — use this if remounted with a new label'}
+                  </p>
+                </>
+              )}
+            </div>
+
+            <div>
+              <FieldLabel htmlFor="job-password" help={HELP.password} />
+              <input
+                id="job-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                disabled={passwordLocked}
+                aria-describedby={helpId('job-password')}
+                className={inputCls}
+              />
+              {passwordLocked ? (
+                <p className="text-gray-500 text-xs mt-1">
+                  🔒 Password cannot change after the first successful backup. To rotate, use{' '}
+                  <code>restic key</code>.
+                </p>
+              ) : (
+                isEdit && (
+                  <p className="text-gray-500 text-xs mt-1">
+                    No backups run yet — you can still change this password.
+                  </p>
+                )
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <input
+                id="job-enabled"
+                type="checkbox"
+                checked={enabled}
+                onChange={(e) => setEnabled(e.target.checked)}
+                aria-describedby={helpId('job-enabled')}
+              />
+              <FieldLabel htmlFor="job-enabled" help={HELP.enabled} variant="inline" />
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <button
-        type="submit"
-        className="px-4 py-2 bg-blue-600 text-white rounded text-sm font-medium"
-      >
-        {isEdit ? 'Save' : 'Create'}
-      </button>
-    </form>
+        {/* Schedule section */}
+        <section>
+          <ScheduleInput value={schedule} onChange={setSchedule} />
+        </section>
+
+        {/* Retention Policy section (collapsible, default closed) */}
+        <section>
+          <button
+            type="button"
+            onClick={() => setRetentionExpanded(!retentionExpanded)}
+            className="text-base font-semibold w-full text-left py-1"
+          >
+            Retention Policy
+          </button>
+          {retentionExpanded && (
+            <div className="space-y-3 mt-3">
+              {(
+                [
+                  ['retain-keep-last', keepLast, setKeepLast, HELP.keepLast],
+                  ['retain-keep-hourly', keepHourly, setKeepHourly, HELP.keepHourly],
+                  ['retain-keep-daily', keepDaily, setKeepDaily, HELP.keepDaily],
+                  ['retain-keep-weekly', keepWeekly, setKeepWeekly, HELP.keepWeekly],
+                  ['retain-keep-monthly', keepMonthly, setKeepMonthly, HELP.keepMonthly],
+                  ['retain-keep-yearly', keepYearly, setKeepYearly, HELP.keepYearly],
+                ] as const
+              ).map(([id, val, setter, help]) => (
+                <div key={id}>
+                  <FieldLabel htmlFor={id} help={help} />
+                  <input
+                    id={id}
+                    type="number"
+                    value={val}
+                    onChange={(e) => setter(e.target.value)}
+                    aria-describedby={helpId(id)}
+                    className={inputCls}
+                    min={1}
+                  />
+                </div>
+              ))}
+              {(
+                [
+                  ['retain-keep-within', keepWithin, setKeepWithin, HELP.keepWithin],
+                  [
+                    'retain-keep-within-hourly',
+                    keepWithinHourly,
+                    setKeepWithinHourly,
+                    HELP.keepWithinHourly,
+                  ],
+                  [
+                    'retain-keep-within-daily',
+                    keepWithinDaily,
+                    setKeepWithinDaily,
+                    HELP.keepWithinDaily,
+                  ],
+                  [
+                    'retain-keep-within-weekly',
+                    keepWithinWeekly,
+                    setKeepWithinWeekly,
+                    HELP.keepWithinWeekly,
+                  ],
+                  [
+                    'retain-keep-within-monthly',
+                    keepWithinMonthly,
+                    setKeepWithinMonthly,
+                    HELP.keepWithinMonthly,
+                  ],
+                  [
+                    'retain-keep-within-yearly',
+                    keepWithinYearly,
+                    setKeepWithinYearly,
+                    HELP.keepWithinYearly,
+                  ],
+                ] as const
+              ).map(([id, val, setter, help]) => (
+                <div key={id}>
+                  <FieldLabel htmlFor={id} help={help} />
+                  <input
+                    id={id}
+                    type="text"
+                    value={val}
+                    onChange={(e) => setter(e.target.value)}
+                    aria-describedby={helpId(id)}
+                    className={inputCls}
+                    placeholder={help.example}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section>
+          <h2 className="text-base font-semibold mb-3">Backup Options</h2>
+          <div className="space-y-3">
+            <div>
+              <FieldLabel htmlFor="exclude-patterns" help={HELP.excludePatterns} />
+              <textarea
+                id="exclude-patterns"
+                value={excludePatterns}
+                onChange={(e) => setExcludePatterns(e.target.value)}
+                rows={3}
+                placeholder={'*.tmp\nnode_modules/'}
+                aria-describedby={helpId('exclude-patterns')}
+                className={`${inputCls} font-mono`}
+              />
+            </div>
+
+            <div>
+              <FieldLabel htmlFor="exclude-if-present" help={HELP.excludeIfPresent} />
+              <textarea
+                id="exclude-if-present"
+                value={excludeIfPresent}
+                onChange={(e) => setExcludeIfPresent(e.target.value)}
+                rows={2}
+                placeholder={'.nobackup'}
+                aria-describedby={helpId('exclude-if-present')}
+                className={`${inputCls} font-mono`}
+              />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <input
+                id="exclude-caches"
+                type="checkbox"
+                checked={excludeCaches}
+                onChange={(e) => setExcludeCaches(e.target.checked)}
+                aria-describedby={helpId('exclude-caches')}
+              />
+              <FieldLabel htmlFor="exclude-caches" help={HELP.excludeCaches} variant="inline" />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <input
+                id="one-file-system"
+                type="checkbox"
+                checked={oneFileSystem}
+                onChange={(e) => setOneFileSystem(e.target.checked)}
+                aria-describedby={helpId('one-file-system')}
+              />
+              <FieldLabel htmlFor="one-file-system" help={HELP.oneFileSystem} variant="inline" />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <input
+                id="no-scan"
+                type="checkbox"
+                checked={noScan}
+                onChange={(e) => setNoScan(e.target.checked)}
+                aria-describedby={helpId('no-scan')}
+              />
+              <FieldLabel htmlFor="no-scan" help={HELP.noScan} variant="inline" />
+            </div>
+
+            <div>
+              <FieldLabel htmlFor="job-tags" help={HELP.tags} />
+              <input
+                id="job-tags"
+                type="text"
+                value={tagsText}
+                onChange={(e) => setTagsText(e.target.value)}
+                placeholder="daily, important"
+                aria-describedby={helpId('job-tags')}
+                className={inputCls}
+              />
+            </div>
+
+            <div>
+              <FieldLabel htmlFor="job-compression" help={HELP.compression} />
+              <select
+                id="job-compression"
+                value={compression}
+                onChange={(e) => setCompression(e.target.value)}
+                aria-describedby={helpId('job-compression')}
+                className={`${inputCls} bg-background`}
+              >
+                <option value="">Default (auto)</option>
+                <option value="auto">auto</option>
+                <option value="off">off</option>
+                <option value="max">max</option>
+              </select>
+            </div>
+
+            <div>
+              <FieldLabel htmlFor="job-pack-size" help={HELP.packSize} />
+              <input
+                id="job-pack-size"
+                type="number"
+                min={1}
+                value={packSizeText}
+                onChange={(e) => setPackSizeText(e.target.value)}
+                placeholder="128"
+                aria-describedby={helpId('job-pack-size')}
+                className={inputCls}
+              />
+            </div>
+
+            <div>
+              <FieldLabel htmlFor="job-read-concurrency" help={HELP.readConcurrency} />
+              <input
+                id="job-read-concurrency"
+                type="number"
+                min={1}
+                value={readConcurrencyText}
+                onChange={(e) => setReadConcurrencyText(e.target.value)}
+                aria-describedby={helpId('job-read-concurrency')}
+                className={inputCls}
+              />
+            </div>
+
+            <div>
+              <FieldLabel htmlFor="job-timeout-hours" help={HELP.timeoutHours} />
+              <input
+                id="job-timeout-hours"
+                type="number"
+                min={1}
+                value={timeoutHoursText}
+                onChange={(e) => setTimeoutHoursText(e.target.value)}
+                placeholder="24"
+                aria-describedby={helpId('job-timeout-hours')}
+                className={inputCls}
+              />
+            </div>
+          </div>
+        </section>
+
+        {/* Verification section */}
+        <section>
+          <h2 className="text-base font-semibold mb-3">Verification</h2>
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <input
+                id="check-enabled"
+                type="checkbox"
+                checked={checkEnabled}
+                onChange={(e) => setCheckEnabled(e.target.checked)}
+                aria-describedby={helpId('check-enabled')}
+              />
+              <FieldLabel htmlFor="check-enabled" help={HELP.checkEnabled} variant="inline" />
+            </div>
+
+            <div>
+              <FieldLabel htmlFor="check-mode" help={HELP.checkMode} />
+              <select
+                id="check-mode"
+                value={checkMode}
+                onChange={(e) => setCheckMode(e.target.value)}
+                aria-describedby={helpId('check-mode')}
+                className={inputCls}
+              >
+                <option value="">Select mode...</option>
+                <option value="structural">Structural</option>
+                <option value="subset">Subset</option>
+                <option value="full">Full</option>
+              </select>
+            </div>
+
+            {checkMode === 'subset' && (
+              <div>
+                <FieldLabel htmlFor="check-subset-percent" help={HELP.checkSubsetPercent} />
+                <input
+                  id="check-subset-percent"
+                  type="number"
+                  value={checkSubsetPercent}
+                  onChange={(e) => setCheckSubsetPercent(e.target.value)}
+                  aria-describedby={helpId('check-subset-percent')}
+                  className={inputCls}
+                  min={1}
+                  max={100}
+                />
+              </div>
+            )}
+
+            <div>
+              <FieldLabel htmlFor="check-timeout-hours" help={HELP.checkTimeoutHours} />
+              <input
+                id="check-timeout-hours"
+                type="number"
+                value={checkTimeoutHours}
+                onChange={(e) => setCheckTimeoutHours(e.target.value)}
+                aria-describedby={helpId('check-timeout-hours')}
+                className={inputCls}
+                min={1}
+              />
+            </div>
+          </div>
+        </section>
+
+        <button
+          type="submit"
+          className="px-4 py-2 bg-blue-600 text-white rounded text-sm font-medium"
+        >
+          {isEdit ? 'Save' : 'Create'}
+        </button>
+      </form>
+    </TooltipProvider>
   )
 }

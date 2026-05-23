@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { BackupJob } from '../lib/types'
 import JobForm from './JobForm'
@@ -198,12 +198,15 @@ describe('JobForm', () => {
 
     it('shows lock icon when password is locked', () => {
       render(<JobForm job={{ ...baseJob, has_successful_run: true }} onSubmit={vi.fn()} />)
-      expect(screen.getByText(/🔒|permanent|cannot change/i)).toBeInTheDocument()
+      // The inline helper paragraph beneath the field carries the lock icon.
+      expect(screen.getByText(/🔒/)).toBeInTheDocument()
     })
 
     it('shows tooltip about restic key rotation when locked', () => {
       render(<JobForm job={{ ...baseJob, has_successful_run: true }} onSubmit={vi.fn()} />)
-      expect(screen.getByText(/restic key/i)).toBeInTheDocument()
+      // restic key may be mentioned in both the inline lock notice and the
+      // field's help description — confirm at least one mention exists.
+      expect(screen.getAllByText(/restic key/i).length).toBeGreaterThan(0)
     })
   })
 
@@ -431,6 +434,198 @@ describe('JobForm', () => {
     it('shows Verification section', () => {
       render(<JobForm onSubmit={vi.fn()} />)
       expect(screen.getByText(/verification/i)).toBeInTheDocument()
+    })
+  })
+
+  // The user explicitly asked for tooltips on every field with description +
+  // optional flag + example. These tests exercise that contract field-by-field
+  // via the accessible description (aria-describedby + sr-only span). Using the
+  // a11y description means we don't need to drive Radix's portal in jsdom.
+  describe('field help tooltips', () => {
+    // Helper: expand every collapsible/conditional region so every field is
+    // in the DOM at once.
+    async function renderAndExpandAll() {
+      const user = userEvent.setup()
+      const utils = render(<JobForm onSubmit={vi.fn()} />)
+      await user.click(screen.getByText(/retention policy/i))
+      await user.click(screen.getByLabelText(/integrity check/i))
+      // Select subset mode so the subset_percent field is rendered.
+      await user.selectOptions(screen.getByLabelText(/^check mode$/i), 'subset')
+      return { user, ...utils }
+    }
+
+    // Single source of truth for the test matrix — each entry asserts the
+    // label exists, has a help button, an accessible description, an example,
+    // and the optional/required state matches the spec.
+    const fields: Array<{
+      label: RegExp
+      optional: boolean
+      // A keyword expected to appear inside the accessible description so we
+      // know the right help text is wired to the right field.
+      describes: RegExp
+    }> = [
+      { label: /^name$/i, optional: false, describes: /name|identify|dashboard/i },
+      { label: /^source$/i, optional: false, describes: /mount|read-only|folder/i },
+      { label: /^subfolder$/i, optional: true, describes: /subfolder|one level|slash/i },
+      { label: /^destination$/i, optional: false, describes: /destination|repo|permanent/i },
+      { label: /^password$/i, optional: false, describes: /encryption|password|rotate/i },
+      { label: /^enabled$/i, optional: false, describes: /scheduler|schedule|manual/i },
+      { label: /^keep last$/i, optional: true, describes: /most recent|--keep-last/i },
+      { label: /^keep hourly$/i, optional: true, describes: /hour/i },
+      { label: /^keep daily$/i, optional: true, describes: /day/i },
+      { label: /^keep weekly$/i, optional: true, describes: /week/i },
+      { label: /^keep monthly$/i, optional: true, describes: /month/i },
+      { label: /^keep yearly$/i, optional: true, describes: /year/i },
+      { label: /^keep within$/i, optional: true, describes: /duration|window|within/i },
+      { label: /^keep within hourly$/i, optional: true, describes: /hour/i },
+      { label: /^keep within daily$/i, optional: true, describes: /day/i },
+      { label: /^keep within weekly$/i, optional: true, describes: /week/i },
+      { label: /^keep within monthly$/i, optional: true, describes: /month/i },
+      { label: /^keep within yearly$/i, optional: true, describes: /year/i },
+      { label: /^exclude patterns$/i, optional: true, describes: /glob|pattern|skip/i },
+      { label: /^exclude if present$/i, optional: true, describes: /file|skip|directory/i },
+      { label: /^exclude caches$/i, optional: true, describes: /CACHEDIR\.TAG|cache/i },
+      { label: /^one file system$/i, optional: true, describes: /filesystem|mount boundar/i },
+      { label: /^no scan$/i, optional: true, describes: /pre-scan|progress/i },
+      { label: /^tags$/i, optional: true, describes: /label|snapshot|tag/i },
+      { label: /^compression$/i, optional: true, describes: /compress|auto|max/i },
+      { label: /^pack size/i, optional: true, describes: /pack|MiB|128/i },
+      { label: /^read concurrency$/i, optional: true, describes: /parallel|concurren/i },
+      { label: /^timeout \(hours\)$/i, optional: true, describes: /timeout|kill|hours/i },
+      { label: /enable.*integrity check/i, optional: true, describes: /integrity|check|verify/i },
+      { label: /^check mode$/i, optional: true, describes: /structural|subset|full/i },
+      { label: /^subset percent$/i, optional: true, describes: /percent|1.*100|pack/i },
+      { label: /^check timeout/i, optional: true, describes: /timeout|non-fatal|check/i },
+    ]
+
+    // Drive the matrix with it.each so failures point at the specific field.
+    it.each(fields)(
+      'field $label has an info tooltip with description (optional=$optional)',
+      async ({ label, optional, describes }) => {
+        await renderAndExpandAll()
+        const field = screen.getByLabelText(label)
+        // Every field has an accessible description (the help text) wired up.
+        expect(field).toHaveAccessibleDescription(describes)
+        // Walk from the field's <label htmlFor> element to its row container.
+        const labelEl = document.querySelector(`label[for="${field.id}"]`)
+        const row = labelEl?.closest('[data-field-row]') as HTMLElement | null
+        expect(row).not.toBeNull()
+        if (optional) {
+          expect(row!).toHaveTextContent(/\(optional\)/i)
+        } else {
+          expect(row!).not.toHaveTextContent(/\(optional\)/i)
+        }
+        // The row exposes a visible help button for sighted users.
+        expect(within(row!).getByRole('button', { name: /more info/i })).toBeInTheDocument()
+      }
+    )
+
+    it('every help tooltip text includes an explicit Example: snippet (for fields that have one)', async () => {
+      await renderAndExpandAll()
+      // Sanity: at least the obvious example-bearing fields advertise an example.
+      const exampleFields = [/^name$/i, /^source$/i, /^subfolder$/i, /^keep last$/i, /^tags$/i]
+      for (const re of exampleFields) {
+        expect(screen.getByLabelText(re)).toHaveAccessibleDescription(/example/i)
+      }
+    })
+  })
+
+  describe('previously-missing design-doc fields', () => {
+    it('exposes exclude_if_present as a textarea (one filename per line)', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      await user.type(screen.getByLabelText(/exclude if present/i), '.nobackup{enter}.skipme')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ exclude_if_present: ['.nobackup', '.skipme'] })
+      )
+    })
+
+    it('sends null for exclude_if_present when blank', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ exclude_if_present: null }))
+    })
+
+    it('exposes one_file_system as a checkbox (default off)', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      const cb = screen.getByLabelText(/one file system/i) as HTMLInputElement
+      expect(cb.checked).toBe(false)
+      await user.click(cb)
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ one_file_system: true }))
+    })
+
+    it('exposes no_scan as a checkbox (default off)', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      const cb = screen.getByLabelText(/no scan/i) as HTMLInputElement
+      expect(cb.checked).toBe(false)
+      await user.click(cb)
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ no_scan: true }))
+    })
+
+    it('exposes pack_size as a number input', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      await user.type(screen.getByLabelText(/pack size/i), '512')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ pack_size: 512 }))
+    })
+
+    it('exposes read_concurrency as a number input', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      await user.type(screen.getByLabelText(/read concurrency/i), '4')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ read_concurrency: 4 }))
+    })
+
+    it('round-trips the new fields when editing an existing job', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(
+        <JobForm
+          job={{
+            ...baseJob,
+            exclude_if_present: ['.nobackup'],
+            one_file_system: true,
+            no_scan: true,
+            pack_size: 256,
+            read_concurrency: 2,
+          }}
+          onSubmit={onSubmit}
+          sourceMounts={['documents']}
+          destinationMounts={['main']}
+        />
+      )
+      expect((screen.getByLabelText(/exclude if present/i) as HTMLTextAreaElement).value).toBe(
+        '.nobackup'
+      )
+      expect((screen.getByLabelText(/one file system/i) as HTMLInputElement).checked).toBe(true)
+      expect((screen.getByLabelText(/no scan/i) as HTMLInputElement).checked).toBe(true)
+      expect((screen.getByLabelText(/pack size/i) as HTMLInputElement).value).toBe('256')
+      expect((screen.getByLabelText(/read concurrency/i) as HTMLInputElement).value).toBe('2')
+
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          exclude_if_present: ['.nobackup'],
+          one_file_system: true,
+          no_scan: true,
+          pack_size: 256,
+          read_concurrency: 2,
+        })
+      )
     })
   })
 })
