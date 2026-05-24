@@ -1,4 +1,9 @@
-"""Test database migrations."""
+"""Test database migrations.
+
+The schema is defined by a single initial migration. These tests exercise
+``alembic upgrade head`` against an empty database — the path a fresh
+deployment takes — and verify the final shape matches what the app expects.
+"""
 
 import tempfile
 from pathlib import Path
@@ -26,13 +31,13 @@ async def test_migration_creates_all_tables():
         engine = sa.create_engine(db_url, echo=False)
         inspector = inspect(engine)
 
-        # Verify tables exist. The `snapshots` table was intentionally dropped
-        # in migration 005 — restic is the source of truth (gaps.md C4-Alt).
+        # Verify tables exist. The `snapshots` table is intentionally absent
+        # — restic is the source of truth (gaps.md C4-Alt).
         tables = set(inspector.get_table_names())
         expected_tables = {"backup_jobs", "backup_runs", "app_settings"}
         assert expected_tables.issubset(tables)
         assert "snapshots" not in tables, (
-            "snapshots table must be dropped after migration 005"
+            "snapshots table must not be created — restic is the source of truth"
         )
 
         # Verify columns for each table
@@ -136,8 +141,8 @@ async def test_migration_creates_all_tables():
 
 @pytest.mark.asyncio
 async def test_migration_allows_warning_status_in_backup_runs():
-    """After migration 002, `backup_runs.status` must accept the value
-    'warning' (added for restic's exit code 3 / partial-backup case)."""
+    """`backup_runs.status` must accept the value 'warning' (used for restic's
+    exit code 3 / partial-backup case)."""
     import uuid as _uuid
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -174,35 +179,37 @@ async def test_migration_allows_warning_status_in_backup_runs():
 
 
 @pytest.mark.asyncio
-async def test_migration_005_drops_snapshots_table_but_preserves_run_snapshot_id():
-    """Migration 005 drops the `snapshots` table (restic is now the source of
-    truth — gaps.md C4-Alt), but the link from a backup run to its restic
-    snapshot id must survive: `backup_runs.snapshot_id` stays as a plain
-    string column."""
+async def test_migration_schema_matches_orm_metadata():
+    """The migration must produce the same table/column set as the ORM models."""
+    from app.db.models import Base
+
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test.db"
         db_url = f"sqlite:///{db_path}"
 
         cfg = Config(Path(__file__).parent.parent / "alembic.ini")
         cfg.set_main_option("sqlalchemy.url", db_url)
-
-        # Upgrade only to 004 — snapshots table should still exist.
-        command.upgrade(cfg, "004")
-        engine = sa.create_engine(db_url, echo=False)
-        inspector = inspect(engine)
-        assert "snapshots" in set(inspector.get_table_names())
-        engine.dispose()
-
-        # Upgrade to head (which includes 005) — snapshots must be gone.
         command.upgrade(cfg, "head")
+
         engine = sa.create_engine(db_url, echo=False)
         inspector = inspect(engine)
-        tables = set(inspector.get_table_names())
-        assert "snapshots" not in tables
-        # backup_runs.snapshot_id is the live link from a run to its restic
-        # snapshot — it must persist across the migration.
-        run_cols = {col["name"] for col in inspector.get_columns("backup_runs")}
-        assert "snapshot_id" in run_cols
+        migrated_tables = set(inspector.get_table_names()) - {"alembic_version"}
+        orm_tables = set(Base.metadata.tables.keys())
+        assert migrated_tables == orm_tables, (
+            f"migration/ORM table mismatch: "
+            f"only-in-migration={migrated_tables - orm_tables} "
+            f"only-in-orm={orm_tables - migrated_tables}"
+        )
+
+        for table_name in orm_tables:
+            migrated_cols = {c["name"] for c in inspector.get_columns(table_name)}
+            orm_cols = {c.name for c in Base.metadata.tables[table_name].columns}
+            assert migrated_cols == orm_cols, (
+                f"column mismatch in {table_name}: "
+                f"only-in-migration={migrated_cols - orm_cols} "
+                f"only-in-orm={orm_cols - migrated_cols}"
+            )
+
         engine.dispose()
 
 
