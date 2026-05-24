@@ -380,6 +380,93 @@ async def test_auto_unlock_failure_does_not_fail_the_run(engine):
     assert run.status == RunStatus.success
 
 
+# ── Step 5: --parent passthrough (C5) ────────────────────────────────────────
+
+
+async def test_backup_passes_parent_when_prior_snapshot_exists(engine):
+    """When restic_latest_snapshot_id returns an id, the orchestrator must
+    forward it as parent_snapshot_id to restic_backup so restic does an
+    incremental rescan instead of a full-tree re-read (gaps.md C5)."""
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    captured = {}
+
+    async def fake_backup(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return (0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY)
+
+    parent_id = "c" * 64
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch("app.services.restic.restic_unlock", return_value=(0, "", "")),
+        patch(
+            "app.services.restic.restic_latest_snapshot_id",
+            return_value=parent_id,
+        ),
+        patch("app.services.restic.restic_backup", side_effect=fake_backup),
+        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
+        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert captured["kwargs"].get("parent_snapshot_id") == parent_id
+
+
+async def test_backup_omits_parent_on_first_run(engine):
+    """First-ever backup for a job has no prior snapshot; parent_snapshot_id
+    must be None so restic_backup doesn't add --parent (which would fail with
+    'parent snapshot not found')."""
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    captured = {}
+
+    async def fake_backup(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return (0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY)
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch("app.services.restic.restic_unlock", return_value=(0, "", "")),
+        patch("app.services.restic.restic_latest_snapshot_id", return_value=None),
+        patch("app.services.restic.restic_backup", side_effect=fake_backup),
+        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
+        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert captured["kwargs"].get("parent_snapshot_id") is None
+
+
 # ── Step 5: backup, rc=11 (lock failure) auto-recovery (C1) ──────────────────
 
 

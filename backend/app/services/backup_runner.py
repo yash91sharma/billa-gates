@@ -329,6 +329,20 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
             int, settings_dict.get("default_job_timeout_hours", 24)
         )
         timeout_seconds: int = (job_timeout_hours or default_timeout) * 3600
+
+        # Look up the latest snapshot for this job so restic can do an
+        # incremental rescan instead of re-reading every source file. Without
+        # an explicit --parent, any change to host or paths (e.g.
+        # source_subpath edit) makes restic treat the next backup as a fresh
+        # first run (gaps.md C5). Returns None on genuine first run.
+        parent_snapshot_id: Optional[str] = await restic.restic_latest_snapshot_id(
+            repo_path, job_password, job_id=str(job_id)
+        )
+        logger.info(
+            f"job_id={job_id} run_id={current_run_id} step=parent_lookup "
+            f"parent_snapshot_id={parent_snapshot_id}"
+        )
+
         logger.info(
             f"job_id={job_id} run_id={current_run_id} step=backup_execution "
             f"source_path={source_path} timeout_seconds={timeout_seconds}"
@@ -364,6 +378,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 source_path,
                 timeout_seconds,
                 job_id=str(job_id),
+                parent_snapshot_id=parent_snapshot_id,
                 **backup_kwargs,
             )
             # Exit code 11 = restic failed to acquire the repo lock. The most
@@ -388,6 +403,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     source_path,
                     timeout_seconds,
                     job_id=str(job_id),
+                    parent_snapshot_id=parent_snapshot_id,
                     **backup_kwargs,
                 )
 

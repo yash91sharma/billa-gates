@@ -91,6 +91,62 @@ async def restic_init(repo_path: str, password: str) -> Tuple[int, str, str]:
 
 
 @log_call
+async def restic_latest_snapshot_id(
+    repo_path: str,
+    password: str,
+    *,
+    job_id: str,
+    timeout_seconds: int = 60,
+) -> Optional[str]:
+    """Return the id of the most recent snapshot tagged for this job, or None
+    if no prior snapshot exists / the lookup fails. Used to pass --parent to
+    `restic backup` so a host or path change doesn't force a full-tree rescan
+    (gaps.md C5). Read-only — uses --no-lock so it never blocks on a write
+    lock held by a concurrent backup or by a stale lock file.
+    """
+    env: Dict[str, str] = {
+        **os.environ,
+        "RESTIC_REPOSITORY": repo_path,
+        "RESTIC_PASSWORD": password,
+        "RESTIC_CACHE_DIR": "/app/data/restic-cache",
+    }
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "restic",
+            "snapshots",
+            "--tag",
+            f"job:{job_id}",
+            "--latest",
+            "1",
+            "--json",
+            "--no-lock",
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            await _terminate_then_kill(proc)
+            return None
+    except Exception:
+        return None
+
+    if proc.returncode != 0:
+        return None
+    try:
+        snapshots = json.loads(stdout.decode())
+    except json.JSONDecodeError:
+        return None
+    if not snapshots:
+        return None
+    snap_id = snapshots[0].get("id")
+    return snap_id if isinstance(snap_id, str) else None
+
+
+@log_call
 async def restic_backup(
     repo_path: str,
     password: str,
@@ -98,6 +154,7 @@ async def restic_backup(
     timeout_seconds: int,
     *,
     job_id: str,
+    parent_snapshot_id: Optional[str] = None,
     **kwargs: Any,
 ) -> Tuple[int, str, str, Optional[Dict[str, Any]]]:
     """Run a backup."""
@@ -123,6 +180,13 @@ async def restic_backup(
         "--tag",
         f"job:{job_id}",
     ]
+
+    # Explicit --parent lets restic skip the full-tree rescan even when host
+    # or paths have changed; without it, any source_subpath change makes the
+    # next backup re-read every file from disk (gaps.md C5). Omit on the
+    # genuine first run — passing a bogus --parent would fail the backup.
+    if parent_snapshot_id:
+        args.extend(["--parent", parent_snapshot_id])
 
     # Add flags from kwargs
     if kwargs.get("exclude_patterns"):

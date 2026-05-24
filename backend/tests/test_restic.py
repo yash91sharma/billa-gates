@@ -430,6 +430,138 @@ async def test_snapshots_failure():
     assert snapshots == []
 
 
+# ── restic_latest_snapshot_id ────────────────────────────────────────────────
+
+
+async def test_latest_snapshot_id_returns_id_when_present():
+    """restic snapshots --tag job:X --latest 1 --json returns a single-element
+    array; the helper extracts the id so the caller can pass it as --parent."""
+    from app.services.restic import restic_latest_snapshot_id
+
+    snap_id = "ffffffff" + "0" * 56
+    out = json.dumps([{"id": snap_id, "time": "2026-05-01T00:00:00Z"}])
+    proc = _make_process(0, stdout=out)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await restic_latest_snapshot_id(REPO, PASSWORD, job_id=TEST_JOB_ID)
+    assert result == snap_id
+
+
+async def test_latest_snapshot_id_returns_none_on_empty_list():
+    """A genuine first run has no prior snapshots; the helper must return None
+    so the caller knows to omit --parent (passing --parent on first run would
+    make restic fail with 'parent snapshot not found')."""
+    from app.services.restic import restic_latest_snapshot_id
+
+    proc = _make_process(0, stdout="[]")
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await restic_latest_snapshot_id(REPO, PASSWORD, job_id=TEST_JOB_ID)
+    assert result is None
+
+
+async def test_latest_snapshot_id_returns_none_on_nonzero_rc():
+    from app.services.restic import restic_latest_snapshot_id
+
+    proc = _make_process(1, stderr="Fatal: unable to open repo")
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await restic_latest_snapshot_id(REPO, PASSWORD, job_id=TEST_JOB_ID)
+    assert result is None
+
+
+async def test_latest_snapshot_id_returns_none_on_malformed_json():
+    """If restic exits 0 but emits non-JSON for any reason, the caller must
+    fall back to omitting --parent rather than crash mid-backup."""
+    from app.services.restic import restic_latest_snapshot_id
+
+    proc = _make_process(0, stdout="not-json-at-all")
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await restic_latest_snapshot_id(REPO, PASSWORD, job_id=TEST_JOB_ID)
+    assert result is None
+
+
+async def test_latest_snapshot_id_uses_tag_and_latest_flags():
+    """Must scope by --tag job:<id> and --latest 1 so the lookup is O(1) and
+    only ever returns this job's snapshots (not snapshots belonging to other
+    jobs sharing the destination)."""
+    from app.services.restic import restic_latest_snapshot_id
+
+    proc = _make_process(0, stdout="[]")
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = args
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await restic_latest_snapshot_id(REPO, PASSWORD, job_id=TEST_JOB_ID)
+
+    args_list = list(captured["args"])
+    assert "--json" in args_list
+    # --tag job:<id>
+    tag_indexes = [i for i, a in enumerate(args_list) if a == "--tag"]
+    assert any(args_list[i + 1] == f"job:{TEST_JOB_ID}" for i in tag_indexes), (
+        f"Expected --tag job:{TEST_JOB_ID} in args, got {args_list}"
+    )
+    # --latest 1
+    assert "--latest" in args_list
+    latest_idx = args_list.index("--latest")
+    assert args_list[latest_idx + 1] == "1"
+
+
+# ── restic_backup --parent flag ──────────────────────────────────────────────
+
+
+async def test_backup_passes_parent_when_provided():
+    """When the orchestrator finds a prior snapshot for this job (via
+    restic_latest_snapshot_id), it must pass --parent <id> to restic backup
+    so restic does an incremental rescan instead of a full-tree re-upload
+    after any host/path change (gaps.md C5)."""
+    proc = _make_process(0, stdout=BACKUP_SUMMARY)
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = args
+        return proc
+
+    parent_id = "deadbeef" * 8
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await restic_backup(
+            REPO,
+            PASSWORD,
+            "/sources/documents",
+            timeout_seconds=3600,
+            job_id=TEST_JOB_ID,
+            parent_snapshot_id=parent_id,
+        )
+
+    args_list = list(captured["args"])
+    assert "--parent" in args_list
+    p_idx = args_list.index("--parent")
+    assert args_list[p_idx + 1] == parent_id
+
+
+async def test_backup_omits_parent_when_none():
+    """First-ever backup for a job has no prior snapshot; --parent must be
+    absent or restic would fail with 'parent snapshot not found'."""
+    proc = _make_process(0, stdout=BACKUP_SUMMARY)
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = args
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await restic_backup(
+            REPO,
+            PASSWORD,
+            "/sources/documents",
+            timeout_seconds=3600,
+            job_id=TEST_JOB_ID,
+            parent_snapshot_id=None,
+        )
+
+    assert "--parent" not in captured["args"]
+
+
 # ── restic_forget_prune ───────────────────────────────────────────────────────
 
 
