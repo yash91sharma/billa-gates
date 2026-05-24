@@ -96,6 +96,8 @@ async def restic_backup(
     password: str,
     source_path: str,
     timeout_seconds: int,
+    *,
+    job_id: str,
     **kwargs: Any,
 ) -> Tuple[int, str, str, Optional[Dict[str, Any]]]:
     """Run a backup."""
@@ -109,7 +111,18 @@ async def restic_backup(
     # --host is pinned to a fixed string so retention isn't silently split
     # per container ID (each rebuild gets a new hostname, and `restic forget`
     # groups by host+paths by default).
-    args: List[str] = ["restic", "backup", "--host", "backup-server"]
+    # --tag job:<job_id> pins every snapshot to a stable identifier so
+    # `restic forget --tag job:<id>` can apply retention across path changes
+    # (renaming source_subpath would otherwise orphan the old-path snapshots
+    # in a separate retention group — see gaps.md C3).
+    args: List[str] = [
+        "restic",
+        "backup",
+        "--host",
+        "backup-server",
+        "--tag",
+        f"job:{job_id}",
+    ]
 
     # Add flags from kwargs
     if kwargs.get("exclude_patterns"):
@@ -228,6 +241,8 @@ async def restic_forget_prune(
     repo_path: str,
     password: str,
     timeout_seconds: int,
+    *,
+    job_id: str,
     **retention_flags: Any,
 ) -> Tuple[int, str, str]:
     """Apply retention policy and prune."""
@@ -238,9 +253,18 @@ async def restic_forget_prune(
         "RESTIC_CACHE_DIR": "/app/data/restic-cache",
     }
 
-    # --group-by paths so retention applies across container rebuilds
-    # (default grouping includes host, which is the container ID).
-    args: List[str] = ["restic", "forget", "--group-by", "paths"]
+    # Scope retention by --tag job:<job_id> with --group-by '' (single group)
+    # so retention applies across any historical path or host change. The
+    # previous --group-by paths kept old-path snapshots forever whenever a
+    # job's source_subpath changed (gaps.md C3).
+    args: List[str] = [
+        "restic",
+        "forget",
+        "--tag",
+        f"job:{job_id}",
+        "--group-by",
+        "",
+    ]
 
     # Map retention_flags kwargs to CLI arguments
     flag_map: Dict[str, str] = {

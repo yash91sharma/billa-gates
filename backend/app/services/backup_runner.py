@@ -363,6 +363,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 job_password,
                 source_path,
                 timeout_seconds,
+                job_id=str(job_id),
                 **backup_kwargs,
             )
             # Exit code 11 = restic failed to acquire the repo lock. The most
@@ -386,6 +387,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     job_password,
                     source_path,
                     timeout_seconds,
+                    job_id=str(job_id),
                     **backup_kwargs,
                 )
 
@@ -507,6 +509,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     repo_path,
                     job_password,
                     timeout_seconds,
+                    job_id=str(job_id),
                     **retention_kwargs,
                 )
             else:
