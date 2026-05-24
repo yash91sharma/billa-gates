@@ -34,6 +34,24 @@ def _patch_backup_runner_engine(engine):
         yield
 
 
+@pytest.fixture(autouse=True)
+def _reset_backup_runner_concurrency_state():
+    """Reset module-level concurrency state between tests.
+
+    job_locks holds asyncio.Lock objects bound to the test's event loop; an
+    instance reused across tests raises 'bound to a different event loop'.
+    active_jobs is a plain set but can leak from tests that simulate an
+    in-flight run without unwinding the state.
+    """
+    from app.services import backup_runner
+
+    backup_runner.job_locks.clear()
+    backup_runner.active_jobs.clear()
+    yield
+    backup_runner.job_locks.clear()
+    backup_runner.active_jobs.clear()
+
+
 @pytest_asyncio.fixture
 async def db_session(engine) -> AsyncGenerator[AsyncSession, None]:
     factory = async_sessionmaker(engine, expire_on_commit=False)

@@ -15,6 +15,7 @@ from app.db.models import (
     BackupRun,
     CheckStatus,
     PruneStatus,
+    RunReason,
     RunStatus,
     Snapshot,
     TriggeredBy,
@@ -26,6 +27,101 @@ logger = get_logger(__name__)
 
 active_jobs: Set[uuid.UUID] = set()
 job_locks: Dict[uuid.UUID, asyncio.Lock] = {}
+
+
+async def trigger_run(
+    job_id: uuid.UUID,
+    triggered_by: TriggeredBy = TriggeredBy.scheduler,
+) -> Optional[str]:
+    """Unified entry point for starting a backup run.
+
+    Acquires the per-job lock unconditionally and, under it, performs the
+    overlap check and creates either a `running` row or a `skipped` row
+    (`reason=overlapping_run`). The actual backup pipeline runs in a
+    fire-and-forget background task once the row is committed.
+
+    All triggers — manual API call, scheduled APScheduler fire — must go
+    through this function so that a manual click and a scheduled tick can
+    never both squeeze past the check and produce two concurrent restic
+    processes against the same repository (C2).
+
+    Returns the run id (skipped or running). Returns None only if the job
+    does not exist.
+    """
+    factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        engine, expire_on_commit=False
+    )
+
+    async with factory() as s:
+        job: BackupJob | None = await s.get(BackupJob, str(job_id))
+    if not job:
+        logger.warning(f"trigger_run job_id={job_id} not_found")
+        return None
+
+    lock: asyncio.Lock = job_locks.setdefault(job_id, asyncio.Lock())
+    now = datetime.now(timezone.utc)
+
+    async with lock:
+        # Under the lock, the in-memory active_jobs set and any DB row with
+        # status=running are equally authoritative for "is a run live?".
+        async with factory() as s:
+            result = await s.execute(
+                select(BackupRun).where(
+                    BackupRun.job_id == str(job_id),
+                    BackupRun.status == RunStatus.running,
+                )
+            )
+            running_row: BackupRun | None = result.scalars().first()
+
+            if running_row is not None or job_id in active_jobs:
+                skipped = BackupRun(
+                    id=str(uuid.uuid4()),
+                    job_id=str(job_id),
+                    status=RunStatus.skipped,
+                    reason=RunReason.overlapping_run,
+                    started_at=now,
+                    finished_at=now,
+                    triggered_by=triggered_by,
+                    prune_status=PruneStatus.skipped,
+                    check_status=CheckStatus.skipped,
+                )
+                s.add(skipped)
+                await s.commit()
+                logger.info(
+                    f"trigger_run job_id={job_id} run_id={skipped.id} "
+                    f"triggered_by={triggered_by.value} status=skipped "
+                    f"reason=overlapping_run"
+                )
+                return skipped.id
+
+            running = BackupRun(
+                id=str(uuid.uuid4()),
+                job_id=str(job_id),
+                status=RunStatus.running,
+                started_at=now,
+                triggered_by=triggered_by,
+            )
+            s.add(running)
+            await s.commit()
+            run_id_str = running.id
+            active_jobs.add(job_id)
+            logger.info(
+                f"trigger_run job_id={job_id} run_id={run_id_str} "
+                f"triggered_by={triggered_by.value} status=dispatched"
+            )
+
+    asyncio.create_task(_run_with_cleanup(job_id, uuid.UUID(run_id_str)))
+    return run_id_str
+
+
+async def _run_with_cleanup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
+    """Wrap run_backup so active_jobs is always discarded, even if the
+    pipeline raises. Keeps the concurrency state in trigger_run's hands so
+    the run_backup pipeline can stay focused on backup mechanics."""
+    try:
+        await run_backup(job_id, run_id)
+    finally:
+        active_jobs.discard(job_id)
 
 
 def _extract_failed_items(backup_stdout: str) -> List[str]:
@@ -52,8 +148,14 @@ def _extract_failed_items(backup_stdout: str) -> List[str]:
     return items
 
 
-async def run_backup(job_id: uuid.UUID, run_id: Optional[uuid.UUID] = None) -> None:
-    """12-step backup lifecycle orchestration."""
+async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
+    """12-step backup lifecycle orchestration.
+
+    Always invoked by :func:`trigger_run` with a pre-created `running`
+    BackupRun row. Concurrency gating (per-job lock, overlap check,
+    active_jobs membership) lives in :func:`trigger_run`; this function
+    runs the backup pipeline and finalizes the row.
+    """
     factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
         engine, expire_on_commit=False
     )
@@ -68,69 +170,8 @@ async def run_backup(job_id: uuid.UUID, run_id: Optional[uuid.UUID] = None) -> N
 
     logger.info(f"job_id={job_id} run_id={run_id} backup_started")
 
-    # Two invocation paths: scheduler (no run_id) or API (run_id provided)
-    current_run_id: uuid.UUID | None = None
+    current_run_id: uuid.UUID = run_id
     try:
-        if run_id is None:
-            # Scheduler path: do concurrent run guard and create run row
-            logger.debug(f"job_id={job_id} step=concurrent_guard acquiring lock")
-            lock: asyncio.Lock = job_locks.setdefault(job_id, asyncio.Lock())
-            async with lock:
-                async with factory() as s:
-                    result = await s.execute(
-                        select(BackupRun).where(
-                            BackupRun.job_id == str(job_id),
-                            BackupRun.status == RunStatus.running,
-                        )
-                    )
-                    running_run: BackupRun | None = result.scalars().first()
-
-                if running_run:
-                    current_run_id = uuid.UUID(str(uuid.uuid4()))
-                    logger.info(
-                        f"job_id={job_id} step=concurrent_guard "
-                        f"reason=overlapping_run skipping"
-                    )
-                    async with factory() as s:
-                        skipped_run: BackupRun = BackupRun(
-                            id=str(current_run_id),
-                            job_id=str(job_id),
-                            status=RunStatus.skipped,
-                            reason="overlapping_run",
-                            started_at=datetime.now(timezone.utc),
-                            finished_at=datetime.now(timezone.utc),
-                            triggered_by=TriggeredBy.scheduler,
-                            prune_status=PruneStatus.skipped,
-                            check_status=CheckStatus.skipped,
-                        )
-                        s.add(skipped_run)
-                        await s.commit()
-                    return
-
-                # Create running row
-                started_now: datetime = datetime.now(timezone.utc)
-                async with factory() as s:
-                    new_run: BackupRun = BackupRun(
-                        id=str(uuid.uuid4()),
-                        job_id=str(job_id),
-                        status=RunStatus.running,
-                        started_at=started_now,
-                        triggered_by=TriggeredBy.scheduler,
-                    )
-                    s.add(new_run)
-                    await s.commit()
-                    current_run_id = uuid.UUID(new_run.id)
-                logger.debug(
-                    f"job_id={job_id} run_id={current_run_id} step=concurrent_guard "
-                    f"run_row_created"
-                )
-        else:
-            # API path: run_id was provided
-            current_run_id = run_id
-
-        active_jobs.add(job_id)
-        logger.debug(f"job_id={job_id} run_id={current_run_id} added to active_jobs")
-
         # Step 2: Validate password
         logger.debug(f"job_id={job_id} run_id={current_run_id} step=validate_password")
         job_password: str = job.restic_password
@@ -707,11 +748,11 @@ async def run_backup(job_id: uuid.UUID, run_id: Optional[uuid.UUID] = None) -> N
                 )
 
     finally:
-        # Cleanup: remove job from active set
-        active_jobs.discard(job_id)
-        if current_run_id is not None:
-            await _trim_run_history(factory, str(job_id))
-            logger.info(f"job_id={job_id} run_id={current_run_id} backup_completed")
+        # active_jobs cleanup is handled by _run_with_cleanup so the lifecycle
+        # owner (trigger_run) holds full responsibility for the in-memory
+        # state. run_backup focuses on the backup pipeline + history trim.
+        await _trim_run_history(factory, str(job_id))
+        logger.info(f"job_id={job_id} run_id={current_run_id} backup_completed")
 
 
 async def _trim_run_history(

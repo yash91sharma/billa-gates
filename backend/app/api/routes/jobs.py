@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, List, Sequence
 
 from apscheduler.jobstores.base import JobLookupError
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,7 +27,6 @@ from app.core.logging import get_logger, log_call
 from app.db.models import (
     BackupJob,
     BackupRun,
-    RunReason,
     RunStatus,
     Snapshot,
     TriggeredBy,
@@ -165,13 +164,12 @@ def _register_in_scheduler(job: BackupJob) -> None:
     sched: Any = scheduler_module.scheduler
     if not sched.running:
         return
-    from app.services.backup_runner import run_backup
 
     trigger = scheduler_module.build_trigger(job.schedule_type, job.schedule_value)
     sched.add_job(
-        run_backup,
+        backup_runner.trigger_run,
         trigger=trigger,
-        args=[uuid.UUID(job.id)],
+        args=[uuid.UUID(job.id), TriggeredBy.scheduler],
         id=job.id,
         replace_existing=True,
     )
@@ -381,49 +379,25 @@ async def delete_job(job_id: str, session: AsyncSession = Depends(get_session)) 
 @log_call
 async def trigger_run(
     job_id: str,
-    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, str]:
     """Manually trigger a backup run for the given job.
 
-    If a run is already active for this job, a skipped run row is created and
-    returned immediately instead of firing a duplicate run.
+    Delegates to :func:`backup_runner.trigger_run` which holds the single
+    per-job critical section shared by manual and scheduled triggers. If a
+    run is already in flight (in-memory active_jobs or a `status=running` DB
+    row), a skipped/overlapping_run row is created instead of firing a
+    duplicate backup.
     """
-    job = await _get_job_or_404(job_id, session)
-    job_uuid = uuid.UUID(job.id)
-    now = datetime.now(timezone.utc)
+    await _get_job_or_404(job_id, session)
+    job_uuid = uuid.UUID(job_id)
 
-    if job_uuid in backup_runner.active_jobs:
-        # Record the skip so it appears in run history.
-        run = BackupRun(
-            id=str(uuid.uuid4()),
-            job_id=job.id,
-            status=RunStatus.skipped,
-            reason=RunReason.overlapping_run,
-            triggered_by=TriggeredBy.manual,
-            started_at=now,
-            finished_at=now,
-        )
-        session.add(run)
-        await session.commit()
-        logger.info("manual run skipped (overlap) job_id=%s run_id=%s", job_id, run.id)
-        return {"run_id": run.id}
-
-    run = BackupRun(
-        id=str(uuid.uuid4()),
-        job_id=job.id,
-        status=RunStatus.running,
-        triggered_by=TriggeredBy.manual,
-        started_at=now,
-    )
-    session.add(run)
-    await session.commit()
-    logger.info("manual run triggered job_id=%s run_id=%s", job_id, run.id)
-
-    # Fire-and-forget: the route returns immediately with the run id.
-    background_tasks.add_task(backup_runner.run_backup, job_uuid, uuid.UUID(run.id))
-
-    return {"run_id": run.id}
+    run_id = await backup_runner.trigger_run(job_uuid, TriggeredBy.manual)
+    # _get_job_or_404 already enforced existence; trigger_run only returns
+    # None if the job vanished mid-request — surface that as 404 too.
+    if run_id is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"run_id": run_id}
 
 
 # ── POST /api/jobs/{id}/enable ────────────────────────────────────────────────

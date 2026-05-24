@@ -27,9 +27,10 @@ from app.db.models import (
     PruneStatus,
     RunReason,
     RunStatus,
+    TriggeredBy,
 )
 from app.services import restic as restic_svc
-from app.services.backup_runner import run_backup
+from app.services.backup_runner import trigger_run
 
 logger = get_logger(__name__)
 
@@ -146,9 +147,9 @@ def _register_job(job: BackupJob) -> None:
     # apscheduler lacks type stubs; cast to Any at the boundary.
     sched: Any = scheduler
     sched.add_job(
-        run_backup,
+        trigger_run,
         trigger=trigger,
-        args=[uuid.UUID(job.id)],
+        args=[uuid.UUID(job.id), TriggeredBy.scheduler],
         id=job.id,
         replace_existing=True,
     )

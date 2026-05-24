@@ -4,12 +4,12 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db.models import CheckStatus, PruneStatus
-from app.services.backup_runner import active_jobs, run_backup
+from app.services.backup_runner import active_jobs, run_backup, trigger_run
 
 REPO = "/destinations/main"
 JOB_ID = uuid.uuid4()
@@ -1309,43 +1309,243 @@ async def test_notification_skipped_when_topic_empty(engine):
     assert len(notify_calls) == 0
 
 
-# ── run_backup called without run_id (scheduler invocation) ──────────────────
+# ── trigger_run: unified entry point for manual + scheduled triggers ─────────
 
 
-async def test_run_backup_without_run_id_creates_run_row(engine):
+async def test_trigger_run_creates_running_row_and_dispatches(engine):
+    """trigger_run with no concurrent run creates a running row, adds the job
+    to active_jobs under the lock, and dispatches run_backup as a background
+    task. After the task completes, active_jobs is empty again."""
     from sqlalchemy import select
+
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
 
     await _setup_job(engine)
 
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+    backup_done = asyncio.Event()
+    received: dict = {}
 
-    with (
-        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
-        patch(
-            "app.services.restic.restic_backup",
-            return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
-        ),
-        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
-        patch("app.services.backup_runner.send_notification"),
+    async def fake_run_backup(jid, rid):
+        received["job_id"] = jid
+        received["run_id"] = rid
+        backup_done.set()
+
+    with patch(
+        "app.services.backup_runner.run_backup",
+        new=AsyncMock(side_effect=fake_run_backup),
     ):
-        await run_backup(JOB_ID)
+        run_id = await trigger_run(JOB_ID, TriggeredBy.manual)
+        await asyncio.wait_for(backup_done.wait(), timeout=2.0)
+        # Yield once more so the cleanup wrapper's finally can run.
+        await asyncio.sleep(0)
 
-    from app.db.models import BackupRun
-
+    factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as s:
         result = await s.execute(
             select(BackupRun).where(BackupRun.job_id == str(JOB_ID))
         )
         runs = result.scalars().all()
     assert len(runs) == 1
-    assert runs[0].status.value == "success"
+    assert runs[0].id == run_id
+    assert runs[0].status == RunStatus.running
+    assert runs[0].triggered_by == TriggeredBy.manual
+    assert received["job_id"] == JOB_ID
+    assert received["run_id"] == uuid.UUID(run_id)
+    assert JOB_ID not in active_jobs
 
 
-async def test_run_backup_without_run_id_job_not_found_is_noop(engine):
+async def test_trigger_run_returns_skipped_when_active_jobs_set(engine):
+    """trigger_run creates a skipped/overlapping_run row when active_jobs
+    already contains the job, regardless of how the caller is triggered."""
+    from app.db.models import BackupRun, RunReason, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+
+    active_jobs.add(JOB_ID)
+    try:
+        run_id = await trigger_run(JOB_ID, TriggeredBy.manual)
+    finally:
+        active_jobs.discard(JOB_ID)
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        run = await s.get(BackupRun, run_id)
+    assert run is not None
+    assert run.status == RunStatus.skipped
+    assert run.reason == RunReason.overlapping_run
+    assert run.triggered_by == TriggeredBy.manual
+    assert run.prune_status == PruneStatus.skipped
+    assert run.check_status == CheckStatus.skipped
+
+
+async def test_trigger_run_returns_skipped_when_db_has_running_row(engine):
+    """A pre-existing running BackupRun in the DB (e.g. left from a crashed
+    process before the cleanup ran) is also treated as overlap."""
+    from app.db.models import BackupRun, RunReason, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        existing = BackupRun(
+            id=str(uuid.uuid4()),
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.scheduler,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(existing)
+        await s.commit()
+
+    run_id = await trigger_run(JOB_ID, TriggeredBy.manual)
+
+    async with factory() as s:
+        run = await s.get(BackupRun, run_id)
+    assert run is not None
+    assert run.status == RunStatus.skipped
+    assert run.reason == RunReason.overlapping_run
+
+
+async def test_trigger_run_parallel_only_one_runs(engine):
+    """10 parallel trigger_run calls produce exactly 1 running + 9 skipped
+    rows — proves the lock + check + row-create is atomic per job."""
+    from sqlalchemy import select
+
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+
+    block_until_released = asyncio.Event()
+
+    async def slow_run_backup(jid, rid):
+        await block_until_released.wait()
+
+    with patch(
+        "app.services.backup_runner.run_backup",
+        new=AsyncMock(side_effect=slow_run_backup),
+    ):
+        run_ids = await asyncio.gather(
+            *[trigger_run(JOB_ID, TriggeredBy.manual) for _ in range(10)]
+        )
+        # All 10 trigger_run calls have returned; the single backup task is
+        # still parked on block_until_released. Inspect DB state now.
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as s:
+            result = await s.execute(
+                select(BackupRun).where(BackupRun.job_id == str(JOB_ID))
+            )
+            runs = result.scalars().all()
+
+        running = [r for r in runs if r.status == RunStatus.running]
+        skipped = [r for r in runs if r.status == RunStatus.skipped]
+        assert len(running) == 1, (
+            f"expected 1 running, got {len(running)} "
+            f"(statuses={[r.status.value for r in runs]})"
+        )
+        assert len(skipped) == 9, (
+            f"expected 9 skipped, got {len(skipped)} "
+            f"(statuses={[r.status.value for r in runs]})"
+        )
+        assert all(r.triggered_by == TriggeredBy.manual for r in runs)
+        assert len(run_ids) == 10
+        assert len(set(run_ids)) == 10  # every call returned a distinct id
+
+        # Release the backup task so cleanup can run.
+        block_until_released.set()
+        # Allow the create_task'd coroutine to finish and run its finally.
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    assert JOB_ID not in active_jobs
+
+
+async def test_trigger_run_scheduler_then_manual_serializes(engine):
+    """A scheduler-triggered run and a manual-triggered run racing against
+    each other go through the same critical section: one wins, one is
+    recorded as skipped/overlapping_run."""
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+
+    block = asyncio.Event()
+
+    async def slow_run_backup(jid, rid):
+        await block.wait()
+
+    with patch(
+        "app.services.backup_runner.run_backup",
+        new=AsyncMock(side_effect=slow_run_backup),
+    ):
+        sched_id, manual_id = await asyncio.gather(
+            trigger_run(JOB_ID, TriggeredBy.scheduler),
+            trigger_run(JOB_ID, TriggeredBy.manual),
+        )
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as s:
+            sched_run = await s.get(BackupRun, sched_id)
+            manual_run = await s.get(BackupRun, manual_id)
+        assert sched_run is not None and manual_run is not None
+        statuses = {sched_run.status, manual_run.status}
+        assert statuses == {RunStatus.running, RunStatus.skipped}, (
+            f"expected one of each, got sched={sched_run.status.value} "
+            f"manual={manual_run.status.value}"
+        )
+
+        block.set()
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    assert JOB_ID not in active_jobs
+
+
+async def test_trigger_run_job_not_found_is_noop(engine):
+    """trigger_run returns gracefully when the job does not exist; no row
+    is created and active_jobs stays clean."""
+    from sqlalchemy import select
+
+    from app.db.models import BackupRun, TriggeredBy
+
     unknown_id = uuid.uuid4()
-    await run_backup(unknown_id)
+    result = await trigger_run(unknown_id, TriggeredBy.scheduler)
+    assert result is None
     assert unknown_id not in active_jobs
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        rows = (
+            (
+                await s.execute(
+                    select(BackupRun).where(BackupRun.job_id == str(unknown_id))
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert rows == []
+
+
+async def test_trigger_run_default_triggered_by_is_scheduler(engine):
+    """When trigger_run is called with no explicit triggered_by — as the
+    APScheduler path does — the row is tagged scheduler."""
+    from app.db.models import BackupRun, TriggeredBy
+
+    await _setup_job(engine)
+
+    with patch(
+        "app.services.backup_runner.run_backup", new=AsyncMock(return_value=None)
+    ):
+        run_id = await trigger_run(JOB_ID)
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        run = await s.get(BackupRun, run_id)
+    assert run is not None
+    assert run.triggered_by == TriggeredBy.scheduler
+
+    active_jobs.discard(JOB_ID)
 
 
 # ── Step 6: source path construction ─────────────────────────────────────────
