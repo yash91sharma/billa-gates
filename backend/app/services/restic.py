@@ -37,7 +37,7 @@ async def restic_version() -> Optional[str]:
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
         except asyncio.TimeoutError:
-            proc.kill()
+            await _terminate_then_kill(proc)
             return None
 
         output = stdout.decode()

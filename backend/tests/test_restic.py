@@ -69,10 +69,13 @@ async def test_version_returns_none_on_timeout():
 
     proc = AsyncMock()
     proc.communicate = slow_communicate
+    proc.terminate = MagicMock()
     proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=0)
 
     async def fake_wait_for(coro, timeout):
-        coro.close()
+        if hasattr(coro, "close"):
+            coro.close()
         raise asyncio.TimeoutError()
 
     with patch("asyncio.create_subprocess_exec", return_value=proc):
@@ -1138,6 +1141,30 @@ async def test_terminate_then_kill_falls_through_to_sigkill_after_grace():
     proc.kill.assert_called_once()
     # After kill we must wait again, otherwise we'd leak a zombie.
     assert proc.wait.await_count >= 1
+
+
+async def test_version_timeout_terminates_before_kill():
+    """restic_version's timeout path uses _terminate_then_kill (SIGTERM-first)
+    for consistency with every other wrapper, even though `restic version`
+    holds no lock — keeps the codebase free of raw proc.kill() calls."""
+    proc = AsyncMock()
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=0)
+    proc.returncode = 0
+    proc.communicate = AsyncMock()
+
+    async def fake_wait_for(coro, timeout):
+        if hasattr(coro, "close"):
+            coro.close()
+        raise asyncio.TimeoutError()
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with patch("asyncio.wait_for", side_effect=fake_wait_for):
+            result = await restic_version()
+
+    assert result is None
+    proc.terminate.assert_called_once()
 
 
 async def test_backup_timeout_terminates_before_kill():
