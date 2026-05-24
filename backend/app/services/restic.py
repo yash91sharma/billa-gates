@@ -269,38 +269,6 @@ async def restic_backup(
 
 
 @log_call
-async def restic_snapshots(repo_path: str, password: str) -> Tuple[int, List[Any], str]:
-    """List snapshots."""
-    env: Dict[str, str] = {
-        **os.environ,
-        "RESTIC_REPOSITORY": repo_path,
-        "RESTIC_PASSWORD": password,
-        "RESTIC_CACHE_DIR": "/app/data/restic-cache",
-    }
-    proc = await asyncio.create_subprocess_exec(
-        "restic",
-        "snapshots",
-        "--json",
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    stdout_str: str = stdout.decode()
-    stderr_str: str = stderr.decode()
-
-    snapshots: List[Any] = []
-    assert proc.returncode is not None
-    if proc.returncode == 0:
-        try:
-            snapshots = json.loads(stdout_str)
-        except json.JSONDecodeError:
-            pass
-
-    return proc.returncode, snapshots, stderr_str
-
-
-@log_call
 async def restic_forget_prune(
     repo_path: str,
     password: str,

@@ -124,21 +124,3 @@ def make_run_row(db_session, job_id: str, **overrides):
     )
     db_session.add(run)
     return run
-
-
-def make_snapshot_row(db_session, job_id: str, **overrides):
-    from app.db.models import Snapshot
-
-    now = datetime.now(timezone.utc)
-    snap = Snapshot(
-        id=str(uuid.uuid4()),
-        job_id=job_id,
-        snapshot_id=overrides.pop("snapshot_id", "a" * 64),
-        snapshot_time=overrides.pop("snapshot_time", now),
-        hostname=overrides.pop("hostname", "testhost"),
-        paths=overrides.pop("paths", ["/sources/documents"]),
-        captured_at=overrides.pop("captured_at", now),
-        **overrides,
-    )
-    db_session.add(snap)
-    return snap

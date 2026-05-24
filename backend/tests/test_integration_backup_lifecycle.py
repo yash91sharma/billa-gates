@@ -6,13 +6,15 @@ only the external boundaries mocked:
 
 - ``restic`` subprocess wrappers (``restic`` isn't installed in the dev
   container).
+- ``app.services.snapshot_listing.list_snapshots`` (would otherwise shell
+  out to restic).
 - ``os.path.isdir`` (so mount validation passes without real ``/sources``
   and ``/destinations`` directories).
 - ``send_notification`` (no outbound network).
 
 This catches bugs at the seams that unit tests miss: route ↔ DB,
 middleware ↔ handler, backup_runner ↔ DB, schema serialization, request-ID
-propagation, BackgroundTasks wiring, snapshot reconciliation.
+propagation, BackgroundTasks wiring.
 """
 
 import asyncio
@@ -47,18 +49,17 @@ _BACKUP_SUMMARY: Dict[str, Any] = {
     "snapshot_id": _SNAPSHOT_ID,
 }
 
-# Shape returned by `restic snapshots --json` (one entry per snapshot).
-# backup_runner's reconciliation step reads top-level keys (id, time, hostname,
-# paths, tags, total_size).
+# Normalized shape returned by `list_snapshots` (the snapshot-listing service
+# translates restic's raw keys `id`/`time`/`total_size` into the API's stable
+# `snapshot_id`/`snapshot_time`/`size_bytes` names).
 _SNAPSHOT_FROM_RESTIC: List[Dict[str, Any]] = [
     {
-        "id": _SNAPSHOT_ID,
-        "short_id": _SNAPSHOT_ID[:8],
-        "time": "2026-05-19T12:00:00Z",
+        "snapshot_id": _SNAPSHOT_ID,
+        "snapshot_time": "2026-05-19T12:00:00Z",
         "hostname": "integration-host",
         "paths": ["/sources/documents"],
         "tags": ["integration"],
-        "total_size": 1024 * 1024 * 500,
+        "size_bytes": 1024 * 1024 * 500,
     }
 ]
 
@@ -107,8 +108,8 @@ async def test_full_backup_lifecycle_success(client: AsyncClient) -> None:
             ),
         ),
         patch(
-            "app.services.restic.restic_snapshots",
-            new=AsyncMock(return_value=(0, _SNAPSHOT_FROM_RESTIC, "")),
+            "app.services.snapshot_listing.list_snapshots",
+            new=AsyncMock(return_value=_SNAPSHOT_FROM_RESTIC),
         ),
         patch(
             "app.services.restic.restic_forget_prune",
@@ -160,7 +161,7 @@ async def test_full_backup_lifecycle_success(client: AsyncClient) -> None:
         assert detail["backup_output"] is not None
         assert _SNAPSHOT_ID in detail["backup_output"]
 
-        # 5. Snapshot row reconciled into DB ────────────────────────────────
+        # 5. Snapshot listing route queries restic live ─────────────────────
         snaps_resp = await client.get(f"/api/jobs/{job_id}/snapshots")
         assert snaps_resp.status_code == 200
         snapshots = snaps_resp.json()
@@ -170,8 +171,10 @@ async def test_full_backup_lifecycle_success(client: AsyncClient) -> None:
         assert snap["hostname"] == "integration-host"
         assert snap["paths"] == ["/sources/documents"]
         assert snap["size_bytes"] == 500 * 1024 * 1024
-        # Snapshot must be linked back to the run that created it.
-        assert snap["run_id"] == run_id
+        # Run-to-snapshot linkage lives on BackupRun (not the listing payload,
+        # which is the unfiltered restic output).
+        run_detail = await client.get(f"/api/runs/{run_id}")
+        assert run_detail.json()["snapshot_id"] == _SNAPSHOT_ID
 
         # 6. Job reports has_successful_run=True after the run ──────────────
         job_resp = await client.get(f"/api/jobs/{job_id}")
@@ -214,6 +217,10 @@ async def test_full_backup_lifecycle_failure(client: AsyncClient) -> None:
             ),
         ),
         patch(
+            "app.services.snapshot_listing.list_snapshots",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
             "app.services.backup_runner.send_notification",
             new=AsyncMock(return_value=None),
         ),
@@ -236,7 +243,8 @@ async def test_full_backup_lifecycle_failure(client: AsyncClient) -> None:
         assert detail["prune_status"] == "skipped"
         assert detail["check_status"] == "skipped"
 
-        # No snapshot rows created.
+        # Restic is the source of truth for snapshots — the failed run never
+        # created one, so the listing route returns the empty list.
         snaps_resp = await client.get(f"/api/jobs/{job_id}/snapshots")
         assert snaps_resp.status_code == 200
         assert snaps_resp.json() == []
@@ -269,8 +277,8 @@ async def test_full_backup_lifecycle_with_verification(client: AsyncClient) -> N
             ),
         ),
         patch(
-            "app.services.restic.restic_snapshots",
-            new=AsyncMock(return_value=(0, _SNAPSHOT_FROM_RESTIC, "")),
+            "app.services.snapshot_listing.list_snapshots",
+            new=AsyncMock(return_value=_SNAPSHOT_FROM_RESTIC),
         ),
         patch(
             "app.services.restic.restic_forget_prune",

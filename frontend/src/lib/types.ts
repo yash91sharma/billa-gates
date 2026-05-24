@@ -89,16 +89,12 @@ export interface BackupRun {
 }
 
 export interface Snapshot {
-  id: string
-  job_id: string
-  run_id: string | null
   snapshot_id: string
   snapshot_time: string
   hostname: string
   paths: string[]
   tags: string[] | null
   size_bytes: number | null
-  captured_at: string
 }
 
 export interface AppSettings {

@@ -151,28 +151,20 @@ test('FieldLabel - row preview', async () => {
 test('SnapshotList - populated', async () => {
   const snaps: Snapshot[] = [
     {
-      id: 'snap-1',
-      job_id: 'job-1',
-      run_id: 'run-1',
       snapshot_id: 'a'.repeat(64),
       snapshot_time: '2026-05-19T10:30:00Z',
       hostname: 'home-server',
       paths: ['/sources/documents'],
       tags: ['weekly'],
       size_bytes: 1_073_741_824,
-      captured_at: '2026-05-19T10:32:00Z',
     },
     {
-      id: 'snap-2',
-      job_id: 'job-1',
-      run_id: 'run-2',
       snapshot_id: 'b'.repeat(64),
       snapshot_time: '2026-05-18T10:30:00Z',
       hostname: 'home-server',
       paths: ['/sources/documents'],
       tags: null,
       size_bytes: 524_288_000,
-      captured_at: '2026-05-18T10:32:00Z',
     },
   ]
   const result = render(<SnapshotList snapshots={snaps} />)

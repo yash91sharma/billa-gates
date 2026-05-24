@@ -26,10 +26,14 @@ async def test_migration_creates_all_tables():
         engine = sa.create_engine(db_url, echo=False)
         inspector = inspect(engine)
 
-        # Verify tables exist
+        # Verify tables exist. The `snapshots` table was intentionally dropped
+        # in migration 005 — restic is the source of truth (gaps.md C4-Alt).
         tables = set(inspector.get_table_names())
-        expected_tables = {"backup_jobs", "backup_runs", "snapshots", "app_settings"}
+        expected_tables = {"backup_jobs", "backup_runs", "app_settings"}
         assert expected_tables.issubset(tables)
+        assert "snapshots" not in tables, (
+            "snapshots table must be dropped after migration 005"
+        )
 
         # Verify columns for each table
         job_cols = {col["name"] for col in inspector.get_columns("backup_jobs")}
@@ -103,21 +107,6 @@ async def test_migration_creates_all_tables():
         }
         assert expected_run.issubset(run_cols)
 
-        snap_cols = {col["name"] for col in inspector.get_columns("snapshots")}
-        expected_snap = {
-            "id",
-            "job_id",
-            "run_id",
-            "snapshot_id",
-            "snapshot_time",
-            "hostname",
-            "paths",
-            "tags",
-            "size_bytes",
-            "captured_at",
-        }
-        assert expected_snap.issubset(snap_cols)
-
         settings_cols = {col["name"] for col in inspector.get_columns("app_settings")}
         expected_settings = {
             "id",
@@ -141,16 +130,6 @@ async def test_migration_creates_all_tables():
             fk["constrained_columns"] == ["job_id"]
             for fk in inspector.get_foreign_keys("backup_runs")
         ), "Missing FK: backup_runs.job_id"
-
-        assert any(
-            fk["constrained_columns"] == ["job_id"]
-            for fk in inspector.get_foreign_keys("snapshots")
-        ), "Missing FK: snapshots.job_id"
-
-        assert any(
-            fk["constrained_columns"] == ["run_id"]
-            for fk in inspector.get_foreign_keys("snapshots")
-        ), "Missing FK: snapshots.run_id"
 
         engine.dispose()
 
@@ -195,6 +174,39 @@ async def test_migration_allows_warning_status_in_backup_runs():
 
 
 @pytest.mark.asyncio
+async def test_migration_005_drops_snapshots_table_but_preserves_run_snapshot_id():
+    """Migration 005 drops the `snapshots` table (restic is now the source of
+    truth — gaps.md C4-Alt), but the link from a backup run to its restic
+    snapshot id must survive: `backup_runs.snapshot_id` stays as a plain
+    string column."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db_url = f"sqlite:///{db_path}"
+
+        cfg = Config(Path(__file__).parent.parent / "alembic.ini")
+        cfg.set_main_option("sqlalchemy.url", db_url)
+
+        # Upgrade only to 004 — snapshots table should still exist.
+        command.upgrade(cfg, "004")
+        engine = sa.create_engine(db_url, echo=False)
+        inspector = inspect(engine)
+        assert "snapshots" in set(inspector.get_table_names())
+        engine.dispose()
+
+        # Upgrade to head (which includes 005) — snapshots must be gone.
+        command.upgrade(cfg, "head")
+        engine = sa.create_engine(db_url, echo=False)
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        assert "snapshots" not in tables
+        # backup_runs.snapshot_id is the live link from a run to its restic
+        # snapshot — it must persist across the migration.
+        run_cols = {col["name"] for col in inspector.get_columns("backup_runs")}
+        assert "snapshot_id" in run_cols
+        engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_migration_falls_back_to_app_database_url(monkeypatch):
     """env.py uses app.db.database.DATABASE_URL when no override is set.
 
@@ -215,7 +227,5 @@ async def test_migration_falls_back_to_app_database_url(monkeypatch):
         engine = sa.create_engine(f"sqlite:///{db_path}", echo=False)
         inspector = inspect(engine)
         tables = set(inspector.get_table_names())
-        assert {"backup_jobs", "backup_runs", "snapshots", "app_settings"}.issubset(
-            tables
-        )
+        assert {"backup_jobs", "backup_runs", "app_settings"}.issubset(tables)
         engine.dispose()

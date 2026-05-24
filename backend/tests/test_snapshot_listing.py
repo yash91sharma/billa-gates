@@ -1,0 +1,370 @@
+"""Tests for the on-demand snapshot listing service.
+
+The snapshot listing service replaces the old `Snapshot` ORM table: the restic
+repository is the single source of truth, and the UI queries restic on demand
+through this service. A small TTL cache absorbs dashboard refresh storms.
+
+See gaps.md C4-Alt for the architectural motivation.
+"""
+
+import asyncio
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from app.services import snapshot_listing
+from app.services.snapshot_listing import (
+    SnapshotListingError,
+    _clear_cache,
+    list_snapshots,
+)
+
+REPO = "/destinations/main/job-uuid-123"
+PASSWORD = "s3cr3t"
+JOB_ID = "11111111-2222-3333-4444-555555555555"
+
+
+def _make_process(returncode: int, stdout: str = "", stderr: str = "") -> AsyncMock:
+    proc = AsyncMock()
+    proc.returncode = returncode
+    proc.communicate = AsyncMock(return_value=(stdout.encode(), stderr.encode()))
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=returncode)
+    return proc
+
+
+_RESTIC_SNAPSHOTS_JSON = json.dumps(
+    [
+        {
+            "id": "a" * 64,
+            "short_id": "a" * 8,
+            "time": "2026-05-01T12:00:00Z",
+            "hostname": "backup-server",
+            "paths": ["/sources/documents"],
+            "tags": [f"job:{JOB_ID}", "weekly"],
+            "total_size": 1024 * 1024 * 500,
+        },
+        {
+            "id": "b" * 64,
+            "short_id": "b" * 8,
+            "time": "2026-05-02T12:00:00Z",
+            "hostname": "backup-server",
+            "paths": ["/sources/documents"],
+            "tags": [f"job:{JOB_ID}"],
+            "total_size": 1024 * 1024 * 510,
+        },
+    ]
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_snapshot_cache():
+    """Each test starts with a fresh cache and ends clean."""
+    _clear_cache()
+    yield
+    _clear_cache()
+
+
+# ── args ──────────────────────────────────────────────────────────────────────
+
+
+async def test_list_snapshots_passes_tag_no_lock_and_json_flags():
+    """Every call must include `--json`, `--no-lock`, and `--tag job:<id>`.
+    --no-lock matters because the listing is read-only and must not be blocked
+    by a concurrent backup or a stale lock file (gaps.md C4-Alt). --tag scopes
+    the result to this job so unrelated snapshots from other jobs in the same
+    repo never appear in the response."""
+    proc = _make_process(0, stdout=_RESTIC_SNAPSHOTS_JSON)
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = args
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+
+    args_list = list(captured["args"])
+    assert "snapshots" in args_list
+    assert "--json" in args_list
+    assert "--no-lock" in args_list
+    tag_indexes = [i for i, a in enumerate(args_list) if a == "--tag"]
+    assert any(args_list[i + 1] == f"job:{JOB_ID}" for i in tag_indexes), (
+        f"Expected --tag job:{JOB_ID} in args, got {args_list}"
+    )
+
+
+async def test_list_snapshots_passes_env_vars():
+    proc = _make_process(0, stdout="[]")
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+
+    env = captured["kwargs"].get("env", {})
+    assert env.get("RESTIC_REPOSITORY") == REPO
+    assert env.get("RESTIC_PASSWORD") == PASSWORD
+
+
+# ── parsing ───────────────────────────────────────────────────────────────────
+
+
+async def test_list_snapshots_returns_normalized_dicts():
+    """The service must translate restic's raw JSON keys (`id`, `time`,
+    `total_size`) into the stable response shape the API exposes
+    (`snapshot_id`, `snapshot_time`, `size_bytes`) so changes to restic's
+    schema do not leak into the API contract."""
+    proc = _make_process(0, stdout=_RESTIC_SNAPSHOTS_JSON)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+
+    assert len(result) == 2
+    first = result[0]
+    assert first["snapshot_id"] == "a" * 64
+    assert first["snapshot_time"] == "2026-05-01T12:00:00Z"
+    assert first["hostname"] == "backup-server"
+    assert first["paths"] == ["/sources/documents"]
+    assert first["tags"] == [f"job:{JOB_ID}", "weekly"]
+    assert first["size_bytes"] == 1024 * 1024 * 500
+    # Internal restic keys must not leak through.
+    assert "id" not in first
+    assert "time" not in first
+    assert "total_size" not in first
+
+
+async def test_list_snapshots_handles_empty_array():
+    """A repo that legitimately has no snapshots for this job (genuine first
+    run or all snapshots forgotten by retention) returns an empty list, NOT
+    an error."""
+    proc = _make_process(0, stdout="[]")
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+    assert result == []
+
+
+async def test_list_snapshots_handles_missing_optional_fields():
+    """restic snapshots may omit `tags` or `total_size` for snapshots created
+    by older restic versions or non-restic tooling — the service must not crash."""
+    minimal = json.dumps(
+        [
+            {
+                "id": "c" * 64,
+                "time": "2026-05-01T12:00:00Z",
+                "hostname": "h",
+                "paths": ["/sources/x"],
+            }
+        ]
+    )
+    proc = _make_process(0, stdout=minimal)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+    assert len(result) == 1
+    assert result[0]["tags"] is None
+    assert result[0]["size_bytes"] is None
+
+
+# ── failure modes ─────────────────────────────────────────────────────────────
+
+
+async def test_list_snapshots_raises_on_nonzero_rc():
+    """A non-zero exit code surfaces as a typed SnapshotListingError so the
+    route layer can map it to an HTTP 500 / 503 instead of silently returning
+    an empty list (which is what the old reconcile-then-wipe path did — see
+    gaps.md C4)."""
+    proc = _make_process(1, stderr="Fatal: unable to open repo")
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with pytest.raises(SnapshotListingError):
+            await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+
+
+async def test_list_snapshots_raises_on_malformed_json():
+    """rc=0 with stdout that is not a valid JSON array is treated as a failure
+    (the prior `restic_snapshots` swallowed JSONDecodeError and returned an
+    empty list, which caused the reconcile-step DB wipe in C4)."""
+    proc = _make_process(0, stdout="not-json-at-all")
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with pytest.raises(SnapshotListingError):
+            await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+
+
+async def test_list_snapshots_times_out():
+    """A hung backend (NFS unresponsive, restic stuck on a network call) must
+    be killed by the timeout — without it, the UI request hangs forever and
+    we replay gaps.md H6 for the new code path."""
+    proc = AsyncMock()
+    proc.communicate = AsyncMock()
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock()
+    proc.returncode = None
+
+    async def fake_wait_for(coro, timeout):
+        if hasattr(coro, "close"):
+            coro.close()
+        raise asyncio.TimeoutError()
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with patch("asyncio.wait_for", side_effect=fake_wait_for):
+            with pytest.raises(SnapshotListingError) as exc_info:
+                await list_snapshots(
+                    REPO, PASSWORD, job_id=JOB_ID, timeout_seconds=1, use_cache=False
+                )
+
+    assert "timed out" in str(exc_info.value).lower()
+    proc.terminate.assert_called_once()
+
+
+# ── TTL cache ─────────────────────────────────────────────────────────────────
+
+
+async def test_list_snapshots_cache_hit_within_ttl_skips_restic():
+    """A second call within the TTL window must not shell out to restic.
+    This is what makes the architecture viable — a dashboard refresh hitting
+    N jobs in quick succession invokes restic N times, not N×refresh-rate."""
+    proc = _make_process(0, stdout=_RESTIC_SNAPSHOTS_JSON)
+    call_count = {"n": 0}
+
+    async def fake_exec(*args, **kwargs):
+        call_count["n"] += 1
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        first = await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
+        second = await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
+
+    assert call_count["n"] == 1, "second call within TTL must use cache"
+    assert first == second
+
+
+async def test_list_snapshots_cache_miss_after_ttl_expires():
+    """After the TTL elapses, the cache entry is stale and the next call must
+    re-invoke restic so users see fresh data."""
+    proc = _make_process(0, stdout=_RESTIC_SNAPSHOTS_JSON)
+    call_count = {"n": 0}
+
+    async def fake_exec(*args, **kwargs):
+        call_count["n"] += 1
+        return proc
+
+    # Freeze time, then advance past the TTL.
+    fake_now = {"t": 1000.0}
+
+    def fake_monotonic():
+        return fake_now["t"]
+
+    with (
+        patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        patch.object(snapshot_listing, "_monotonic", fake_monotonic),
+    ):
+        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
+        fake_now["t"] += 31  # 1s past TTL
+        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
+
+    assert call_count["n"] == 2, "cache must miss after TTL expires"
+
+
+async def test_list_snapshots_cache_keyed_by_repo_path():
+    """Two different repos must have independent cache entries; a hit on repo
+    A must not return repo B's snapshots."""
+    snaps_a = json.dumps(
+        [
+            {
+                "id": "a" * 64,
+                "time": "2026-05-01T00:00:00Z",
+                "hostname": "h",
+                "paths": ["/x"],
+            }
+        ]
+    )
+    snaps_b = json.dumps(
+        [
+            {
+                "id": "b" * 64,
+                "time": "2026-05-02T00:00:00Z",
+                "hostname": "h",
+                "paths": ["/y"],
+            }
+        ]
+    )
+
+    call_order: list[str] = []
+
+    async def fake_exec(*args, **kwargs):
+        repo = kwargs.get("env", {}).get("RESTIC_REPOSITORY")
+        call_order.append(repo)
+        out = snaps_a if repo == "/destinations/A" else snaps_b
+        return _make_process(0, stdout=out)
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        res_a = await list_snapshots("/destinations/A", PASSWORD, job_id=JOB_ID)
+        res_b = await list_snapshots("/destinations/B", PASSWORD, job_id=JOB_ID)
+
+    assert res_a[0]["snapshot_id"] == "a" * 64
+    assert res_b[0]["snapshot_id"] == "b" * 64
+    assert call_order == ["/destinations/A", "/destinations/B"]
+
+
+async def test_clear_cache_forces_next_call_to_restic():
+    """_clear_cache() exists so the test suite (and any future explicit
+    invalidation point such as 'just completed a backup') can force a fresh
+    read. Without it, mocked tests would interfere with each other through
+    the module-level cache."""
+    proc = _make_process(0, stdout=_RESTIC_SNAPSHOTS_JSON)
+    call_count = {"n": 0}
+
+    async def fake_exec(*args, **kwargs):
+        call_count["n"] += 1
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
+        _clear_cache()
+        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
+
+    assert call_count["n"] == 2
+
+
+async def test_list_snapshots_use_cache_false_bypasses_cache():
+    """`use_cache=False` (the test default) must skip both lookup and store —
+    otherwise the rest of the test file would pollute each other's caches
+    even with `_clear_cache()` in autouse fixture."""
+    proc = _make_process(0, stdout=_RESTIC_SNAPSHOTS_JSON)
+    call_count = {"n": 0}
+
+    async def fake_exec(*args, **kwargs):
+        call_count["n"] += 1
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+
+    assert call_count["n"] == 2
+
+
+async def test_failed_calls_are_not_cached():
+    """A SnapshotListingError must not be sticky in the cache — otherwise a
+    transient backend hiccup would make the UI show 'no snapshots' for the
+    full TTL window even after restic recovered."""
+    call_count = {"n": 0}
+
+    async def fake_exec(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return _make_process(1, stderr="transient")
+        return _make_process(0, stdout=_RESTIC_SNAPSHOTS_JSON)
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        with pytest.raises(SnapshotListingError):
+            await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
+        # Immediate retry — must hit restic again, not return cached failure.
+        result = await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
+
+    assert call_count["n"] == 2
+    assert len(result) == 2

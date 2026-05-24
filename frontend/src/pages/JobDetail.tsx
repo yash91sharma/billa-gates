@@ -246,7 +246,7 @@ export default function JobDetail() {
           ) : (
             <ul className="space-y-1 text-sm">
               {(snapshots ?? []).map((s) => (
-                <li key={s.id}>
+                <li key={s.snapshot_id}>
                   <span>{s.snapshot_id.substring(0, 8)}</span>
                   {' — '}
                   {new Date(s.snapshot_time).toLocaleString()}

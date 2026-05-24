@@ -41,7 +41,7 @@ export default function SnapshotList({ snapshots }: SnapshotListProps) {
       </thead>
       <tbody className="[&>tr:nth-child(even)]:bg-muted/40">
         {snapshots.map((snap) => (
-          <tr key={snap.id} className="border-b last:border-0 hover:bg-muted/60">
+          <tr key={snap.snapshot_id} className="border-b last:border-0 hover:bg-muted/60">
             <td className="py-2 pr-4 font-mono">{snap.snapshot_id.slice(0, 8)}</td>
             <td className="py-2 pr-4">{formatDate(snap.snapshot_time)}</td>
             <td className="py-2 pr-4">{formatBytes(snap.size_bytes)}</td>

@@ -12,7 +12,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
 )
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -153,9 +152,6 @@ class BackupJob(Base):
     runs: Mapped[List["BackupRun"]] = relationship(
         "BackupRun", back_populates="job", cascade="all, delete-orphan"
     )
-    snapshots: Mapped[List["Snapshot"]] = relationship(
-        "Snapshot", back_populates="job", cascade="all, delete-orphan"
-    )
 
 
 class BackupRun(Base):
@@ -203,34 +199,6 @@ class BackupRun(Base):
     )
 
     job: Mapped["BackupJob"] = relationship("BackupJob", back_populates="runs")
-    snapshots: Mapped[List["Snapshot"]] = relationship("Snapshot", back_populates="run")
-
-
-class Snapshot(Base):
-    __tablename__ = "snapshots"
-    __table_args__ = (UniqueConstraint("job_id", "snapshot_id"),)
-
-    id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
-    )
-    job_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("backup_jobs.id", ondelete="CASCADE"), nullable=False
-    )
-    run_id: Mapped[Optional[str]] = mapped_column(
-        String(36), ForeignKey("backup_runs.id"), nullable=True
-    )
-    snapshot_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    snapshot_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    hostname: Mapped[str] = mapped_column(String, nullable=False)
-    paths: Mapped[List[str]] = mapped_column(JSON, nullable=False)
-    tags: Mapped[Optional[List[str]]] = mapped_column(JSON, nullable=True)
-    size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    captured_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-
-    job: Mapped["BackupJob"] = relationship("BackupJob", back_populates="snapshots")
-    run: Mapped[Optional["BackupRun"]] = relationship(
-        "BackupRun", back_populates="snapshots"
-    )
 
 
 class AppSettings(Base):

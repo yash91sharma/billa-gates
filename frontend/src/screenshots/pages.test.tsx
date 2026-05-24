@@ -107,16 +107,12 @@ const run: BackupRun = {
 }
 
 const snapshot: Snapshot = {
-  id: 'snap-1',
-  job_id: 'job-1',
-  run_id: 'run-1',
   snapshot_id: 'a'.repeat(64),
   snapshot_time: '2026-05-19T12:01:30Z',
   hostname: 'home-server',
   paths: ['/sources/documents'],
   tags: ['scheduled'],
   size_bytes: 1_073_741_824,
-  captured_at: '2026-05-19T12:02:00Z',
 }
 
 const settings: AppSettings = {

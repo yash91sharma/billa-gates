@@ -28,10 +28,9 @@ from app.db.models import (
     BackupJob,
     BackupRun,
     RunStatus,
-    Snapshot,
     TriggeredBy,
 )
-from app.services import backup_runner, restic
+from app.services import backup_runner, restic, snapshot_listing
 
 logger = get_logger(__name__)
 
@@ -492,12 +491,28 @@ async def list_job_runs(
 @log_call
 async def list_job_snapshots(
     job_id: str, session: AsyncSession = Depends(get_session)
-) -> Sequence[Snapshot]:
-    """Return all restic snapshots for a job ordered by snapshot_time descending."""
-    await _get_job_or_404(job_id, session)
-    result = await session.execute(
-        select(Snapshot)
-        .where(Snapshot.job_id == job_id)
-        .order_by(Snapshot.snapshot_time.desc())
-    )
-    return result.scalars().all()
+) -> List[SnapshotResponse]:
+    """Query restic live for this job's snapshots, newest first.
+
+    Restic is the source of truth (gaps.md C4-Alt); the response is built
+    by calling `restic snapshots --tag job:<id> --no-lock --json` and is
+    cached briefly per repo path to absorb dashboard refresh storms.
+    """
+    job = await _get_job_or_404(job_id, session)
+    repo_path = snapshot_listing.build_repo_path(job.destination_label, job.id)
+    try:
+        raw = await snapshot_listing.list_snapshots(
+            repo_path, job.restic_password, job_id=job.id
+        )
+    except snapshot_listing.SnapshotListingError as exc:
+        # If the repo doesn't exist yet (genuine first run before any backup),
+        # the UI should see "no snapshots" rather than a 503 — distinguish via
+        # stderr containing "does not exist" / "no such file". Anything else
+        # is a real failure the operator needs to see.
+        msg = str(exc).lower()
+        if "does not exist" in msg or "no such file" in msg or "unable to open" in msg:
+            return []
+        raise HTTPException(status_code=503, detail=f"snapshot listing failed: {exc}")
+    # Restic returns snapshots oldest-first; flip so the UI shows newest-first.
+    raw_sorted = sorted(raw, key=lambda s: s["snapshot_time"], reverse=True)
+    return [SnapshotResponse.model_validate(s) for s in raw_sorted]

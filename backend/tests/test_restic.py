@@ -12,7 +12,6 @@ from app.services.restic import (
     restic_forget_prune,
     restic_init,
     restic_prune,
-    restic_snapshots,
     restic_unlock,
     restic_version,
 )
@@ -399,38 +398,6 @@ async def test_backup_password_never_in_stdout():
             job_id=TEST_JOB_ID,
         )
     assert PASSWORD not in stdout
-
-
-# ── restic_snapshots ──────────────────────────────────────────────────────────
-
-SNAPSHOTS_JSON = json.dumps(
-    [
-        {
-            "id": "abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
-            "time": "2024-01-01T12:00:00Z",
-            "hostname": "myhost",
-            "paths": ["/sources/documents"],
-            "tags": ["weekly"],
-        }
-    ]
-)
-
-
-async def test_snapshots_success():
-    proc = _make_process(0, stdout=SNAPSHOTS_JSON)
-    with patch("asyncio.create_subprocess_exec", return_value=proc):
-        code, snapshots, stderr = await restic_snapshots(REPO, PASSWORD)
-    assert code == 0
-    assert len(snapshots) == 1
-    assert snapshots[0]["hostname"] == "myhost"
-
-
-async def test_snapshots_failure():
-    proc = _make_process(1, stderr="unable to open repo")
-    with patch("asyncio.create_subprocess_exec", return_value=proc):
-        code, snapshots, stderr = await restic_snapshots(REPO, PASSWORD)
-    assert code != 0
-    assert snapshots == []
 
 
 # ── restic_latest_snapshot_id ────────────────────────────────────────────────

@@ -81,16 +81,12 @@ const makeRun = (overrides: Partial<BackupRun> = {}): BackupRun => ({
 })
 
 const makeSnapshot = (overrides: Partial<Snapshot> = {}): Snapshot => ({
-  id: 'snap-1',
-  job_id: 'job-1',
-  run_id: 'run-1',
   snapshot_id: 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
   snapshot_time: '2024-01-15T10:30:00Z',
   hostname: 'myhost',
   paths: ['/sources/documents'],
   tags: null,
   size_bytes: 1073741824,
-  captured_at: '2024-01-15T10:35:00Z',
   ...overrides,
 })
 

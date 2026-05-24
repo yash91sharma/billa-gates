@@ -17,10 +17,9 @@ from app.db.models import (
     PruneStatus,
     RunReason,
     RunStatus,
-    Snapshot,
     TriggeredBy,
 )
-from app.services import restic
+from app.services import restic, snapshot_listing
 from app.services.notifications import send_notification
 
 logger = get_logger(__name__)
@@ -557,64 +556,13 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                         )
                     await s.commit()
 
-            # Step 9: Reconcile snapshots
-            rc, snapshots, _ = await restic.restic_snapshots(repo_path, job_password)
-            if rc == 0:
-                async with factory() as s:
-                    result = await s.execute(
-                        select(Snapshot).where(Snapshot.job_id == str(job_id))
-                    )
-                    existing_snaps = result.scalars().all()
-                    snap_ids: Set[str] = {snap["id"] for snap in snapshots}
-
-                    # Delete pruned snapshots
-                    for snap in existing_snaps:
-                        if snap.snapshot_id not in snap_ids:
-                            await s.delete(snap)
-
-                    # Upsert snapshots
-                    for snap in snapshots:
-                        snap_time_str: Optional[str] = snap.get("time")
-                        # snapshot_time and hostname/paths are NOT NULL in the
-                        # DB; skip any malformed snapshot dict missing them.
-                        if not snap_time_str:
-                            continue
-                        snap_time: datetime = datetime.fromisoformat(
-                            snap_time_str.replace("Z", "+00:00")
-                        )
-                        hostname: str = snap.get("hostname") or ""
-                        paths: list[str] = snap.get("paths") or []
-                        tags: list[str] | None = snap.get("tags")
-                        size_bytes: int | None = snap.get("total_size")
-
-                        snap_result = await s.execute(
-                            select(Snapshot).where(Snapshot.snapshot_id == snap["id"])
-                        )
-                        existing: Snapshot | None = snap_result.scalars().first()
-
-                        if existing:
-                            existing.snapshot_time = snap_time
-                            existing.hostname = hostname
-                            existing.paths = paths
-                            existing.tags = tags
-                            existing.size_bytes = size_bytes
-                        else:
-                            new_snap: Snapshot = Snapshot(
-                                id=str(uuid.uuid4()),
-                                job_id=str(job_id),
-                                snapshot_id=snap["id"],
-                                snapshot_time=snap_time,
-                                hostname=hostname,
-                                paths=paths,
-                                tags=tags,
-                                size_bytes=size_bytes,
-                                captured_at=datetime.now(timezone.utc),
-                            )
-                            if summary and snap["id"] == summary.get("snapshot_id"):
-                                new_snap.run_id = str(current_run_id)
-                            s.add(new_snap)
-
-                    await s.commit()
+            # Step 9 (snapshot DB reconcile) removed — restic is the source of
+            # truth and the snapshot listing route queries it on demand
+            # (gaps.md C4-Alt). BackupRun.snapshot_id, set above from the
+            # backup summary, is enough to link this run to the snapshot it
+            # produced. Invalidate the snapshot listing cache so the UI sees
+            # the new snapshot immediately rather than waiting for the TTL.
+            snapshot_listing._clear_cache()
         else:
             # If backup failed, skip steps 8-9 and mark them as skipped
             async with factory() as s:

@@ -669,74 +669,132 @@ async def test_get_job_runs_excludes_output_fields(client, engine):
 
 
 # ── GET /api/jobs/{id}/snapshots ──────────────────────────────────────────────
+#
+# Restic is the source of truth for snapshots (gaps.md C4-Alt): the endpoint
+# calls `app.services.snapshot_listing.list_snapshots` which shells out to
+# `restic snapshots --json --tag job:<id> --no-lock`. These tests therefore
+# mock the service rather than seeding a DB table.
 
 
 async def test_get_job_snapshots_empty(client):
+    from unittest.mock import AsyncMock
+
     with patch("os.path.isdir", return_value=True):
         created = (await client.post("/api/jobs", json=make_job_payload())).json()
-    resp = await client.get(f"/api/jobs/{created['id']}/snapshots")
+
+    with patch(
+        "app.services.snapshot_listing.list_snapshots",
+        new=AsyncMock(return_value=[]),
+    ):
+        resp = await client.get(f"/api/jobs/{created['id']}/snapshots")
     assert resp.status_code == 200
     assert resp.json() == []
 
 
-async def test_get_job_snapshots_returns_all(client, engine):
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    from app.db.models import Snapshot
+async def test_get_job_snapshots_returns_all(client):
+    from unittest.mock import AsyncMock
 
     with patch("os.path.isdir", return_value=True):
         created = (await client.post("/api/jobs", json=make_job_payload())).json()
 
-    now = datetime.now(timezone.utc)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as s:
-        for i in range(3):
-            snap = Snapshot(
-                id=str(uuid.uuid4()),
-                job_id=created["id"],
-                snapshot_id=f"{'a' * 60}{i:04d}",
-                snapshot_time=now,
-                hostname="host",
-                paths=["/sources/documents"],
-                captured_at=now,
-            )
-            s.add(snap)
-        await s.commit()
+    fake_snaps = [
+        {
+            "snapshot_id": f"{'a' * 60}{i:04d}",
+            "snapshot_time": "2026-05-01T12:00:00Z",
+            "hostname": "host",
+            "paths": ["/sources/documents"],
+            "tags": None,
+            "size_bytes": None,
+        }
+        for i in range(3)
+    ]
+    with patch(
+        "app.services.snapshot_listing.list_snapshots",
+        new=AsyncMock(return_value=fake_snaps),
+    ):
+        resp = await client.get(f"/api/jobs/{created['id']}/snapshots")
 
-    resp = await client.get(f"/api/jobs/{created['id']}/snapshots")
     assert resp.status_code == 200
     assert len(resp.json()) == 3
 
 
-async def test_get_job_snapshots_ordered_newest_first(client, engine):
+async def test_get_job_snapshots_ordered_newest_first(client):
+    """Restic emits snapshots oldest-first; the route reverses them so the UI
+    shows the most recent snapshot at the top of the list."""
     from datetime import timedelta
-
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    from app.db.models import Snapshot
+    from unittest.mock import AsyncMock
 
     with patch("os.path.isdir", return_value=True):
         created = (await client.post("/api/jobs", json=make_job_payload())).json()
 
     now = datetime.now(timezone.utc)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as s:
-        for i in range(3):
-            snap = Snapshot(
-                id=str(uuid.uuid4()),
-                job_id=created["id"],
-                snapshot_id=f"{'b' * 60}{i:04d}",
-                snapshot_time=now - timedelta(hours=i),
-                hostname="host",
-                paths=["/sources/documents"],
-                captured_at=now,
-            )
-            s.add(snap)
-        await s.commit()
+    # Deliberately emit oldest-first so the assertion proves the route
+    # actually sorts rather than coincidentally agreeing with the mock order.
+    fake_snaps = [
+        {
+            "snapshot_id": f"{'b' * 60}{i:04d}",
+            "snapshot_time": (now - timedelta(hours=i)).isoformat(),
+            "hostname": "host",
+            "paths": ["/sources/documents"],
+            "tags": None,
+            "size_bytes": None,
+        }
+        for i in reversed(range(3))
+    ]
+    with patch(
+        "app.services.snapshot_listing.list_snapshots",
+        new=AsyncMock(return_value=fake_snaps),
+    ):
+        resp = await client.get(f"/api/jobs/{created['id']}/snapshots")
 
-    resp = await client.get(f"/api/jobs/{created['id']}/snapshots")
     times = [s["snapshot_time"] for s in resp.json()]
     assert times == sorted(times, reverse=True)
+
+
+async def test_get_job_snapshots_repo_missing_returns_empty_list(client):
+    """A genuine first run (or a deleted repo) raises SnapshotListingError with
+    a 'does not exist' / 'unable to open' stderr — the route must surface this
+    as an empty list rather than a 503 so the UI shows 'No snapshots yet'."""
+    from unittest.mock import AsyncMock
+
+    from app.services.snapshot_listing import SnapshotListingError
+
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    with patch(
+        "app.services.snapshot_listing.list_snapshots",
+        new=AsyncMock(
+            side_effect=SnapshotListingError(
+                "restic snapshots failed rc=10 stderr='Fatal: unable to open repo'"
+            )
+        ),
+    ):
+        resp = await client.get(f"/api/jobs/{created['id']}/snapshots")
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_get_job_snapshots_genuine_failure_returns_503(client):
+    """A real backend failure (timeout, corruption) must surface as 503 so
+    operators see the problem rather than silently rendering 'No snapshots'."""
+    from unittest.mock import AsyncMock
+
+    from app.services.snapshot_listing import SnapshotListingError
+
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    with patch(
+        "app.services.snapshot_listing.list_snapshots",
+        new=AsyncMock(
+            side_effect=SnapshotListingError("restic snapshots timed out after 60s")
+        ),
+    ):
+        resp = await client.get(f"/api/jobs/{created['id']}/snapshots")
+
+    assert resp.status_code == 503
 
 
 # ── has_successful_run field ──────────────────────────────────────────────────

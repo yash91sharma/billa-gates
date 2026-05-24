@@ -189,20 +189,19 @@ class RunSummarySchema(BaseModel):
 
 
 class SnapshotResponse(BaseModel):
-    """Full snapshot record."""
+    """Snapshot record sourced live from restic.
 
-    model_config = ConfigDict(from_attributes=True)
+    Restic is the source of truth — there is no DB row to attach an internal
+    UUID, run linkage, or `captured_at` to. The `BackupRun.snapshot_id`
+    column links runs to their snapshot via this `snapshot_id`.
+    """
 
-    id: str
-    job_id: str
-    run_id: Optional[str] = None
     snapshot_id: str
     snapshot_time: datetime
     hostname: str
     paths: List[str]
     tags: Optional[List[str]] = None
     size_bytes: Optional[int] = None
-    captured_at: datetime
 
 
 class JobResponse(BaseModel):

@@ -131,7 +131,6 @@ async def test_step4_repo_exists_proceeds(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -174,7 +173,6 @@ async def test_step4_repo_not_found_inits_repo(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -280,7 +278,6 @@ async def test_auto_unlock_called_before_backup_when_enabled(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -332,7 +329,6 @@ async def test_auto_unlock_skipped_when_disabled(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -371,7 +367,6 @@ async def test_auto_unlock_failure_does_not_fail_the_run(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -419,7 +414,6 @@ async def test_backup_passes_parent_when_prior_snapshot_exists(engine):
         ),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -459,7 +453,6 @@ async def test_backup_omits_parent_on_first_run(engine):
         patch("app.services.restic.restic_latest_snapshot_id", return_value=None),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -517,7 +510,6 @@ async def test_backup_rc11_triggers_unlock_and_retry(engine):
         patch("app.services.restic.restic_unlock", side_effect=fake_unlock),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -682,15 +674,10 @@ async def test_step5_backup_rc3_marks_warning_and_runs_prune_and_sync(engine):
     )
 
     forget_called = {"v": False}
-    snapshots_called = {"v": False}
 
     async def fake_forget(*args, **kwargs):
         forget_called["v"] = True
         return (0, "", "")
-
-    async def fake_snapshots(*args, **kwargs):
-        snapshots_called["v"] = True
-        return (0, [], "")
 
     with (
         patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
@@ -699,7 +686,6 @@ async def test_step5_backup_rc3_marks_warning_and_runs_prune_and_sync(engine):
             return_value=(3, rc3_stdout, "", rc3_summary),
         ),
         patch("app.services.restic.restic_forget_prune", side_effect=fake_forget),
-        patch("app.services.restic.restic_snapshots", side_effect=fake_snapshots),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -707,7 +693,8 @@ async def test_step5_backup_rc3_marks_warning_and_runs_prune_and_sync(engine):
     run = await _get_run(engine, run_id)
     assert run.status == RunStatus.warning
     assert forget_called["v"] is True, "prune must run on rc=3 so repo doesn't bloat"
-    assert snapshots_called["v"] is True, "snapshot sync must run on rc=3"
+    # snapshot_id is taken from the JSON summary, not from a post-backup
+    # `restic snapshots` reconcile (which was dropped — see gaps.md C4-Alt).
     assert run.snapshot_id == "b" * 64
     assert run.error_output is not None
     assert "/sources/x/locked.db" in run.error_output
@@ -743,7 +730,6 @@ async def test_step5_backup_rc3_without_retention_runs_plain_prune(engine):
             return_value=(3, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", side_effect=fake_prune),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -808,7 +794,6 @@ async def test_run_history_trimmed_to_keep_last_runs(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -873,7 +858,6 @@ async def test_run_history_keeps_newest_runs(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -924,7 +908,6 @@ async def test_step7_stats_populated_from_summary(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -969,7 +952,6 @@ async def test_step8_prune_called_after_success(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", side_effect=fake_prune),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -1007,7 +989,6 @@ async def test_step8_forget_prune_called_when_retention_set(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_forget_prune", side_effect=fake_forget),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -1039,7 +1020,6 @@ async def test_step8_prune_failure_nonfatal(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(1, "", "disk full")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -1053,7 +1033,13 @@ async def test_step8_prune_failure_nonfatal(engine):
 # ── Step 9: snapshot reconciliation ──────────────────────────────────────────
 
 
-async def test_step9_snapshot_upserted(engine):
+async def test_step9_snapshot_listing_cache_invalidated_after_successful_backup(engine):
+    """After a successful backup, the snapshot-listing TTL cache must be
+    cleared so the UI sees the new snapshot immediately rather than waiting
+    out the TTL. Restic itself is the source of truth (gaps.md C4-Alt) —
+    the cache only exists to absorb dashboard refresh storms."""
+    from app.services import snapshot_listing
+
     await _setup_job(engine)
     run_id = str(uuid.uuid4())
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -1070,12 +1056,9 @@ async def test_step9_snapshot_upserted(engine):
         s.add(run)
         await s.commit()
 
-    snap = {
-        "id": "a" * 64,
-        "time": "2024-01-01T12:00:00Z",
-        "hostname": "myhost",
-        "paths": ["/sources/documents"],
-    }
+    # Seed the cache so we can observe it being cleared.
+    snapshot_listing._cache["/destinations/fake"] = ([{"sentinel": True}], 9e9)
+    assert snapshot_listing._cache, "test setup failed: cache should be seeded"
 
     with (
         patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
@@ -1084,20 +1067,17 @@ async def test_step9_snapshot_upserted(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [snap], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
-    from sqlalchemy import select
-
-    from app.db.models import Snapshot
-
-    async with factory() as s:
-        result = await s.execute(select(Snapshot).where(Snapshot.job_id == str(JOB_ID)))
-        snaps = result.scalars().all()
-    assert len(snaps) == 1
-    assert snaps[0].snapshot_id == "a" * 64
+    # Successful run must have invalidated every cache entry so the
+    # /jobs/{id}/snapshots endpoint will hit restic on the next request.
+    assert snapshot_listing._cache == {}
+    # The snapshot_id link from run to restic snapshot lives on BackupRun,
+    # not in a separate table.
+    run_obj = await _get_run(engine, run_id)
+    assert run_obj.snapshot_id == BACKUP_SUMMARY["snapshot_id"]
 
 
 # ── Step 10: finalize ─────────────────────────────────────────────────────────
@@ -1127,7 +1107,6 @@ async def test_step10_success_status_and_duration(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -1163,7 +1142,6 @@ async def test_step10_check_status_skipped_when_check_disabled(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -1201,7 +1179,6 @@ async def test_step12_check_passed(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.restic.restic_check", return_value=(0, "no errors", "")),
         patch("app.services.backup_runner.send_notification"),
     ):
@@ -1238,7 +1215,6 @@ async def test_step12_check_failure_nonfatal(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch(
             "app.services.restic.restic_check", return_value=(1, "", "corrupted pack")
         ),
@@ -1279,7 +1255,6 @@ async def testactive_jobs_cleared_after_completion(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -1350,7 +1325,6 @@ async def test_step3_notification_sent_on_start(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -1388,7 +1362,6 @@ async def test_notification_skipped_when_topic_empty(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -1665,7 +1638,6 @@ async def test_step6_source_path_uses_source_label(engine):
         patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -1700,7 +1672,6 @@ async def test_step6_source_subpath_appended_to_source_path(engine):
         patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -1738,7 +1709,6 @@ async def test_step6_repo_path_uses_destination_label(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -1836,7 +1806,6 @@ async def test_notify_on_success_false_skips_success_notification(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -1886,7 +1855,6 @@ async def test_step11_warning_notification_sent(engine):
             return_value=(3, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -1936,7 +1904,6 @@ async def test_notify_on_warning_false_skips_warning_notification(engine):
             return_value=(3, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -2027,7 +1994,6 @@ async def test_step12_check_subset_passes_percent_to_restic(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.restic.restic_check", side_effect=fake_check),
         patch("app.services.backup_runner.send_notification"),
     ):
@@ -2070,7 +2036,6 @@ async def test_step12_check_full_mode_passed_correctly(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.restic.restic_check", side_effect=fake_check),
         patch("app.services.backup_runner.send_notification"),
     ):
@@ -2117,7 +2082,6 @@ async def test_step12_check_uses_job_timeout(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
         patch("app.services.restic.restic_check", side_effect=fake_check),
         patch("app.services.backup_runner.send_notification"),
     ):

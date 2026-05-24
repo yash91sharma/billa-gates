@@ -3,16 +3,12 @@ import type { Snapshot } from '../lib/types'
 import SnapshotList from './SnapshotList'
 
 const makeSnapshot = (overrides: Partial<Snapshot> = {}): Snapshot => ({
-  id: 'snap-uuid-1',
-  job_id: 'job-uuid-1',
-  run_id: 'run-uuid-1',
   snapshot_id: 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
   snapshot_time: '2024-01-15T10:30:00Z',
   hostname: 'myhost',
   paths: ['/sources/documents'],
   tags: ['weekly'],
   size_bytes: 524288000, // 500 MB
-  captured_at: '2024-01-15T10:35:00Z',
   ...overrides,
 })
 
@@ -32,9 +28,7 @@ describe('SnapshotList', () => {
   describe('snapshot rows', () => {
     it('renders one row per snapshot', () => {
       render(
-        <SnapshotList
-          snapshots={[makeSnapshot(), makeSnapshot({ id: 'snap-2', snapshot_id: 'b'.repeat(64) })]}
-        />
+        <SnapshotList snapshots={[makeSnapshot(), makeSnapshot({ snapshot_id: 'b'.repeat(64) })]} />
       )
       const rows = screen.getAllByRole('row')
       expect(rows.length).toBeGreaterThanOrEqual(2)
