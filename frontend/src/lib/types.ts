@@ -114,6 +114,7 @@ export interface AppSettings {
   restic_version: string | null
   default_job_timeout_hours: number
   keep_last_runs: number
+  auto_unlock: boolean
 }
 
 export interface HealthStatus {

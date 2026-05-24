@@ -243,6 +243,254 @@ async def test_step4_init_failure_marks_failed(engine):
     assert run.status == RunStatus.failed
 
 
+# ── Step 4.5: auto-unlock (C1) ───────────────────────────────────────────────
+
+
+async def test_auto_unlock_called_before_backup_when_enabled(engine):
+    """Default is auto_unlock=True. Before each backup, restic_unlock is run
+    so that a lock left behind by a previous abrupt termination is cleared.
+    Without this, every subsequent run fails on lock acquisition."""
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    unlock_called = {"v": False}
+
+    async def fake_unlock(*args, **kwargs):
+        unlock_called["v"] = True
+        return (0, "successfully removed locks", "")
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch("app.services.restic.restic_unlock", side_effect=fake_unlock),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
+        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert unlock_called["v"] is True
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.success
+
+
+async def test_auto_unlock_skipped_when_disabled(engine):
+    """If the operator turns auto_unlock off (e.g. running multi-writer setups
+    where automatic unlock would mask a real concurrency conflict), the
+    backup runner must not call restic_unlock."""
+    from app.db.models import AppSettings
+
+    await _setup_job(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        settings = await s.get(AppSettings, 1)
+        assert settings is not None
+        settings.auto_unlock = False
+        await s.commit()
+
+    run_id = str(uuid.uuid4())
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    unlock_called = {"v": False}
+
+    async def fake_unlock(*args, **kwargs):
+        unlock_called["v"] = True
+        return (0, "", "")
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch("app.services.restic.restic_unlock", side_effect=fake_unlock),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
+        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert unlock_called["v"] is False
+
+
+async def test_auto_unlock_failure_does_not_fail_the_run(engine):
+    """An empty restic repo (just initialized) has no lock to clear, so
+    restic_unlock can legitimately exit non-zero. The run must continue and
+    succeed if the actual backup succeeds."""
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_unlock",
+            return_value=(1, "", "no locks to clear"),
+        ),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
+        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.success
+
+
+# ── Step 5: backup, rc=11 (lock failure) auto-recovery (C1) ──────────────────
+
+
+async def test_backup_rc11_triggers_unlock_and_retry(engine):
+    """Restic exit code 11 means the repo is locked. The runner must call
+    restic_unlock and retry the backup exactly once — without that, a stale
+    lock left by a prior abrupt termination breaks all subsequent runs even
+    when auto_unlock has been turned off (so unlock didn't run pre-emptively)."""
+    from app.db.models import AppSettings
+
+    await _setup_job(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        settings = await s.get(AppSettings, 1)
+        assert settings is not None
+        settings.auto_unlock = False
+        await s.commit()
+
+    run_id = str(uuid.uuid4())
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    backup_calls = {"n": 0}
+    unlock_calls = {"n": 0}
+
+    async def fake_backup(*args, **kwargs):
+        backup_calls["n"] += 1
+        if backup_calls["n"] == 1:
+            return (11, "", "unable to create lock in backend: already locked", None)
+        return (0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY)
+
+    async def fake_unlock(*args, **kwargs):
+        unlock_calls["n"] += 1
+        return (0, "successfully removed locks", "")
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch("app.services.restic.restic_unlock", side_effect=fake_unlock),
+        patch("app.services.restic.restic_backup", side_effect=fake_backup),
+        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
+        patch("app.services.restic.restic_snapshots", return_value=(0, [], "")),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert backup_calls["n"] == 2, "backup must be retried exactly once after unlock"
+    assert unlock_calls["n"] == 1, "unlock must be called once between attempts"
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.success
+
+
+async def test_backup_rc11_retry_capped_at_one(engine):
+    """If the retry also returns rc=11, the run must fail rather than loop
+    forever. Two attempts total — no third."""
+    from app.db.models import AppSettings
+
+    await _setup_job(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        settings = await s.get(AppSettings, 1)
+        assert settings is not None
+        settings.auto_unlock = False
+        await s.commit()
+
+    run_id = str(uuid.uuid4())
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    backup_calls = {"n": 0}
+
+    async def fake_backup(*args, **kwargs):
+        backup_calls["n"] += 1
+        return (11, "", "unable to create lock in backend: already locked", None)
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_unlock",
+            return_value=(0, "removed locks", ""),
+        ),
+        patch("app.services.restic.restic_backup", side_effect=fake_backup),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert backup_calls["n"] == 2, "must not loop past one retry"
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert "lock" in (run.error_output or "").lower()
+
+
 # ── Step 5: backup ────────────────────────────────────────────────────────────
 
 

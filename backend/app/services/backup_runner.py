@@ -171,6 +171,7 @@ async def run_backup(job_id: uuid.UUID, run_id: Optional[uuid.UUID] = None) -> N
                     "notify_on_warning": settings_obj.notify_on_warning,
                     "notify_on_verification": settings_obj.notify_on_verification,
                     "default_job_timeout_hours": settings_obj.default_job_timeout_hours,
+                    "auto_unlock": settings_obj.auto_unlock,
                 }
 
         # Step 3: Start notification
@@ -255,6 +256,32 @@ async def run_backup(job_id: uuid.UUID, run_id: Optional[uuid.UUID] = None) -> N
                 f"repo_initialized"
             )
 
+        # Step 4.5: Auto-unlock — clear any stale lock left behind by an
+        # abrupt termination (OOM, container kill, host reboot). Failure is
+        # logged but non-fatal: a freshly initialized repo legitimately has
+        # no lock to remove, and any deeper problem (missing restic binary,
+        # network down) will be surfaced by the backup step that follows.
+        if settings_dict.get("auto_unlock", True):
+            try:
+                unlock_rc, _, unlock_err = await restic.restic_unlock(
+                    repo_path, job_password
+                )
+                if unlock_rc == 0:
+                    logger.info(
+                        f"job_id={job_id} run_id={current_run_id} step=auto_unlock "
+                        f"status=ok"
+                    )
+                else:
+                    logger.warning(
+                        f"job_id={job_id} run_id={current_run_id} step=auto_unlock "
+                        f"status=nonzero rc={unlock_rc} error={unlock_err!r}"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    f"job_id={job_id} run_id={current_run_id} step=auto_unlock "
+                    f"status=exception error={exc!r}"
+                )
+
         # Step 5: Backup
         job_timeout_hours: int | None = job.timeout_hours
         default_timeout: int = cast(
@@ -297,6 +324,30 @@ async def run_backup(job_id: uuid.UUID, run_id: Optional[uuid.UUID] = None) -> N
                 timeout_seconds,
                 **backup_kwargs,
             )
+            # Exit code 11 = restic failed to acquire the repo lock. The most
+            # common cause is a stale lock left by a previous abrupt
+            # termination. Clear it and retry exactly once — never loop, or
+            # a genuinely-contended repo would hang the runner forever.
+            if rc == 11:
+                logger.warning(
+                    f"job_id={job_id} run_id={current_run_id} step=backup_execution "
+                    f"rc=11 stale_lock_suspected attempting_unlock_and_retry"
+                )
+                try:
+                    await restic.restic_unlock(repo_path, job_password)
+                except Exception as exc:
+                    logger.warning(
+                        f"job_id={job_id} run_id={current_run_id} step=lock_retry "
+                        f"unlock_exception error={exc!r}"
+                    )
+                rc, stdout, stderr, summary = await restic.restic_backup(
+                    repo_path,
+                    job_password,
+                    source_path,
+                    timeout_seconds,
+                    **backup_kwargs,
+                )
+
             if rc == 0:
                 backup_success = True
                 logger.info(

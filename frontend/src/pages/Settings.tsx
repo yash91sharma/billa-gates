@@ -13,6 +13,7 @@ export default function Settings() {
   const [notifyVerification, setNotifyVerification] = useState(false)
   const [timeoutHours, setTimeoutHours] = useState(24)
   const [keepLastRuns, setKeepLastRuns] = useState(100)
+  const [autoUnlock, setAutoUnlock] = useState(true)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [ntfyMessage, setNtfyMessage] = useState<string | null>(null)
   const [oldLabel, setOldLabel] = useState('')
@@ -49,6 +50,7 @@ export default function Settings() {
       setNotifyVerification(settings.notify_on_verification)
       setTimeoutHours(settings.default_job_timeout_hours)
       setKeepLastRuns(settings.keep_last_runs)
+      setAutoUnlock(settings.auto_unlock)
       setTimeout(() => setNtfyVisible(true), 100)
     }
   }, [settings])
@@ -90,6 +92,7 @@ export default function Settings() {
         notify_on_verification: notifyVerification,
         default_job_timeout_hours: timeoutHours,
         keep_last_runs: keepLastRuns,
+        auto_unlock: autoUnlock,
       })
     } catch {
       setSaveError('Error: failed to save settings.')
@@ -260,6 +263,23 @@ export default function Settings() {
               <p className="text-xs text-muted-foreground mt-1">
                 Older run records past this count are deleted after each run. Restic snapshots are
                 not affected.
+              </p>
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <input
+                  id="auto-unlock"
+                  type="checkbox"
+                  checked={autoUnlock}
+                  onChange={(e) => setAutoUnlock(e.target.checked)}
+                />
+                <label htmlFor="auto-unlock" className="text-sm">
+                  Auto-clear stale restic locks before each backup
+                </label>
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">
+                Runs <code>restic unlock</code> before every backup so a lock left behind by an
+                abrupt termination (OOM, container restart) doesn't break all future backups.
               </p>
             </div>
           </div>

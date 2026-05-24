@@ -55,6 +55,7 @@ def _settings_response(settings: AppSettings) -> dict[str, object]:
         "notify_on_verification": settings.notify_on_verification,
         "default_job_timeout_hours": settings.default_job_timeout_hours,
         "keep_last_runs": settings.keep_last_runs,
+        "auto_unlock": settings.auto_unlock,
         "restic_version": settings.restic_version,
     }
 
@@ -95,6 +96,7 @@ async def update_settings(
     settings.notify_on_verification = body.notify_on_verification
     settings.default_job_timeout_hours = body.default_job_timeout_hours
     settings.keep_last_runs = body.keep_last_runs
+    settings.auto_unlock = body.auto_unlock
 
     await session.commit()
     logger.info(

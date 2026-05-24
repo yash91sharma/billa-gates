@@ -129,6 +129,7 @@ const settings: AppSettings = {
   notify_on_failure: true,
   notify_on_warning: true,
   keep_last_runs: 100,
+  auto_unlock: true,
   notify_on_verification: false,
   restic_version: '0.17.3',
   default_job_timeout_hours: 24,

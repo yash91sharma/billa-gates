@@ -9,6 +9,21 @@ from app.core.logging import get_logger, log_call
 logger = get_logger(__name__)
 
 
+async def _terminate_then_kill(
+    proc: asyncio.subprocess.Process, grace_seconds: float = 10.0
+) -> None:
+    """SIGTERM the process, give it a grace window to clean up, SIGKILL only
+    if it's still alive. Restic catches SIGTERM and removes its lock file —
+    SIGKILL leaves the lock behind and breaks every subsequent backup.
+    """
+    proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace_seconds)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+
+
 @log_call
 async def restic_version() -> Optional[str]:
     """Parse restic version. Returns None on any failure."""
@@ -146,7 +161,7 @@ async def restic_backup(
                 proc.communicate(), timeout=timeout_seconds
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            await _terminate_then_kill(proc)
             return (-1, "", "backup timed out", None)
     except Exception as e:
         return (-1, "", str(e), None)
@@ -262,7 +277,7 @@ async def restic_forget_prune(
                 proc.communicate(), timeout=timeout_seconds
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            await _terminate_then_kill(proc)
             return (-1, "", "forget/prune timed out")
     except Exception as e:
         return (-1, "", str(e))
@@ -298,7 +313,7 @@ async def restic_prune(
                 proc.communicate(), timeout=timeout_seconds
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            await _terminate_then_kill(proc)
             return (-1, "", "prune timed out")
     except Exception as e:
         return (-1, "", str(e))
@@ -343,7 +358,7 @@ async def restic_check(
                 proc.communicate(), timeout=timeout_seconds
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            await _terminate_then_kill(proc)
             return (-1, "", "check timed out")
     except Exception as e:
         return (-1, "", str(e))

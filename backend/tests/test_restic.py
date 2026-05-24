@@ -5,6 +5,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.services.restic import (
+    _terminate_then_kill,
     restic_backup,
     restic_cat_config,
     restic_check,
@@ -819,3 +820,138 @@ async def test_forget_prune_keep_within_hourly_flag():
     args_str = " ".join(str(a) for a in captured["args"])
     assert "--keep-within-hourly" in args_str
     assert "2d" in args_str
+
+
+# ── _terminate_then_kill ──────────────────────────────────────────────────────
+
+
+async def test_terminate_then_kill_sigterm_only_when_process_exits_in_grace():
+    """If the process exits during the grace period, only terminate() is called
+    — restic gets a chance to clean up its lock file and we never SIGKILL it."""
+    proc = AsyncMock()
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=0)
+    proc.returncode = 0
+
+    await _terminate_then_kill(proc, grace_seconds=5.0)
+
+    proc.terminate.assert_called_once()
+    proc.kill.assert_not_called()
+
+
+async def test_terminate_then_kill_falls_through_to_sigkill_after_grace():
+    """If the process is still alive after the grace period, SIGKILL is sent
+    as a last resort. This is the only path that should ever leave a stale
+    lock file behind."""
+    proc = AsyncMock()
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=-9)
+
+    async def fake_wait_for(coro, timeout):
+        if hasattr(coro, "close"):
+            coro.close()
+        raise asyncio.TimeoutError()
+
+    with patch("asyncio.wait_for", side_effect=fake_wait_for):
+        await _terminate_then_kill(proc, grace_seconds=0.01)
+
+    proc.terminate.assert_called_once()
+    proc.kill.assert_called_once()
+    # After kill we must wait again, otherwise we'd leak a zombie.
+    assert proc.wait.await_count >= 1
+
+
+async def test_backup_timeout_terminates_before_kill():
+    """On backup timeout, _terminate_then_kill is used (SIGTERM-first) instead
+    of the old proc.kill() so restic can clean up its lock file."""
+    proc = AsyncMock()
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=0)
+    proc.returncode = 0
+    proc.communicate = AsyncMock()
+
+    async def fake_wait_for(coro, timeout):
+        if hasattr(coro, "close"):
+            coro.close()
+        raise asyncio.TimeoutError()
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with patch("asyncio.wait_for", side_effect=fake_wait_for):
+            code, _, stderr, _ = await restic_backup(
+                REPO, PASSWORD, "/sources/documents", timeout_seconds=1
+            )
+
+    assert code != 0
+    assert "timed out" in stderr.lower()
+    proc.terminate.assert_called_once()
+
+
+async def test_forget_prune_timeout_terminates_before_kill():
+    proc = AsyncMock()
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=0)
+    proc.returncode = 0
+    proc.communicate = AsyncMock()
+
+    async def fake_wait_for(coro, timeout):
+        if hasattr(coro, "close"):
+            coro.close()
+        raise asyncio.TimeoutError()
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with patch("asyncio.wait_for", side_effect=fake_wait_for):
+            code, _, err = await restic_forget_prune(
+                REPO, PASSWORD, timeout_seconds=1, retain_keep_last=5
+            )
+
+    assert code != 0
+    assert "timed out" in err.lower()
+    proc.terminate.assert_called_once()
+
+
+async def test_prune_timeout_terminates_before_kill():
+    proc = AsyncMock()
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=0)
+    proc.returncode = 0
+    proc.communicate = AsyncMock()
+
+    async def fake_wait_for(coro, timeout):
+        if hasattr(coro, "close"):
+            coro.close()
+        raise asyncio.TimeoutError()
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with patch("asyncio.wait_for", side_effect=fake_wait_for):
+            code, _, err = await restic_prune(REPO, PASSWORD, timeout_seconds=1)
+
+    assert code != 0
+    assert "timed out" in err.lower()
+    proc.terminate.assert_called_once()
+
+
+async def test_check_timeout_terminates_before_kill():
+    proc = AsyncMock()
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=0)
+    proc.returncode = 0
+    proc.communicate = AsyncMock()
+
+    async def fake_wait_for(coro, timeout):
+        if hasattr(coro, "close"):
+            coro.close()
+        raise asyncio.TimeoutError()
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with patch("asyncio.wait_for", side_effect=fake_wait_for):
+            code, _, err = await restic_check(REPO, PASSWORD, "structural", None, 1)
+
+    assert code != 0
+    assert "timed out" in err.lower()
+    proc.terminate.assert_called_once()

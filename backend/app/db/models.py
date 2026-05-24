@@ -262,3 +262,8 @@ class AppSettings(Base):
     # Cap on rows kept in `backup_runs` per job — older rows are trimmed
     # oldest-first after each run finishes. Does not affect restic snapshots.
     keep_last_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    # When True, `restic unlock` runs before every backup so a stale lock left
+    # by an abrupt termination (container OOM, host reboot) doesn't break all
+    # future backups for the job. Defaults True because this is a single-tenant
+    # deployment — no other writer can hold a legitimate lock.
+    auto_unlock: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

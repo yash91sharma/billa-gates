@@ -22,6 +22,7 @@ class SettingsUpdate(BaseModel):
     notify_on_verification: bool = True
     default_job_timeout_hours: int = Field(24, ge=1, le=168)
     keep_last_runs: int = Field(100, ge=1, le=10000)
+    auto_unlock: bool = True
 
     @field_validator("ntfy_server_url")
     @classmethod
@@ -63,6 +64,7 @@ class SettingsResponse(BaseModel):
     notify_on_verification: bool
     default_job_timeout_hours: int
     keep_last_runs: int
+    auto_unlock: bool
     restic_version: Optional[str] = None
 
 

@@ -25,6 +25,36 @@ async def test_get_settings_keep_last_runs_default(client):
     assert resp.json()["keep_last_runs"] == 100
 
 
+async def test_get_settings_auto_unlock_default(client):
+    """auto_unlock must default to True so stale restic lock files (e.g. left
+    after a container kill) are cleared automatically before the next backup.
+    Operators who want the legacy fail-loud behavior can flip it off."""
+    resp = await client.get("/api/settings")
+    assert resp.status_code == 200
+    assert resp.json()["auto_unlock"] is True
+
+
+async def test_update_settings_auto_unlock_false(client):
+    resp = await client.put(
+        "/api/settings",
+        json={
+            "ntfy_server_url": "https://ntfy.sh",
+            "ntfy_topic": "x",
+            "ntfy_token": None,
+            "notify_on_start": True,
+            "notify_on_success": True,
+            "notify_on_failure": True,
+            "notify_on_warning": True,
+            "notify_on_verification": True,
+            "default_job_timeout_hours": 24,
+            "keep_last_runs": 100,
+            "auto_unlock": False,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["auto_unlock"] is False
+
+
 async def test_update_settings_keep_last_runs(client):
     resp = await client.put(
         "/api/settings",

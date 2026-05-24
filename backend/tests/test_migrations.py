@@ -132,6 +132,7 @@ async def test_migration_creates_all_tables():
             "restic_version",
             "default_job_timeout_hours",
             "keep_last_runs",
+            "auto_unlock",
         }
         assert expected_settings.issubset(settings_cols)
 

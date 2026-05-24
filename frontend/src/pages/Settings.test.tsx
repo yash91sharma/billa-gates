@@ -20,6 +20,7 @@ const makeSettings = (overrides: Partial<AppSettings> = {}): AppSettings => ({
   restic_version: '0.17.3',
   default_job_timeout_hours: 24,
   keep_last_runs: 100,
+  auto_unlock: true,
   ...overrides,
 })
 
