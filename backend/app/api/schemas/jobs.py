@@ -7,6 +7,7 @@ from typing import Any, List, Optional
 from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.api.schemas.base import UTCDateTime
 from app.db.models import CheckMode, CompressionMode, ScheduleType
 
 _LABEL_RE = re.compile(r"^[^/]+$")
@@ -170,8 +171,8 @@ class RunSummarySchema(BaseModel):
     status: str
     reason: Optional[str] = None
     triggered_by: str
-    started_at: datetime
-    finished_at: Optional[datetime] = None
+    started_at: UTCDateTime
+    finished_at: Optional[UTCDateTime] = None
     duration_seconds: Optional[int] = None
     snapshot_id: Optional[str] = None
     files_new: Optional[int] = None
@@ -198,7 +199,7 @@ class SnapshotResponse(BaseModel):
     """
 
     snapshot_id: str
-    snapshot_time: datetime
+    snapshot_time: UTCDateTime
     hostname: str
     paths: List[str]
     tags: Optional[List[str]] = None
@@ -254,10 +255,10 @@ class JobResponse(BaseModel):
     check_subset_percent: Optional[int] = None
     check_timeout_hours: Optional[int] = None
 
-    created_at: datetime
-    updated_at: datetime
+    created_at: UTCDateTime
+    updated_at: UTCDateTime
 
     # Computed fields injected by the route layer.
     has_successful_run: bool = False
-    next_run_time: Optional[datetime] = None
+    next_run_time: Optional[UTCDateTime] = None
     last_run: Optional[RunSummarySchema] = None
