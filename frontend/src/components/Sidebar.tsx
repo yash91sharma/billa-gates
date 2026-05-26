@@ -1,6 +1,7 @@
 import { Briefcase, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Settings } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
 import { NavLink } from 'react-router-dom'
+import billaLogo from '@/assets/billa.png'
 import { cn } from '@/lib/utils'
 
 interface NavItem {
@@ -35,7 +36,16 @@ export default function Sidebar({ expanded, onToggle, onNavigate }: SidebarProps
         )}
       >
         {expanded && (
-          <span className="font-semibold tracking-tight text-foreground">Billa-Gates</span>
+          <div className="flex items-center gap-2">
+            <img
+              src={billaLogo}
+              alt=""
+              aria-hidden="true"
+              className="h-6 w-6 shrink-0"
+              style={{ imageRendering: 'pixelated' }}
+            />
+            <span className="font-semibold tracking-tight text-foreground">Billa-Gates</span>
+          </div>
         )}
         <button
           type="button"

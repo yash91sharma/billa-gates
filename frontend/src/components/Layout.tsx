@@ -1,6 +1,7 @@
 import { Menu } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Outlet } from 'react-router-dom'
+import billaLogo from '@/assets/billa.png'
 import { cn } from '@/lib/utils'
 import Sidebar from './Sidebar'
 
@@ -76,6 +77,13 @@ export default function Layout() {
           >
             <Menu className="h-5 w-5" />
           </button>
+          <img
+            src={billaLogo}
+            alt=""
+            aria-hidden="true"
+            className="h-6 w-6 shrink-0"
+            style={{ imageRendering: 'pixelated' }}
+          />
           <span className="font-semibold tracking-tight">Billa-Gates</span>
         </header>
 
