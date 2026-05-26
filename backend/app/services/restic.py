@@ -48,44 +48,81 @@ async def restic_version() -> Optional[str]:
 
 
 @log_call
-async def restic_cat_config(repo_path: str, password: str) -> Tuple[int, str, str]:
-    """Check repo exists and password correct."""
+async def restic_cat_config(
+    repo_path: str, password: str, timeout_seconds: int = 60
+) -> Tuple[int, str, str]:
+    """Check repo exists and password correct.
+
+    A 60s timeout is applied because this command runs on every backup as the
+    init-check step. Without it, a hung remote backend (NFS unresponsive,
+    SMB offline, cloud mount stalled) would block run_backup indefinitely,
+    holding the run row at status=running and locking the job out of every
+    future trigger via trigger_run's overlap check.
+    """
     env: Dict[str, str] = {
         **os.environ,
         "RESTIC_REPOSITORY": repo_path,
         "RESTIC_PASSWORD": password,
         "RESTIC_CACHE_DIR": "/app/data/restic-cache",
     }
-    proc = await asyncio.create_subprocess_exec(
-        "restic",
-        "cat",
-        "config",
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "restic",
+            "cat",
+            "config",
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            await _terminate_then_kill(proc)
+            return (-1, "", "cat config timed out")
+    except Exception as e:
+        return (-1, "", str(e))
+
     assert proc.returncode is not None
     return proc.returncode, stdout.decode(), stderr.decode()
 
 
 @log_call
-async def restic_init(repo_path: str, password: str) -> Tuple[int, str, str]:
-    """Initialize a new restic repo."""
+async def restic_init(
+    repo_path: str, password: str, timeout_seconds: int = 60
+) -> Tuple[int, str, str]:
+    """Initialize a new restic repo.
+
+    Same lock-up hazard as restic_cat_config — if the init-check decides the
+    repo doesn't exist and restic_init then hangs on an unresponsive backend,
+    the runner is wedged indefinitely. A 60s timeout is more than enough for
+    a healthy backend (init is metadata-only).
+    """
     env: Dict[str, str] = {
         **os.environ,
         "RESTIC_REPOSITORY": repo_path,
         "RESTIC_PASSWORD": password,
         "RESTIC_CACHE_DIR": "/app/data/restic-cache",
     }
-    proc = await asyncio.create_subprocess_exec(
-        "restic",
-        "init",
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "restic",
+            "init",
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            await _terminate_then_kill(proc)
+            return (-1, "", "init timed out")
+    except Exception as e:
+        return (-1, "", str(e))
+
     assert proc.returncode is not None
     return proc.returncode, stdout.decode(), stderr.decode()
 
@@ -427,21 +464,39 @@ async def restic_check(
 
 
 @log_call
-async def restic_unlock(repo_path: str, password: str) -> Tuple[int, str, str]:
-    """Remove stale locks."""
+async def restic_unlock(
+    repo_path: str, password: str, timeout_seconds: int = 60
+) -> Tuple[int, str, str]:
+    """Remove stale locks.
+
+    Called both during init-check stale-lock recovery and in Step 4.5
+    auto-unlock. A hung backend during unlock previously wedged the runner;
+    60s is far more than needed for a metadata-only delete on a healthy
+    backend.
+    """
     env: Dict[str, str] = {
         **os.environ,
         "RESTIC_REPOSITORY": repo_path,
         "RESTIC_PASSWORD": password,
         "RESTIC_CACHE_DIR": "/app/data/restic-cache",
     }
-    proc = await asyncio.create_subprocess_exec(
-        "restic",
-        "unlock",
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "restic",
+            "unlock",
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            await _terminate_then_kill(proc)
+            return (-1, "", "unlock timed out")
+    except Exception as e:
+        return (-1, "", str(e))
+
     assert proc.returncode is not None
     return proc.returncode, stdout.decode(), stderr.decode()

@@ -2767,6 +2767,63 @@ async def test_run_backup_start_notification_failure_does_not_crash_runner(engin
     assert run.finished_at is not None
 
 
+async def test_run_backup_handles_cat_config_timeout(engine):
+    """End-to-end check that a timed-out init check (unresponsive NFS, SMB
+    offline, cloud mount stalled) propagates as a clean run failure rather
+    than wedging the runner. restic_cat_config returns
+    (-1, '', 'cat config timed out') on a 60s hang; the runner must classify
+    that as a generic failure and surface the timeout message in
+    error_output for the operator."""
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    init_called = {"v": False}
+
+    async def fake_init(*args, **kwargs):
+        init_called["v"] = True
+        return (0, "", "")
+
+    with (
+        patch(
+            "app.services.restic.restic_cat_config",
+            return_value=(-1, "", "cat config timed out"),
+        ),
+        patch("app.services.restic.restic_init", side_effect=fake_init),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert run.error_output is not None
+    assert "cat config timed out" in run.error_output
+    # A timeout (rc=-1) must NOT be misclassified as "repo not found" (rc=10),
+    # which would trigger a destructive `restic init` against a backend that
+    # might still hold a real repo. The runner has to treat unrecognized rc
+    # as generic failure (gaps.md H5).
+    assert init_called["v"] is False, (
+        "restic_init must not be invoked on a timeout — would corrupt the "
+        "operator's mental model of 'backend temporarily unreachable' by "
+        "overwriting it with a fresh init attempt"
+    )
+    assert run.prune_status == PruneStatus.skipped
+    assert run.check_status == CheckStatus.skipped
+
+
 async def test_run_prune_unhandled_exception_finalizes_run_to_failed(engine):
     """Same lock-up hazard applies to run_prune: a crash mid-pipeline would
     leave the prune row stuck at status=running, and trigger_run /

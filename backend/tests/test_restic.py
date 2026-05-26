@@ -128,6 +128,52 @@ async def test_cat_config_passes_env_vars():
     assert env.get("RESTIC_PASSWORD") == PASSWORD
 
 
+async def test_cat_config_times_out_returns_minus_one_and_terminates_process():
+    """A hung backend (NFS unresponsive, SMB offline, cloud mount stalled)
+    must not wedge the backup runner. `restic cat config` runs on every
+    backup as the init-check step, so without a timeout a single bad mount
+    point can lock every future trigger out via overlap detection."""
+
+    async def slow_communicate():
+        await asyncio.sleep(100)
+        return b"", b""
+
+    proc = AsyncMock()
+    proc.communicate = slow_communicate
+    proc.returncode = None
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=0)
+
+    async def fake_wait_for(coro, timeout):
+        if hasattr(coro, "close"):
+            coro.close()
+        raise asyncio.TimeoutError()
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch("asyncio.wait_for", side_effect=fake_wait_for),
+    ):
+        code, stdout, stderr = await restic_cat_config(
+            REPO, PASSWORD, timeout_seconds=1
+        )
+
+    assert code == -1
+    assert stdout == ""
+    assert "timed out" in stderr.lower()
+    proc.terminate.assert_called()
+
+
+async def test_cat_config_default_timeout_is_60_seconds():
+    """The default must stay at 60s — long enough to absorb a transient
+    network blip on a healthy backend, short enough that a wedged mount
+    point doesn't hold the runner for hours."""
+    import inspect
+
+    sig = inspect.signature(restic_cat_config)
+    assert sig.parameters["timeout_seconds"].default == 60
+
+
 # ── restic_init ───────────────────────────────────────────────────────────────
 
 
@@ -144,6 +190,46 @@ async def test_init_failure():
         code, stdout, stderr = await restic_init(REPO, PASSWORD)
     assert code != 0
     assert "permission denied" in stderr
+
+
+async def test_init_times_out_returns_minus_one_and_terminates_process():
+    """`restic init` is invoked when the init-check decides the repo is
+    new. A hung backend at that moment must not strand the runner — same
+    hazard as cat_config."""
+
+    async def slow_communicate():
+        await asyncio.sleep(100)
+        return b"", b""
+
+    proc = AsyncMock()
+    proc.communicate = slow_communicate
+    proc.returncode = None
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=0)
+
+    async def fake_wait_for(coro, timeout):
+        if hasattr(coro, "close"):
+            coro.close()
+        raise asyncio.TimeoutError()
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch("asyncio.wait_for", side_effect=fake_wait_for),
+    ):
+        code, stdout, stderr = await restic_init(REPO, PASSWORD, timeout_seconds=1)
+
+    assert code == -1
+    assert stdout == ""
+    assert "timed out" in stderr.lower()
+    proc.terminate.assert_called()
+
+
+async def test_init_default_timeout_is_60_seconds():
+    import inspect
+
+    sig = inspect.signature(restic_init)
+    assert sig.parameters["timeout_seconds"].default == 60
 
 
 # ── restic_backup ─────────────────────────────────────────────────────────────
@@ -740,6 +826,46 @@ async def test_unlock_passes_correct_env():
     env = captured["kwargs"].get("env", {})
     assert env.get("RESTIC_REPOSITORY") == REPO
     assert env.get("RESTIC_PASSWORD") == PASSWORD
+
+
+async def test_unlock_times_out_returns_minus_one_and_terminates_process():
+    """`restic unlock` is called in the init-check stale-lock retry path and
+    again in the Step 4.5 auto-unlock. A hung backend during unlock would
+    block backups indefinitely without this timeout."""
+
+    async def slow_communicate():
+        await asyncio.sleep(100)
+        return b"", b""
+
+    proc = AsyncMock()
+    proc.communicate = slow_communicate
+    proc.returncode = None
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=0)
+
+    async def fake_wait_for(coro, timeout):
+        if hasattr(coro, "close"):
+            coro.close()
+        raise asyncio.TimeoutError()
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch("asyncio.wait_for", side_effect=fake_wait_for),
+    ):
+        code, stdout, stderr = await restic_unlock(REPO, PASSWORD, timeout_seconds=1)
+
+    assert code == -1
+    assert stdout == ""
+    assert "timed out" in stderr.lower()
+    proc.terminate.assert_called()
+
+
+async def test_unlock_default_timeout_is_60_seconds():
+    import inspect
+
+    sig = inspect.signature(restic_unlock)
+    assert sig.parameters["timeout_seconds"].default == 60
 
 
 # ── restic_backup: flag coverage ──────────────────────────────────────────────
