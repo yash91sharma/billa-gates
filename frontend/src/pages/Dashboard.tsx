@@ -1,23 +1,14 @@
 import { useQuery } from '@tanstack/react-query'
-import { CalendarClock, Hand } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import RunStatusBadge from '../components/RunStatusBadge'
+import TriggeredByIcon from '../components/TriggeredByIcon'
 import * as api from '../lib/api'
-import type { BackupRun, RunKind, TriggeredBy } from '../lib/types'
+import type { BackupRun, RunKind } from '../lib/types'
 
 const KIND_BADGE_BASE = 'rounded-sm px-2 py-0.5 text-xs font-medium capitalize'
 const KIND_CLASS: Record<RunKind, string> = {
   backup: `bg-sky-100 text-sky-800 ${KIND_BADGE_BASE}`,
   prune: `bg-amber-100 text-amber-800 ${KIND_BADGE_BASE}`,
-}
-
-function TriggeredByIcon({ value }: { value: TriggeredBy }) {
-  const Icon = value === 'manual' ? Hand : CalendarClock
-  return (
-    <span title={value} aria-label={value} className="inline-flex text-muted-foreground">
-      <Icon className="h-4 w-4" aria-hidden="true" />
-    </span>
-  )
 }
 
 function shouldPoll(runs: BackupRun[]): boolean {

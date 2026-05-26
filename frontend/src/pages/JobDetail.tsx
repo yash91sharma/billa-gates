@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import JobForm from '../components/JobForm'
 import RunStatusBadge from '../components/RunStatusBadge'
+import TriggeredByIcon from '../components/TriggeredByIcon'
 import * as api from '../lib/api'
 import type { BackupRun } from '../lib/types'
 
@@ -257,7 +258,9 @@ export default function JobDetail() {
                     <td className="py-2 pr-4">
                       {r.duration_seconds != null ? `${r.duration_seconds}s` : '—'}
                     </td>
-                    <td className="py-2">{r.triggered_by}</td>
+                    <td className="py-2">
+                      <TriggeredByIcon value={r.triggered_by} />
+                    </td>
                   </tr>
                 ))}
               </tbody>

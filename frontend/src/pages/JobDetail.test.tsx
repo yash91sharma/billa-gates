@@ -167,6 +167,32 @@ describe('JobDetail', () => {
     })
   })
 
+  describe('runs list triggered-by column', () => {
+    it('renders triggered_by as a labelled icon (matching the dashboard) rather than raw text', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([
+        makeRun({ id: 'r-manual', triggered_by: 'manual' }),
+        makeRun({ id: 'r-sched', triggered_by: 'scheduler' }),
+      ])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      const table = await screen.findByRole('table')
+      // The Triggered By column should not contain the bare words "manual"
+      // or "scheduler" — the meaning is conveyed by the icon + tooltip.
+      const cells = Array.from(table.querySelectorAll('td')).map((c) => c.textContent ?? '')
+      expect(cells).not.toContain('manual')
+      expect(cells).not.toContain('scheduler')
+      // Each row should expose a TriggeredByIcon element with the matching
+      // aria-label.
+      const manualTrigger = table.querySelector('[data-trigger-by="manual"]') as HTMLElement
+      const schedTrigger = table.querySelector('[data-trigger-by="scheduler"]') as HTMLElement
+      expect(manualTrigger).not.toBeNull()
+      expect(schedTrigger).not.toBeNull()
+      expect(manualTrigger).toHaveAttribute('aria-label', expect.stringMatching(/manual/i))
+      expect(schedTrigger).toHaveAttribute('aria-label', expect.stringMatching(/scheduler/i))
+      // Visually distinguishable (different classes/colors).
+      expect(manualTrigger.className).not.toBe(schedTrigger.className)
+    })
+  })
+
   describe('runs list shows kind', () => {
     it('shows the kind column with backup and prune rows side-by-side', async () => {
       vi.mocked(api.getJobRuns).mockResolvedValue([

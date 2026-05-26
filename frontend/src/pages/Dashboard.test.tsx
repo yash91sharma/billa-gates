@@ -211,7 +211,7 @@ describe('Dashboard', () => {
       })
     })
 
-    it('renders triggered_by as an icon (not plain text) with the value on hover', async () => {
+    it('renders triggered_by as an icon (not plain text) with a descriptive label and distinct colors', async () => {
       vi.mocked(api.getRecentRuns).mockResolvedValue([
         makeRun({ id: 'run-manual', job_name: 'Manual Row', triggered_by: 'manual' }),
         makeRun({ id: 'run-scheduler', job_name: 'Sched Row', triggered_by: 'scheduler' }),
@@ -225,14 +225,18 @@ describe('Dashboard', () => {
         // The visible cell should NOT contain the raw text "manual" / "scheduler".
         expect(manualCell.textContent?.trim()).not.toMatch(/^manual$/i)
         expect(schedCell.textContent?.trim()).not.toMatch(/^scheduler$/i)
-        // The value should still be discoverable on hover via the title attribute.
-        const manualIcon = manualCell.querySelector('[title]')
-        const schedIcon = schedCell.querySelector('[title]')
-        expect(manualIcon).toHaveAttribute('title', expect.stringMatching(/manual/i))
-        expect(schedIcon).toHaveAttribute('title', expect.stringMatching(/scheduler/i))
-        // And it should render an svg icon.
+        // Each cell renders an svg icon.
         expect(manualCell.querySelector('svg')).toBeInTheDocument()
         expect(schedCell.querySelector('svg')).toBeInTheDocument()
+        // Each icon carries a descriptive aria-label (read by screen readers
+        // and surfaced as a fallback hover tooltip).
+        const manualTrigger = manualCell.querySelector('[data-trigger-by="manual"]') as HTMLElement
+        const schedTrigger = schedCell.querySelector('[data-trigger-by="scheduler"]') as HTMLElement
+        expect(manualTrigger).toHaveAttribute('aria-label', expect.stringMatching(/manual/i))
+        expect(schedTrigger).toHaveAttribute('aria-label', expect.stringMatching(/scheduler/i))
+        // And the two icons must be visually distinguishable (different classes
+        // → different colors), not the same muted gray.
+        expect(manualTrigger.className).not.toBe(schedTrigger.className)
       })
     })
 
