@@ -68,6 +68,7 @@ const job: BackupJob = {
   next_run_time: '2026-05-19T18:00:00Z',
   last_run: {
     id: 'run-1',
+    kind: 'backup',
     status: 'success',
     check_status: 'passed',
     started_at: '2026-05-19T12:00:00Z',

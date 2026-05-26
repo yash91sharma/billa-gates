@@ -124,6 +124,7 @@ describe('Jobs', () => {
         makeJob({
           last_run: {
             id: 'run-1',
+            kind: 'backup',
             status: 'success',
             check_status: 'passed',
             started_at: '2024-01-15T10:00:00Z',
