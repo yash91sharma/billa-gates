@@ -166,6 +166,7 @@ class RunSummarySchema(BaseModel):
 
     id: str
     job_id: str
+    kind: str = "backup"
     status: str
     reason: Optional[str] = None
     triggered_by: str

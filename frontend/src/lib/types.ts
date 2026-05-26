@@ -1,4 +1,5 @@
 export type ScheduleType = 'cron' | 'interval'
+export type RunKind = 'backup' | 'prune'
 export type RunStatus = 'running' | 'success' | 'warning' | 'failed' | 'skipped'
 export type RunReason = 'overlapping_run' | 'container_restart'
 export type TriggeredBy = 'scheduler' | 'manual'
@@ -9,6 +10,7 @@ export type CompressionMode = 'auto' | 'max' | 'off'
 
 export interface RunSummary {
   id: string
+  kind: RunKind
   status: RunStatus
   check_status: CheckStatus | null
   started_at: string
@@ -63,6 +65,7 @@ export interface BackupJob {
 export interface BackupRun {
   id: string
   job_id: string
+  kind: RunKind
   status: RunStatus
   reason: RunReason | null
   started_at: string

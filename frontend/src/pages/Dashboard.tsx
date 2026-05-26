@@ -87,6 +87,7 @@ export default function Dashboard() {
               <th className="py-2 pr-4">Job</th>
               <th className="py-2 pr-4">Backup</th>
               <th className="py-2 pr-4">Verification</th>
+              <th className="py-2 pr-4">Kind</th>
               <th className="py-2 pr-4">Duration</th>
               <th className="py-2 pr-4">Started</th>
               <th className="py-2">Triggered By</th>
@@ -104,8 +105,13 @@ export default function Dashboard() {
                   <RunStatusBadge status={run.status} />
                 </td>
                 <td className="py-2 pr-4">
-                  {run.check_status ? <RunStatusBadge status={run.check_status} /> : '—'}
+                  {run.kind === 'prune' || !run.check_status ? (
+                    '—'
+                  ) : (
+                    <RunStatusBadge status={run.check_status} />
+                  )}
                 </td>
+                <td className="py-2 pr-4 capitalize">{run.kind}</td>
                 <td className="py-2 pr-4">
                   {run.duration_seconds != null ? `${run.duration_seconds}s` : '—'}
                 </td>

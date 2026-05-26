@@ -10,6 +10,7 @@ const makeRun = (overrides: Partial<BackupRun> = {}): BackupRun => ({
   id: 'run-1',
   job_id: 'job-1',
   job_name: 'Test Job',
+  kind: 'backup',
   status: 'success',
   reason: null,
   started_at: '2024-01-15T10:00:00Z',

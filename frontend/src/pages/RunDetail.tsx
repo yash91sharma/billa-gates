@@ -58,6 +58,7 @@ export default function RunDetail() {
         <Link to={`/jobs/${run.job_id}`} className="text-primary hover:underline font-medium">
           {run.job_name ?? run.job_id}
         </Link>
+        <span className="border rounded-sm px-2 py-0.5 text-xs capitalize">{run.kind}</span>
         <RunStatusBadge status={run.status} />
       </div>
 
@@ -124,14 +125,16 @@ export default function RunDetail() {
         )}
       </div>
 
-      <div className="text-sm">
-        Verification: {run.check_status ?? '—'}
-        {run.check_status === 'failed' && run.check_error_output && (
-          <pre className="mt-2 bg-destructive/10 text-destructive rounded-sm p-2 text-xs">
-            {run.check_error_output}
-          </pre>
-        )}
-      </div>
+      {run.kind !== 'prune' && (
+        <div className="text-sm">
+          Verification: {run.check_status ?? '—'}
+          {run.check_status === 'failed' && run.check_error_output && (
+            <pre className="mt-2 bg-destructive/10 text-destructive rounded-sm p-2 text-xs">
+              {run.check_error_output}
+            </pre>
+          )}
+        </div>
+      )}
     </div>
   )
 }

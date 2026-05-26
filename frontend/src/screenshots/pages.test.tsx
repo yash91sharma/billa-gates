@@ -82,6 +82,7 @@ const run: BackupRun = {
   id: 'run-1',
   job_id: 'job-1',
   job_name: 'Documents Backup',
+  kind: 'backup',
   status: 'success',
   reason: null,
   started_at: '2026-05-19T12:00:00Z',

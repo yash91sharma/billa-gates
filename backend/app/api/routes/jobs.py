@@ -399,6 +399,37 @@ async def trigger_run(
     return {"run_id": run_id}
 
 
+# ── POST /api/jobs/{id}/prune ─────────────────────────────────────────────────
+
+
+@router.post("/{job_id}/prune")
+@log_call
+async def trigger_prune(
+    job_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str]:
+    """Manually trigger a `restic prune` run for the given job.
+
+    Prune is decoupled from the backup pipeline (gaps.md H1): the backup
+    pipeline now runs only `restic forget` (or skips even that when no
+    retention is configured). Prune itself — the heavy pack-rewrite step —
+    is invoked here on operator demand.
+
+    Shares the per-job lock + active_jobs set with backup runs, so a prune
+    triggered while a backup is in flight (or vice versa) is recorded as
+    a skipped/overlapping_run row instead of racing against the same repo.
+    """
+    await _get_job_or_404(job_id, session)
+    job_uuid = uuid.UUID(job_id)
+
+    run_id = await backup_runner.trigger_prune(job_uuid, TriggeredBy.manual)
+    # Same race-condition handling as /run: 404 only if the job vanished
+    # between the existence check and the trigger.
+    if run_id is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"run_id": run_id}
+
+
 # ── POST /api/jobs/{id}/enable ────────────────────────────────────────────────
 
 

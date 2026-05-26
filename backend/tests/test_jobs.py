@@ -510,6 +510,79 @@ async def test_trigger_run_disabled_job_still_works(client):
     assert resp.status_code == 200
 
 
+# ── POST /api/jobs/{id}/prune ────────────────────────────────────────────────
+
+
+async def test_trigger_prune_returns_run_id(client):
+    """Manual prune endpoint mirrors /run — returns 200 with a run_id that
+    the UI can navigate to. Prune is now decoupled from backup (gaps.md H1)
+    and must be triggered explicitly."""
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+    with patch("app.services.backup_runner.run_prune"):
+        resp = await client.post(f"/api/jobs/{created['id']}/prune")
+    assert resp.status_code == 200
+    assert "run_id" in resp.json()
+
+
+async def test_trigger_prune_creates_prune_kind_row(client, engine):
+    """The created BackupRun must have kind=prune so the UI can label it
+    distinctly and so retention logic / metrics can distinguish prune from
+    backup runs."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import BackupRun, RunKind, RunStatus
+
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+    with patch("app.services.backup_runner.run_prune"):
+        resp = await client.post(f"/api/jobs/{created['id']}/prune")
+
+    run_id = resp.json()["run_id"]
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        run = await s.get(BackupRun, run_id)
+    assert run is not None
+    assert run.kind == RunKind.prune
+    assert run.status == RunStatus.running
+
+
+async def test_trigger_prune_overlapping_returns_skipped(client):
+    """If a backup is already running for this job, the prune trigger must
+    return a skipped/overlapping_run row rather than racing against the
+    backup against the same restic repo."""
+    from app.db.models import RunKind, RunReason, RunStatus
+    from app.services import backup_runner
+
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    job_uuid = uuid.UUID(created["id"])
+    backup_runner.active_jobs.add(job_uuid)
+    try:
+        with patch("app.services.backup_runner.run_prune"):
+            resp = await client.post(f"/api/jobs/{created['id']}/prune")
+        assert resp.status_code == 200
+        run_id = resp.json()["run_id"]
+    finally:
+        backup_runner.active_jobs.discard(job_uuid)
+
+    # Read the row back through the runs endpoint so we don't need direct
+    # DB access from this test.
+    runs_resp = await client.get(f"/api/runs/{run_id}")
+    assert runs_resp.status_code == 200
+    body = runs_resp.json()
+    assert body["status"] == RunStatus.skipped.value
+    assert body["reason"] == RunReason.overlapping_run.value
+    assert body["kind"] == RunKind.prune.value
+
+
+async def test_trigger_prune_not_found(client):
+    """Prune on a non-existent job returns 404."""
+    resp = await client.post(f"/api/jobs/{uuid.uuid4()}/prune")
+    assert resp.status_code == 404
+
+
 # ── POST /api/jobs/{id}/enable & /disable ────────────────────────────────────
 
 

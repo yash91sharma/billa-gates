@@ -10,6 +10,7 @@ const makeRun = (overrides: Partial<BackupRun> = {}): BackupRun => ({
   id: 'run-1',
   job_id: 'job-1',
   job_name: 'Test Job',
+  kind: 'backup',
   status: 'success',
   reason: null,
   started_at: '2024-01-15T10:00:00Z',
@@ -288,6 +289,26 @@ describe('RunDetail', () => {
       vi.mocked(api.getRun).mockResolvedValue(makeRun({ prune_status: 'skipped' }))
       renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
       await waitFor(() => expect(screen.getByText('skipped')).toBeInTheDocument())
+    })
+  })
+
+  describe('kind discriminator (gaps.md H1)', () => {
+    it('renders a "prune" kind label on prune runs', async () => {
+      vi.mocked(api.getRun).mockResolvedValue(makeRun({ kind: 'prune' }))
+      renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
+      // The kind badge appears next to the run-status badge in the header.
+      // Use exact text match to avoid conflict with the "Prune:" status row
+      // label that also matches /prune/i.
+      await waitFor(() => expect(screen.getByText('prune')).toBeInTheDocument())
+    })
+
+    it('hides the Verification row entirely for prune runs', async () => {
+      // Prune runs always have check_status=skipped so the verification line
+      // would just say "Verification: skipped" — pure noise. Hide it.
+      vi.mocked(api.getRun).mockResolvedValue(makeRun({ kind: 'prune', check_status: 'skipped' }))
+      renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
+      await waitFor(() => expect(screen.getByText('prune')).toBeInTheDocument())
+      expect(screen.queryByText(/^Verification:/)).not.toBeInTheDocument()
     })
   })
 

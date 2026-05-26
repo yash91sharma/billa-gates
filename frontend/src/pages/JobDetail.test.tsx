@@ -55,6 +55,7 @@ const makeRun = (overrides: Partial<BackupRun> = {}): BackupRun => ({
   id: 'run-1',
   job_id: 'job-1',
   job_name: 'My Documents',
+  kind: 'backup',
   status: 'success',
   reason: null,
   started_at: '2024-01-15T10:00:00Z',
@@ -96,6 +97,7 @@ beforeEach(() => {
   vi.mocked(api.getJobSnapshots).mockResolvedValue([])
   vi.mocked(api.unlockJob).mockResolvedValue({ output: 'unlock successful' })
   vi.mocked(api.triggerRun).mockResolvedValue({ run_id: 'run-new' })
+  vi.mocked(api.triggerPrune).mockResolvedValue({ run_id: 'prune-new' })
   vi.mocked(api.listSourceMounts).mockResolvedValue(['documents', 'photos'])
   vi.mocked(api.listDestinationMounts).mockResolvedValue(['main'])
   vi.mocked(api.updateJob).mockImplementation(async (_id, data) => ({
@@ -128,6 +130,57 @@ describe('JobDetail', () => {
     it('shows Edit button', async () => {
       renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
       await waitFor(() => expect(screen.getByRole('button', { name: /edit/i })).toBeInTheDocument())
+    })
+
+    it('shows a Prune button so the operator can run restic prune on demand', async () => {
+      // Prune is decoupled from the backup pipeline (gaps.md H1) — backup no
+      // longer runs `restic prune`, so the operator needs an explicit way to
+      // reclaim space.
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: /prune/i })).toBeInTheDocument()
+      )
+    })
+  })
+
+  describe('Prune Now behavior', () => {
+    it('calls triggerPrune with the correct job id and navigates to the new run', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.getJob).mockResolvedValue(makeJob({ id: 'job-1' }))
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() => screen.getByRole('button', { name: /prune/i }))
+      await user.click(screen.getByRole('button', { name: /prune/i }))
+      expect(vi.mocked(api.triggerPrune)).toHaveBeenCalledWith('job-1')
+    })
+
+    it('shows 409 error when a run is already in progress', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.triggerPrune).mockRejectedValue(
+        Object.assign(new Error('Run in progress'), { status: 409 })
+      )
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() => screen.getByRole('button', { name: /prune/i }))
+      await user.click(screen.getByRole('button', { name: /prune/i }))
+      await waitFor(() =>
+        expect(screen.getByText(/already.*progress|in progress|409/i)).toBeInTheDocument()
+      )
+    })
+  })
+
+  describe('runs list shows kind', () => {
+    it('shows the kind column with backup and prune rows side-by-side', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([
+        makeRun({ id: 'r-backup', kind: 'backup' }),
+        makeRun({ id: 'r-prune', kind: 'prune', status: 'success' }),
+      ])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      // Wait for the table to render, then scope queries inside it. The
+      // header has a "Prune Old Files" button too, so we must restrict the
+      // /prune/i match to the table cells.
+      const table = await screen.findByRole('table')
+      const tableCells = Array.from(table.querySelectorAll('td')).map((c) => c.textContent ?? '')
+      expect(tableCells).toContain('backup')
+      expect(tableCells).toContain('prune')
     })
   })
 

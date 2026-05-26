@@ -91,6 +91,12 @@ def upgrade() -> None:
         sa.Column("id", sa.String(length=36), nullable=False),
         sa.Column("job_id", sa.String(length=36), nullable=False),
         sa.Column(
+            "kind",
+            sa.Enum("backup", "prune", name="runkind"),
+            nullable=False,
+            server_default="backup",
+        ),
+        sa.Column(
             "status",
             sa.Enum(
                 "running",

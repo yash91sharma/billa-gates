@@ -56,6 +56,19 @@ class TriggeredBy(str, Enum):
     manual = "manual"
 
 
+class RunKind(str, Enum):
+    """Discriminator for the kind of work a BackupRun row represents.
+
+    `backup` rows record the full backup pipeline (the original behavior).
+    `prune` rows record a standalone `restic prune` invocation — pulled out
+    of the backup pipeline (gaps.md H1) because prune is the heaviest restic
+    operation and bundling it made every backup window unpredictable.
+    """
+
+    backup = "backup"
+    prune = "prune"
+
+
 class PruneStatus(str, Enum):
     passed = "passed"
     failed = "failed"
@@ -162,6 +175,13 @@ class BackupRun(Base):
     )
     job_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("backup_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    # `kind` distinguishes backup runs from prune runs so they can share this
+    # table (gaps.md H1). Prune runs ignore the backup-specific stats columns
+    # (files_*, dirs_*, data_added_*, snapshot_id) and use only status +
+    # timing + prune_error_output.
+    kind: Mapped[RunKind] = mapped_column(
+        SAEnum(RunKind), nullable=False, default=RunKind.backup
     )
     status: Mapped[RunStatus] = mapped_column(SAEnum(RunStatus), nullable=False)
     reason: Mapped[Optional[RunReason]] = mapped_column(

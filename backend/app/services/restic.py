@@ -269,7 +269,7 @@ async def restic_backup(
 
 
 @log_call
-async def restic_forget_prune(
+async def restic_forget(
     repo_path: str,
     password: str,
     timeout_seconds: int,
@@ -277,7 +277,13 @@ async def restic_forget_prune(
     job_id: str,
     **retention_flags: Any,
 ) -> Tuple[int, str, str]:
-    """Apply retention policy and prune."""
+    """Apply retention policy by removing snapshot pointers.
+
+    Forget is cheap — it just rewrites the index to drop snapshot references.
+    Prune is the heavy operation that rewrites pack files; it is *not* invoked
+    here. Run :func:`restic_prune` separately (manual trigger or its own
+    schedule) so a backup window stays predictable (gaps.md H1).
+    """
     env: Dict[str, str] = {
         **os.environ,
         "RESTIC_REPOSITORY": repo_path,
@@ -317,9 +323,6 @@ async def restic_forget_prune(
     for kwarg_name, flag_name in flag_map.items():
         if kwarg_name in retention_flags and retention_flags[kwarg_name] is not None:
             args.extend([flag_name, str(retention_flags[kwarg_name])])
-
-    # Always prune
-    args.append("--prune")
 
     try:
         proc = await asyncio.create_subprocess_exec(

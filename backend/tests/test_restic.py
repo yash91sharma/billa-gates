@@ -9,7 +9,7 @@ from app.services.restic import (
     restic_backup,
     restic_cat_config,
     restic_check,
-    restic_forget_prune,
+    restic_forget,
     restic_init,
     restic_prune,
     restic_unlock,
@@ -19,7 +19,9 @@ from app.services.restic import (
 REPO = "/destinations/main/abc123"
 PASSWORD = "s3cr3t"
 # Constant job_id for tests whose assertions don't depend on the value but
-# whose call into restic_backup/restic_forget_prune now requires one.
+# whose call into restic_backup/restic_forget now requires one.
+# Notes: `restic_forget_prune` was renamed to `restic_forget` once `--prune` was
+# decoupled from forget (gaps.md H1) — prune now runs on its own schedule.
 TEST_JOB_ID = "00000000-0000-4000-8000-000000000000"
 
 
@@ -532,7 +534,7 @@ async def test_backup_omits_parent_when_none():
     assert "--parent" not in captured["args"]
 
 
-# ── restic_forget_prune ───────────────────────────────────────────────────────
+# ── restic_forget ───────────────────────────────────────────────────────
 
 
 async def test_forget_prune_with_keep_last():
@@ -544,7 +546,7 @@ async def test_forget_prune_with_keep_last():
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        code, out, err = await restic_forget_prune(
+        code, out, err = await restic_forget(
             REPO,
             PASSWORD,
             timeout_seconds=3600,
@@ -566,7 +568,7 @@ async def test_forget_prune_with_multiple_retention():
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        await restic_forget_prune(
+        await restic_forget(
             REPO,
             PASSWORD,
             timeout_seconds=3600,
@@ -580,7 +582,10 @@ async def test_forget_prune_with_multiple_retention():
     assert "--keep-weekly" in args_str
 
 
-async def test_forget_prune_includes_prune_flag():
+async def test_forget_does_not_include_prune_flag():
+    """`restic forget` must NOT carry --prune — prune is expensive and is now
+    a separately-scheduled / manually-triggered operation (gaps.md H1).
+    Bundling forget+prune made every backup window unpredictable."""
     proc = _make_process(0)
     captured = {}
 
@@ -589,7 +594,7 @@ async def test_forget_prune_includes_prune_flag():
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        await restic_forget_prune(
+        await restic_forget(
             REPO,
             PASSWORD,
             timeout_seconds=3600,
@@ -597,7 +602,7 @@ async def test_forget_prune_includes_prune_flag():
             retain_keep_last=5,
         )
 
-    assert "--prune" in captured["args"]
+    assert "--prune" not in captured["args"]
 
 
 async def test_forget_prune_timeout():
@@ -616,7 +621,7 @@ async def test_forget_prune_timeout():
 
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         with patch("asyncio.wait_for", side_effect=fake_wait_for):
-            code, out, err = await restic_forget_prune(
+            code, out, err = await restic_forget(
                 REPO,
                 PASSWORD,
                 timeout_seconds=1,
@@ -780,7 +785,7 @@ async def test_forget_prune_scopes_by_job_tag_with_empty_group_by():
 
     job_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        await restic_forget_prune(
+        await restic_forget(
             REPO,
             PASSWORD,
             timeout_seconds=3600,
@@ -975,7 +980,7 @@ async def test_backup_exclude_if_present_flag():
     assert ".nobackup" in args_str
 
 
-# ── restic_forget_prune: retention flag coverage ──────────────────────────────
+# ── restic_forget: retention flag coverage ──────────────────────────────
 
 
 async def test_forget_prune_keep_within_flag():
@@ -987,7 +992,7 @@ async def test_forget_prune_keep_within_flag():
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        await restic_forget_prune(
+        await restic_forget(
             REPO,
             PASSWORD,
             timeout_seconds=3600,
@@ -1009,7 +1014,7 @@ async def test_forget_prune_keep_hourly_flag():
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        await restic_forget_prune(
+        await restic_forget(
             REPO,
             PASSWORD,
             timeout_seconds=3600,
@@ -1031,7 +1036,7 @@ async def test_forget_prune_keep_monthly_and_yearly_flags():
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        await restic_forget_prune(
+        await restic_forget(
             REPO,
             PASSWORD,
             timeout_seconds=3600,
@@ -1056,7 +1061,7 @@ async def test_forget_prune_keep_within_hourly_flag():
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        await restic_forget_prune(
+        await restic_forget(
             REPO,
             PASSWORD,
             timeout_seconds=3600,
@@ -1179,7 +1184,7 @@ async def test_forget_prune_timeout_terminates_before_kill():
 
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         with patch("asyncio.wait_for", side_effect=fake_wait_for):
-            code, _, err = await restic_forget_prune(
+            code, _, err = await restic_forget(
                 REPO,
                 PASSWORD,
                 timeout_seconds=1,

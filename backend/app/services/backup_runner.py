@@ -15,6 +15,7 @@ from app.db.models import (
     BackupRun,
     CheckStatus,
     PruneStatus,
+    RunKind,
     RunReason,
     RunStatus,
     TriggeredBy,
@@ -121,6 +122,177 @@ async def _run_with_cleanup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         await run_backup(job_id, run_id)
     finally:
         active_jobs.discard(job_id)
+
+
+async def _prune_with_cleanup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
+    """Mirror of _run_with_cleanup for prune runs — keeps the active_jobs
+    cleanup invariant identical between backup and prune dispatch paths."""
+    try:
+        await run_prune(job_id, run_id)
+    finally:
+        active_jobs.discard(job_id)
+
+
+async def trigger_prune(
+    job_id: uuid.UUID,
+    triggered_by: TriggeredBy = TriggeredBy.manual,
+) -> Optional[str]:
+    """Unified entry point for starting a standalone `restic prune` run.
+
+    Prune is decoupled from the backup pipeline (gaps.md H1) because it is
+    the heaviest restic operation; bundling it into every backup window made
+    backups unpredictably long. Sharing the per-job lock + active_jobs set
+    with :func:`trigger_run` means prune and backup serialize on the same
+    repo — restic cannot tolerate concurrent writers.
+
+    Creates a `kind=prune` BackupRun row (running or skipped/overlapping)
+    and fires :func:`run_prune` as a background task. Returns the run id,
+    or None if the job does not exist.
+    """
+    factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        engine, expire_on_commit=False
+    )
+
+    async with factory() as s:
+        job: BackupJob | None = await s.get(BackupJob, str(job_id))
+    if not job:
+        logger.warning(f"trigger_prune job_id={job_id} not_found")
+        return None
+
+    lock: asyncio.Lock = job_locks.setdefault(job_id, asyncio.Lock())
+    now = datetime.now(timezone.utc)
+
+    async with lock:
+        async with factory() as s:
+            result = await s.execute(
+                select(BackupRun).where(
+                    BackupRun.job_id == str(job_id),
+                    BackupRun.status == RunStatus.running,
+                )
+            )
+            running_row: BackupRun | None = result.scalars().first()
+
+            if running_row is not None or job_id in active_jobs:
+                skipped = BackupRun(
+                    id=str(uuid.uuid4()),
+                    job_id=str(job_id),
+                    kind=RunKind.prune,
+                    status=RunStatus.skipped,
+                    reason=RunReason.overlapping_run,
+                    started_at=now,
+                    finished_at=now,
+                    triggered_by=triggered_by,
+                    prune_status=PruneStatus.skipped,
+                    check_status=CheckStatus.skipped,
+                )
+                s.add(skipped)
+                await s.commit()
+                logger.info(
+                    f"trigger_prune job_id={job_id} run_id={skipped.id} "
+                    f"triggered_by={triggered_by.value} status=skipped "
+                    f"reason=overlapping_run"
+                )
+                return skipped.id
+
+            running = BackupRun(
+                id=str(uuid.uuid4()),
+                job_id=str(job_id),
+                kind=RunKind.prune,
+                status=RunStatus.running,
+                started_at=now,
+                triggered_by=triggered_by,
+            )
+            s.add(running)
+            await s.commit()
+            run_id_str = running.id
+            active_jobs.add(job_id)
+            logger.info(
+                f"trigger_prune job_id={job_id} run_id={run_id_str} "
+                f"triggered_by={triggered_by.value} status=dispatched"
+            )
+
+    asyncio.create_task(_prune_with_cleanup(job_id, uuid.UUID(run_id_str)))
+    return run_id_str
+
+
+async def run_prune(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
+    """Execute `restic prune` for a job's repo and finalize the run row.
+
+    Prune is the heaviest restic operation: it scans every pack file in the
+    repo, rewrites packs to drop unreferenced blobs, and updates the index.
+    It is invoked here as a standalone step — never from the backup
+    pipeline (gaps.md H1).
+
+    Concurrency gating (per-job lock, overlap check, active_jobs membership)
+    lives in :func:`trigger_prune`; this function runs prune and updates
+    the row. Failures land in prune_error_output; the run status reflects
+    the prune outcome (success / failed).
+    """
+    factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        engine, expire_on_commit=False
+    )
+
+    async with factory() as s:
+        job: BackupJob | None = await s.get(BackupJob, str(job_id))
+
+    if not job:
+        logger.warning(f"run_prune job_id={job_id} not found in database")
+        return
+
+    logger.info(f"job_id={job_id} run_id={run_id} prune_started")
+
+    try:
+        # Load default timeout once so a manual prune of a huge repo doesn't
+        # need a per-job knob — falls back to the global setting.
+        async with factory() as s:
+            settings_obj: AppSettings | None = await s.get(AppSettings, 1)
+            default_timeout: int = (
+                settings_obj.default_job_timeout_hours if settings_obj else 24
+            )
+
+        # Per-job timeout_hours applies the same to prune as it does to
+        # backup — operators tune one knob, not two. The pipeline still has
+        # the 1-hr-fallback safety net via _terminate_then_kill inside the
+        # restic wrapper.
+        prune_timeout: int = (job.timeout_hours or default_timeout) * 3600
+        repo_path: str = f"/destinations/{job.destination_label}/{str(job_id)}"
+
+        rc, _, prune_err = await restic.restic_prune(
+            repo_path, job.restic_password, prune_timeout
+        )
+
+        now: datetime = datetime.now(timezone.utc)
+        async with factory() as s:
+            final_run: BackupRun | None = await s.get(BackupRun, str(run_id))
+            if final_run:
+                if rc == 0:
+                    final_run.status = RunStatus.success
+                    final_run.prune_status = PruneStatus.passed
+                    logger.info(
+                        f"job_id={job_id} run_id={run_id} step=prune status=passed"
+                    )
+                else:
+                    final_run.status = RunStatus.failed
+                    final_run.prune_status = PruneStatus.failed
+                    final_run.prune_error_output = prune_err
+                    logger.warning(
+                        f"job_id={job_id} run_id={run_id} step=prune "
+                        f"status=failed rc={rc}"
+                    )
+                final_run.finished_at = now
+                now_naive: datetime = now.replace(tzinfo=None)
+                final_run.duration_seconds = int(
+                    (now_naive - final_run.started_at).total_seconds()
+                )
+                # Prune runs don't drive a check; keep that column tidy so
+                # the UI's existing "check_status missing" polling hook
+                # doesn't wait forever on rows that will never have one.
+                final_run.check_status = CheckStatus.skipped
+                await s.commit()
+
+    finally:
+        await _trim_run_history(factory, str(job_id))
+        logger.info(f"job_id={job_id} run_id={run_id} prune_completed")
 
 
 def _extract_failed_items(backup_stdout: str) -> List[str]:
@@ -514,47 +686,58 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 if getattr(job, k) is not None
             }
 
-            prune_err: str = ""
+            # When retention is configured, run `restic forget` only — never
+            # `restic prune`. Prune is the heaviest restic operation (rewrites
+            # every pack file) and bundling it into the backup window made
+            # backups unpredictably long (gaps.md H1). Prune is now manual
+            # (POST /api/jobs/{id}/prune) or scheduled separately.
+            # When no retention is set, forget would be a no-op and prune
+            # without forget cannot reclaim anything (no snapshots removed),
+            # so we skip the whole step.
             if retention_kwargs:
                 logger.info(
-                    f"job_id={job_id} run_id={current_run_id} step=prune "
-                    f"mode=forget_prune"
+                    f"job_id={job_id} run_id={current_run_id} step=forget "
+                    f"applying_retention"
                 )
-                rc, _, prune_err = await restic.restic_forget_prune(
+                rc, _, forget_err = await restic.restic_forget(
                     repo_path,
                     job_password,
                     timeout_seconds,
                     job_id=str(job_id),
                     **retention_kwargs,
                 )
+
+                async with factory() as s:
+                    forget_run: BackupRun | None = await s.get(
+                        BackupRun, str(current_run_id)
+                    )
+                    if forget_run:
+                        if rc == 0:
+                            forget_run.prune_status = PruneStatus.passed
+                            logger.info(
+                                f"job_id={job_id} run_id={current_run_id} "
+                                f"step=forget status=passed"
+                            )
+                        else:
+                            forget_run.prune_status = PruneStatus.failed
+                            forget_run.prune_error_output = forget_err
+                            logger.warning(
+                                f"job_id={job_id} run_id={current_run_id} "
+                                f"step=forget status=failed"
+                            )
+                        await s.commit()
             else:
                 logger.info(
-                    f"job_id={job_id} run_id={current_run_id} step=prune "
-                    f"mode=standard_prune"
+                    f"job_id={job_id} run_id={current_run_id} step=forget "
+                    f"skipped reason=no_retention"
                 )
-                rc, _, prune_err = await restic.restic_prune(
-                    repo_path, job_password, timeout_seconds
-                )
-
-            async with factory() as s:
-                prune_run: BackupRun | None = await s.get(
-                    BackupRun, str(current_run_id)
-                )
-                if prune_run:
-                    if rc == 0:
-                        prune_run.prune_status = PruneStatus.passed
-                        logger.info(
-                            f"job_id={job_id} run_id={current_run_id} step=prune "
-                            f"status=passed"
-                        )
-                    else:
-                        prune_run.prune_status = PruneStatus.failed
-                        prune_run.prune_error_output = prune_err
-                        logger.warning(
-                            f"job_id={job_id} run_id={current_run_id} step=prune "
-                            f"status=failed error=pruning_failed"
-                        )
-                    await s.commit()
+                async with factory() as s:
+                    no_ret_run: BackupRun | None = await s.get(
+                        BackupRun, str(current_run_id)
+                    )
+                    if no_ret_run:
+                        no_ret_run.prune_status = PruneStatus.skipped
+                        await s.commit()
 
             # Step 9 (snapshot DB reconcile) removed — restic is the source of
             # truth and the snapshot listing route queries it on demand

@@ -18,6 +18,7 @@ export default function JobDetail() {
   const queryClient = useQueryClient()
   const [tab, setTab] = useState<Tab>('runs')
   const [runError, setRunError] = useState<string | null>(null)
+  const [pruneError, setPruneError] = useState<string | null>(null)
   const [unlockOutput, setUnlockOutput] = useState<string | null>(null)
   const [unlockError, setUnlockError] = useState<string | null>(null)
   const [isEditing, setIsEditing] = useState(false)
@@ -87,6 +88,22 @@ export default function JobDetail() {
     }
   }
 
+  async function handlePruneNow() {
+    if (!job) return
+    setPruneError(null)
+    try {
+      const result = await api.triggerPrune(job.id)
+      navigate(`/runs/${result.run_id}`)
+    } catch (err: unknown) {
+      const status = (err as { status?: number }).status
+      if (status === 409) {
+        setPruneError('A run is already in progress for this job.')
+      } else {
+        setPruneError('Failed to trigger prune.')
+      }
+    }
+  }
+
   async function handleUnlock() {
     if (!job) return
     setUnlockError(null)
@@ -119,6 +136,13 @@ export default function JobDetail() {
           Run Now
         </button>
         <button
+          onClick={handlePruneNow}
+          className="border px-3 py-1 rounded text-sm"
+          title="Reclaim space by running restic prune. This is heavy — run when you have time."
+        >
+          Prune Old Files
+        </button>
+        <button
           onClick={() => {
             setEditError(null)
             setIsEditing((v) => !v)
@@ -138,6 +162,7 @@ export default function JobDetail() {
       </div>
 
       {runError && <p className="text-destructive text-sm">{runError}</p>}
+      {pruneError && <p className="text-destructive text-sm">{pruneError}</p>}
       {unlockOutput && <p className="text-sm text-green-700">Output: {unlockOutput}</p>}
       {unlockError && <p className="text-sm text-destructive">{unlockError}</p>}
 
@@ -212,6 +237,7 @@ export default function JobDetail() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left border-b">
+                  <th className="py-2 pr-4">Kind</th>
                   <th className="py-2 pr-4">Status</th>
                   <th className="py-2 pr-4">Started</th>
                   <th className="py-2 pr-4">Duration</th>
@@ -221,6 +247,7 @@ export default function JobDetail() {
               <tbody className="[&>tr:nth-child(even)]:bg-muted/40">
                 {(runs ?? []).map((r) => (
                   <tr key={r.id} className="border-b hover:bg-muted/60">
+                    <td className="py-2 pr-4 capitalize">{r.kind}</td>
                     <td className="py-2 pr-4">
                       <Link to={`/runs/${r.id}`} className="hover:underline">
                         <RunStatusBadge status={r.status} />

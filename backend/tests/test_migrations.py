@@ -87,6 +87,7 @@ async def test_migration_creates_all_tables():
         expected_run = {
             "id",
             "job_id",
+            "kind",
             "status",
             "reason",
             "started_at",
@@ -136,6 +137,47 @@ async def test_migration_creates_all_tables():
             for fk in inspector.get_foreign_keys("backup_runs")
         ), "Missing FK: backup_runs.job_id"
 
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_migration_allows_prune_kind_in_backup_runs():
+    """`backup_runs.kind` must accept the value 'prune'. Prune runs reuse
+    the BackupRun table with a `kind` discriminator (gaps.md H1) so the UI
+    can show them alongside backup runs without a new table."""
+    import uuid as _uuid
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db_url = f"sqlite:///{db_path}"
+
+        cfg = Config(Path(__file__).parent.parent / "alembic.ini")
+        cfg.set_main_option("sqlalchemy.url", db_url)
+        command.upgrade(cfg, "head")
+
+        engine = sa.create_engine(db_url, echo=False)
+        with engine.begin() as conn:
+            job_id = str(_uuid.uuid4())
+            conn.execute(
+                sa.text(
+                    "INSERT INTO backup_jobs (id, name, source_label, "
+                    "destination_label, restic_password, schedule_type, "
+                    "schedule_value, enabled, exclude_caches, one_file_system, "
+                    "no_scan, check_enabled, created_at, updated_at) "
+                    "VALUES (:id, 'j', 'src', 'dst', 'pw', 'interval', '1h', "
+                    "1, 0, 0, 0, 0, '2026-01-01', '2026-01-01')"
+                ),
+                {"id": job_id},
+            )
+            conn.execute(
+                sa.text(
+                    "INSERT INTO backup_runs (id, job_id, kind, status, "
+                    "started_at, triggered_by) VALUES "
+                    "(:id, :job_id, 'prune', 'success', "
+                    "'2026-01-01', 'manual')"
+                ),
+                {"id": str(_uuid.uuid4()), "job_id": job_id},
+            )
         engine.dispose()
 
 

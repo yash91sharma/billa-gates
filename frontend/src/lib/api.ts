@@ -35,6 +35,8 @@ export const updateJob = (id: string, data: unknown) =>
 export const deleteJob = (id: string) => fetch(`${BASE}/jobs/${id}`, { method: 'DELETE' })
 export const triggerRun = (id: string) =>
   request<{ run_id: string }>(`/jobs/${id}/run`, { method: 'POST' })
+export const triggerPrune = (id: string) =>
+  request<{ run_id: string }>(`/jobs/${id}/prune`, { method: 'POST' })
 export const enableJob = (id: string) =>
   request<{ id: string; enabled: boolean }>(`/jobs/${id}/enable`, { method: 'POST' })
 export const disableJob = (id: string) =>

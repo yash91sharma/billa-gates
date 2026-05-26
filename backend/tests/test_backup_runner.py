@@ -9,7 +9,13 @@ from unittest.mock import AsyncMock, patch
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db.models import CheckStatus, PruneStatus
-from app.services.backup_runner import active_jobs, run_backup, trigger_run
+from app.services.backup_runner import (
+    active_jobs,
+    run_backup,
+    run_prune,
+    trigger_prune,
+    trigger_run,
+)
 
 REPO = "/destinations/main"
 JOB_ID = uuid.uuid4()
@@ -685,14 +691,16 @@ async def test_step5_backup_rc3_marks_warning_and_runs_prune_and_sync(engine):
             "app.services.restic.restic_backup",
             return_value=(3, rc3_stdout, "", rc3_summary),
         ),
-        patch("app.services.restic.restic_forget_prune", side_effect=fake_forget),
+        patch("app.services.restic.restic_forget", side_effect=fake_forget),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
     run = await _get_run(engine, run_id)
     assert run.status == RunStatus.warning
-    assert forget_called["v"] is True, "prune must run on rc=3 so repo doesn't bloat"
+    assert forget_called["v"] is True, (
+        "forget must run on rc=3 so retention applies to the new snapshot"
+    )
     # snapshot_id is taken from the JSON summary, not from a post-backup
     # `restic snapshots` reconcile (which was dropped — see gaps.md C4-Alt).
     assert run.snapshot_id == "b" * 64
@@ -700,7 +708,11 @@ async def test_step5_backup_rc3_marks_warning_and_runs_prune_and_sync(engine):
     assert "/sources/x/locked.db" in run.error_output
 
 
-async def test_step5_backup_rc3_without_retention_runs_plain_prune(engine):
+async def test_step5_backup_rc3_without_retention_skips_forget_and_prune(engine):
+    """rc=3 still produces a snapshot, but with no retention configured there
+    is nothing for `restic forget` to do — and `restic prune` is no longer
+    bundled into the backup window at all (gaps.md H1). Neither must be
+    called; the run finishes with warning + prune_status=skipped."""
     await _setup_job(engine)
     run_id = str(uuid.uuid4())
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -717,7 +729,12 @@ async def test_step5_backup_rc3_without_retention_runs_plain_prune(engine):
         s.add(run)
         await s.commit()
 
+    forget_called = {"v": False}
     prune_called = {"v": False}
+
+    async def fake_forget(*args, **kwargs):
+        forget_called["v"] = True
+        return (0, "", "")
 
     async def fake_prune(*args, **kwargs):
         prune_called["v"] = True
@@ -729,14 +746,19 @@ async def test_step5_backup_rc3_without_retention_runs_plain_prune(engine):
             "app.services.restic.restic_backup",
             return_value=(3, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
+        patch("app.services.restic.restic_forget", side_effect=fake_forget),
         patch("app.services.restic.restic_prune", side_effect=fake_prune),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
-    assert prune_called["v"] is True
+    assert forget_called["v"] is False, "no retention → no forget"
+    assert prune_called["v"] is False, (
+        "backup must never call restic_prune (gaps.md H1)"
+    )
     run = await _get_run(engine, run_id)
     assert run.status == RunStatus.warning
+    assert run.prune_status == PruneStatus.skipped
 
 
 # ── Run-history retention ─────────────────────────────────────────────────────
@@ -919,10 +941,14 @@ async def test_step7_stats_populated_from_summary(engine):
     assert run.total_bytes_processed == 50000000
 
 
-# ── Step 8: prune ─────────────────────────────────────────────────────────────
+# ── Step 8: forget (gaps.md H1: prune is now a separate operation) ───────────
 
 
-async def test_step8_prune_called_after_success(engine):
+async def test_step8_forget_and_prune_skipped_when_no_retention(engine):
+    """With no retention configured, the backup pipeline must skip both
+    `restic forget` and `restic prune` entirely (gaps.md H1): forget would
+    be a no-op and prune is now manual / on its own schedule. The run still
+    succeeds; prune_status is recorded as `skipped`."""
     await _setup_job(engine)
     run_id = str(uuid.uuid4())
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -939,7 +965,12 @@ async def test_step8_prune_called_after_success(engine):
         s.add(run)
         await s.commit()
 
+    forget_called = {"v": False}
     prune_called = {"v": False}
+
+    async def fake_forget(*args, **kwargs):
+        forget_called["v"] = True
+        return (0, "", "")
 
     async def fake_prune(*args, **kwargs):
         prune_called["v"] = True
@@ -951,15 +982,22 @@ async def test_step8_prune_called_after_success(engine):
             "app.services.restic.restic_backup",
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
+        patch("app.services.restic.restic_forget", side_effect=fake_forget),
         patch("app.services.restic.restic_prune", side_effect=fake_prune),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
-    assert prune_called["v"] is True
+    assert forget_called["v"] is False
+    assert prune_called["v"] is False
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.success
+    assert run.prune_status == PruneStatus.skipped
 
 
-async def test_step8_forget_prune_called_when_retention_set(engine):
+async def test_step8_forget_called_when_retention_set(engine):
+    """With retention configured, the backup pipeline must call `restic
+    forget` — but never `restic prune` (gaps.md H1)."""
     await _setup_job(engine, retain_keep_last=7)
     run_id = str(uuid.uuid4())
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -977,9 +1015,14 @@ async def test_step8_forget_prune_called_when_retention_set(engine):
         await s.commit()
 
     forget_called = {"v": False}
+    prune_called = {"v": False}
 
     async def fake_forget(*args, **kwargs):
         forget_called["v"] = True
+        return (0, "", "")
+
+    async def fake_prune(*args, **kwargs):
+        prune_called["v"] = True
         return (0, "", "")
 
     with (
@@ -988,16 +1031,21 @@ async def test_step8_forget_prune_called_when_retention_set(engine):
             "app.services.restic.restic_backup",
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
-        patch("app.services.restic.restic_forget_prune", side_effect=fake_forget),
+        patch("app.services.restic.restic_forget", side_effect=fake_forget),
+        patch("app.services.restic.restic_prune", side_effect=fake_prune),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
     assert forget_called["v"] is True
+    assert prune_called["v"] is False, "backup pipeline must never call restic_prune"
 
 
-async def test_step8_prune_failure_nonfatal(engine):
-    await _setup_job(engine)
+async def test_step8_forget_failure_nonfatal(engine):
+    """If `restic forget` fails (e.g. transient repo error), the run still
+    succeeds — forget is a maintenance step. The failure is recorded on the
+    run via prune_status=failed + prune_error_output."""
+    await _setup_job(engine, retain_keep_last=7)
     run_id = str(uuid.uuid4())
     factory = async_sessionmaker(engine, expire_on_commit=False)
     from app.db.models import BackupRun, RunStatus, TriggeredBy
@@ -1019,7 +1067,10 @@ async def test_step8_prune_failure_nonfatal(engine):
             "app.services.restic.restic_backup",
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
-        patch("app.services.restic.restic_prune", return_value=(1, "", "disk full")),
+        patch(
+            "app.services.restic.restic_forget",
+            return_value=(1, "", "disk full"),
+        ),
         patch("app.services.backup_runner.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
@@ -2088,3 +2139,175 @@ async def test_step12_check_uses_job_timeout(engine):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
     assert captured["timeout_seconds"] == 2 * 3600
+
+
+# ── Prune runs (gaps.md H1) ──────────────────────────────────────────────────
+
+
+async def test_run_prune_invokes_restic_prune_and_marks_success(engine):
+    """`run_prune` executes `restic prune` for the job's repo and finalizes
+    the BackupRun row as success when restic exits 0. Prune runs reuse the
+    BackupRun table with kind=prune (gaps.md H1) so the UI can list them
+    alongside backup runs without a new table."""
+    from app.db.models import BackupRun, RunKind, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = str(uuid.uuid4())
+
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                kind=RunKind.prune,
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    prune_called = {"v": False, "args": None}
+
+    async def fake_prune(repo, password, timeout_seconds):
+        prune_called["v"] = True
+        prune_called["args"] = (repo, timeout_seconds)
+        return (0, "", "")
+
+    with patch("app.services.restic.restic_prune", side_effect=fake_prune):
+        await run_prune(JOB_ID, uuid.UUID(run_id))
+
+    assert prune_called["v"] is True
+    # Repo path follows the same /destinations/{label}/{job_id} convention as
+    # backup runs so the same restic repo is targeted.
+    assert f"/destinations/main/{JOB_ID}" in prune_called["args"][0]
+
+    run = await _get_run(engine, run_id)
+    assert run.kind == RunKind.prune
+    assert run.status == RunStatus.success
+    assert run.finished_at is not None
+    assert run.duration_seconds is not None
+
+
+async def test_run_prune_marks_failed_on_nonzero_rc(engine):
+    """When `restic prune` returns non-zero, the prune run is marked failed
+    and the stderr lands in prune_error_output so the operator can see why."""
+    from app.db.models import BackupRun, RunKind, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = str(uuid.uuid4())
+
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                kind=RunKind.prune,
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with patch(
+        "app.services.restic.restic_prune",
+        return_value=(1, "", "disk full"),
+    ):
+        await run_prune(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert "disk full" in (run.prune_error_output or "")
+
+
+async def test_trigger_prune_creates_running_row_with_kind_prune(engine):
+    """trigger_prune mirrors trigger_run but creates a BackupRun row with
+    kind=prune. Dispatches `run_prune` as a background task once the row is
+    committed."""
+    from sqlalchemy import select
+
+    from app.db.models import BackupRun, RunKind, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+
+    done = asyncio.Event()
+
+    async def fake_run_prune(jid, rid):
+        done.set()
+
+    with patch(
+        "app.services.backup_runner.run_prune",
+        new=AsyncMock(side_effect=fake_run_prune),
+    ):
+        run_id = await trigger_prune(JOB_ID, TriggeredBy.manual)
+        await asyncio.wait_for(done.wait(), timeout=2.0)
+        # Yield once more so the cleanup wrapper's finally can run.
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        result = await s.execute(
+            select(BackupRun).where(BackupRun.job_id == str(JOB_ID))
+        )
+        runs = result.scalars().all()
+    assert len(runs) == 1
+    assert runs[0].id == run_id
+    assert runs[0].kind == RunKind.prune
+    # Right after trigger_prune commits the row it's `running`; we mocked
+    # run_prune so finalization to success/failed doesn't happen here.
+    assert runs[0].status == RunStatus.running
+    assert runs[0].triggered_by == TriggeredBy.manual
+    assert JOB_ID not in active_jobs
+
+
+async def test_trigger_prune_returns_skipped_when_backup_is_running(engine):
+    """A scheduled or manual backup currently in flight must block a manual
+    prune (and vice versa) — they share the same per-job lock + active_jobs
+    set so they never run concurrently against the same restic repo."""
+    from app.db.models import BackupRun, RunKind, RunReason, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+
+    active_jobs.add(JOB_ID)
+    try:
+        run_id = await trigger_prune(JOB_ID, TriggeredBy.manual)
+    finally:
+        active_jobs.discard(JOB_ID)
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        run = await s.get(BackupRun, run_id)
+    assert run is not None
+    assert run.kind == RunKind.prune
+    assert run.status == RunStatus.skipped
+    assert run.reason == RunReason.overlapping_run
+
+
+async def test_trigger_prune_job_not_found_returns_none(engine):
+    """When the job does not exist, trigger_prune returns None and creates
+    no rows — mirrors trigger_run's behavior so the route layer can map this
+    to a 404."""
+    from sqlalchemy import select
+
+    from app.db.models import BackupRun, TriggeredBy
+
+    unknown_id = uuid.uuid4()
+    result = await trigger_prune(unknown_id, TriggeredBy.manual)
+    assert result is None
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        rows = (
+            (
+                await s.execute(
+                    select(BackupRun).where(BackupRun.job_id == str(unknown_id))
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert rows == []

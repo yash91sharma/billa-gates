@@ -112,7 +112,7 @@ async def test_full_backup_lifecycle_success(client: AsyncClient) -> None:
             new=AsyncMock(return_value=_SNAPSHOT_FROM_RESTIC),
         ),
         patch(
-            "app.services.restic.restic_forget_prune",
+            "app.services.restic.restic_forget",
             new=AsyncMock(return_value=(0, "ok", "")),
         ),
         patch(
@@ -152,8 +152,9 @@ async def test_full_backup_lifecycle_success(client: AsyncClient) -> None:
         assert detail["snapshot_id"] == _SNAPSHOT_ID
         assert detail["duration_seconds"] is not None
         assert detail["finished_at"] is not None
-        # Prune ran and passed; check is skipped because check_enabled=False.
-        assert detail["prune_status"] == "passed"
+        # No retention configured on this job → forget+prune are skipped
+        # entirely (gaps.md H1). check is skipped because check_enabled=False.
+        assert detail["prune_status"] == "skipped"
         assert detail["check_status"] == "skipped"
         # error_output stays null on success.
         assert detail["error_output"] is None
@@ -281,7 +282,7 @@ async def test_full_backup_lifecycle_with_verification(client: AsyncClient) -> N
             new=AsyncMock(return_value=_SNAPSHOT_FROM_RESTIC),
         ),
         patch(
-            "app.services.restic.restic_forget_prune",
+            "app.services.restic.restic_forget",
             new=AsyncMock(return_value=(0, "ok", "")),
         ),
         patch(
