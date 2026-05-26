@@ -2606,3 +2606,161 @@ async def test_trigger_prune_job_not_found_returns_none(engine):
             .all()
         )
     assert rows == []
+
+
+# ── Crash recovery: unhandled exceptions must not strand the run row ─────────
+
+
+async def test_run_backup_unhandled_exception_finalizes_run_to_failed(engine):
+    """If any unhandled exception bubbles out of the backup pipeline (DB
+    lock, network failure, ntfy hang, subprocess crash, etc.), the BackupRun
+    row MUST be finalized to RunStatus.failed with the traceback recorded in
+    error_output. Without this safety net the row stays at status=running
+    forever, and trigger_run's overlap check (which queries both active_jobs
+    and the DB for any status=running row) skips every future trigger as
+    overlapping_run — permanently halting backups for the job."""
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    # restic_cat_config is the first restic call in the pipeline. Raise an
+    # unhandled exception there — simulating a subprocess error before stdout
+    # is returned, or a transient OS-level failure — and confirm the runner
+    # does not leave the row stranded at `running`.
+    with (
+        patch(
+            "app.services.restic.restic_cat_config",
+            side_effect=RuntimeError("simulated subprocess failure"),
+        ),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed, (
+        f"expected failed (got {run.status}); a stuck `running` row would "
+        f"lock the job out of every future trigger via overlap detection"
+    )
+    assert run.finished_at is not None
+    assert run.duration_seconds is not None
+    assert run.error_output is not None
+    assert "simulated subprocess failure" in run.error_output
+    # Traceback must be present so the operator can diagnose the crash
+    # post-mortem without re-running the workload locally.
+    assert "Traceback" in run.error_output or "RuntimeError" in run.error_output
+    # Prune/check must be marked skipped on a crash so the UI polling loop
+    # doesn't wait forever for a status that will never arrive.
+    assert run.prune_status == PruneStatus.skipped
+    assert run.check_status == CheckStatus.skipped
+
+
+async def test_run_backup_start_notification_failure_does_not_crash_runner(engine):
+    """A transient ntfy/network failure during the start notification must
+    not abort the backup. The notification is a side-effect; the backup
+    pipeline should continue and the run should finalize normally on the
+    restic outcome — not on the notification outcome."""
+    from app.db.models import AppSettings, BackupRun, RunStatus, TriggeredBy
+
+    await _setup_job(engine, retain_keep_last=5)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as s:
+        settings = await s.get(AppSettings, 1)
+        if settings:
+            settings.ntfy_topic = "my-topic"
+            settings.notify_on_start = True
+            settings.notify_on_success = False
+            await s.commit()
+
+    run_id = str(uuid.uuid4())
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_forget", return_value=(0, "", "")),
+        patch(
+            "app.services.backup_runner.send_notification",
+            side_effect=RuntimeError("ntfy server down"),
+        ),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    # Backup itself succeeded; the broken notification is non-fatal.
+    assert run.status == RunStatus.success, (
+        f"expected success (got {run.status}); a broken notification must "
+        f"not bring down the backup pipeline"
+    )
+    assert run.finished_at is not None
+
+
+async def test_run_prune_unhandled_exception_finalizes_run_to_failed(engine):
+    """Same lock-up hazard applies to run_prune: a crash mid-pipeline would
+    leave the prune row stuck at status=running, and trigger_run /
+    trigger_prune would then skip every future trigger as overlapping_run.
+    The prune runner must finalize to failed with the traceback on any
+    unhandled exception."""
+    from app.db.models import BackupRun, RunKind, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = str(uuid.uuid4())
+
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                kind=RunKind.prune,
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with patch(
+        "app.services.restic.restic_prune",
+        side_effect=RuntimeError("simulated prune crash"),
+    ):
+        await run_prune(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed, (
+        f"expected failed (got {run.status}); a stuck `running` prune row "
+        f"would block every future backup and prune trigger for this job"
+    )
+    assert run.finished_at is not None
+    assert run.duration_seconds is not None
+    assert run.prune_error_output is not None
+    assert "simulated prune crash" in run.prune_error_output
+    assert (
+        "Traceback" in run.prune_error_output
+        or "RuntimeError" in run.prune_error_output
+    )

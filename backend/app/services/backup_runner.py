@@ -1,5 +1,6 @@
 import asyncio
 import json
+import traceback
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, cast
@@ -24,6 +25,20 @@ from app.services import restic, snapshot_listing
 from app.services.notifications import send_notification
 
 logger = get_logger(__name__)
+
+
+async def _try_notify(*args: Any, **kwargs: Any) -> None:
+    """Wrapper around send_notification so a transient ntfy/network failure
+    is logged but never crashes the backup pipeline. Notifications are a
+    side-effect — a broken ntfy server must not strand a run row at
+    status=running, which would otherwise lock the job out of every future
+    trigger via trigger_run's overlap check.
+    """
+    try:
+        await send_notification(*args, **kwargs)
+    except Exception as exc:
+        logger.warning(f"send_notification failed (non-fatal): {exc!r}")
+
 
 active_jobs: Set[uuid.UUID] = set()
 job_locks: Dict[uuid.UUID, asyncio.Lock] = {}
@@ -297,6 +312,42 @@ async def run_prune(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 final_run.check_status = CheckStatus.skipped
                 await s.commit()
 
+    except Exception as exc:
+        # Mirror of run_backup's top-level safety net. Without this, a crash
+        # mid-prune (subprocess error, DB lock, network blip) would leave the
+        # prune row stuck at status=running, and trigger_prune / trigger_run
+        # would skip every future trigger as overlapping_run — locking the
+        # job out of both prune and backup.
+        logger.exception(
+            f"job_id={job_id} run_id={run_id} prune_runner_crashed error={exc!r}"
+        )
+        try:
+            crash_now: datetime = datetime.now(timezone.utc)
+            async with factory() as s:
+                crash_run: BackupRun | None = await s.get(BackupRun, str(run_id))
+                if crash_run is not None:
+                    crash_status: Any = crash_run.status
+                    if crash_status == RunStatus.running:
+                        tb: str = traceback.format_exc()
+                        crash_run.status = RunStatus.failed
+                        crash_run.prune_status = PruneStatus.failed
+                        crash_run.prune_error_output = (
+                            f"Prune runner crashed: {exc!r}\n\n{tb}"
+                        )
+                        crash_run.finished_at = crash_now
+                        crash_started: datetime = crash_run.started_at
+                        crash_run.duration_seconds = int(
+                            (
+                                crash_now.replace(tzinfo=None) - crash_started
+                            ).total_seconds()
+                        )
+                        crash_run.check_status = CheckStatus.skipped
+                        await s.commit()
+        except Exception as recovery_exc:
+            logger.error(
+                f"job_id={job_id} run_id={run_id} "
+                f"crash_recovery_failed error={recovery_exc!r}"
+            )
     finally:
         await _trim_run_history(factory, str(job_id))
         logger.info(f"job_id={job_id} run_id={run_id} prune_completed")
@@ -420,7 +471,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
             logger.info(f"step=start_notification job_id={job_id}")
             src: str = job.source_label
             dst: str = job.destination_label
-            await send_notification(
+            await _try_notify(
                 cast(str | None, settings_dict.get("ntfy_server_url")),
                 ntfy_topic,
                 f"Starting backup: {job.name}",
@@ -866,7 +917,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     f"Duration: {final_run.duration_seconds}s, "
                     f"Files: {final_run.files_changed}"
                 )
-                await send_notification(
+                await _try_notify(
                     cast(str | None, settings_dict.get("ntfy_server_url")),
                     ntfy_topic_send,
                     f"Backup succeeded: {job.name}",
@@ -880,7 +931,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     f"Duration: {final_run.duration_seconds}s — some files "
                     f"could not be read; snapshot was still saved."
                 )
-                await send_notification(
+                await _try_notify(
                     cast(str | None, settings_dict.get("ntfy_server_url")),
                     ntfy_topic_send,
                     f"Backup completed with warnings: {job.name}",
@@ -894,7 +945,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 error_excerpt: str = (
                     (error_output or "")[:200] if error_output else "Unknown error"
                 )
-                await send_notification(
+                await _try_notify(
                     cast(str | None, settings_dict.get("ntfy_server_url")),
                     ntfy_topic_send,
                     f"Backup failed: {job.name}",
@@ -917,7 +968,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     f"mode={job_check_mode} enabled=true"
                 )
                 if settings_dict.get("notify_on_verification"):
-                    await send_notification(
+                    await _try_notify(
                         cast(str | None, settings_dict.get("ntfy_server_url")),
                         cast(str | None, settings_dict.get("ntfy_topic")),
                         f"Verification started: {job.name}",
@@ -957,7 +1008,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
 
                 if settings_dict.get("notify_on_verification"):
                     status_str: str = "passed" if rc == 0 else "failed"
-                    await send_notification(
+                    await _try_notify(
                         cast(str | None, settings_dict.get("ntfy_server_url")),
                         cast(str | None, settings_dict.get("ntfy_topic")),
                         f"Verification {status_str}: {job.name}",
@@ -971,6 +1022,55 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     f"enabled=false skipped"
                 )
 
+    except Exception as exc:
+        # Top-level safety net: if any unhandled exception bubbles out of the
+        # pipeline above (SQLite OperationalError, network failure, subprocess
+        # crash, unforeseen edge case), the run row would otherwise stay at
+        # status=running forever. trigger_run's overlap check queries the DB
+        # for any running row independently of the in-memory active_jobs set
+        # — so a stranded row locks the job out of every future trigger
+        # (manual or scheduled) until the operator manually edits the DB or
+        # restarts the container. Finalizing to `failed` here closes that
+        # lock-up. The recovery DB write is itself wrapped: if the DB is
+        # actually unreachable we have no recourse, but logging beats
+        # crashing the cleanup wrapper above.
+        logger.exception(
+            f"job_id={job_id} run_id={current_run_id} backup_runner_crashed "
+            f"error={exc!r}"
+        )
+        try:
+            crash_now: datetime = datetime.now(timezone.utc)
+            async with factory() as s:
+                crash_run: BackupRun | None = await s.get(
+                    BackupRun, str(current_run_id)
+                )
+                if crash_run is not None:
+                    crash_status: Any = crash_run.status
+                    if crash_status == RunStatus.running:
+                        tb: str = traceback.format_exc()
+                        crash_run.status = RunStatus.failed
+                        crash_run.error_output = (
+                            f"Backup runner crashed: {exc!r}\n\n{tb}"
+                        )
+                        crash_run.finished_at = crash_now
+                        crash_started: datetime = crash_run.started_at
+                        crash_run.duration_seconds = int(
+                            (
+                                crash_now.replace(tzinfo=None) - crash_started
+                            ).total_seconds()
+                        )
+                        crash_prune: Any = crash_run.prune_status
+                        if not crash_prune:
+                            crash_run.prune_status = PruneStatus.skipped
+                        crash_check: Any = crash_run.check_status
+                        if not crash_check:
+                            crash_run.check_status = CheckStatus.skipped
+                        await s.commit()
+        except Exception as recovery_exc:
+            logger.error(
+                f"job_id={job_id} run_id={current_run_id} "
+                f"crash_recovery_failed error={recovery_exc!r}"
+            )
     finally:
         # active_jobs cleanup is handled by _run_with_cleanup so the lifecycle
         # owner (trigger_run) holds full responsibility for the in-memory
