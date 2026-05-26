@@ -1,8 +1,24 @@
 import { useQuery } from '@tanstack/react-query'
+import { CalendarClock, Hand } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import RunStatusBadge from '../components/RunStatusBadge'
 import * as api from '../lib/api'
-import type { BackupRun } from '../lib/types'
+import type { BackupRun, RunKind, TriggeredBy } from '../lib/types'
+
+const KIND_BADGE_BASE = 'rounded-sm px-2 py-0.5 text-xs font-medium capitalize'
+const KIND_CLASS: Record<RunKind, string> = {
+  backup: `bg-sky-100 text-sky-800 ${KIND_BADGE_BASE}`,
+  prune: `bg-amber-100 text-amber-800 ${KIND_BADGE_BASE}`,
+}
+
+function TriggeredByIcon({ value }: { value: TriggeredBy }) {
+  const Icon = value === 'manual' ? Hand : CalendarClock
+  return (
+    <span title={value} aria-label={value} className="inline-flex text-muted-foreground">
+      <Icon className="h-4 w-4" aria-hidden="true" />
+    </span>
+  )
+}
 
 function shouldPoll(runs: BackupRun[]): boolean {
   return runs.some((r) => r.status === 'running' || r.check_status === null)
@@ -111,12 +127,18 @@ export default function Dashboard() {
                     <RunStatusBadge status={run.check_status} />
                   )}
                 </td>
-                <td className="py-2 pr-4 capitalize">{run.kind}</td>
+                <td className="py-2 pr-4">
+                  <span data-testid={`kind-badge-${run.id}`} className={KIND_CLASS[run.kind]}>
+                    {run.kind}
+                  </span>
+                </td>
                 <td className="py-2 pr-4">
                   {run.duration_seconds != null ? `${run.duration_seconds}s` : '—'}
                 </td>
                 <td className="py-2 pr-4">{new Date(run.started_at).toLocaleString()}</td>
-                <td className="py-2">{run.triggered_by}</td>
+                <td className="py-2">
+                  <TriggeredByIcon value={run.triggered_by} />
+                </td>
               </tr>
             ))}
           </tbody>

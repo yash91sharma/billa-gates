@@ -366,6 +366,56 @@ describe('Settings', () => {
     })
   })
 
+  describe('tooltip help', () => {
+    it('renders a "More info" tooltip trigger for every setting field', async () => {
+      renderWithProviders(<Settings />)
+      await waitFor(() => screen.getByLabelText(/topic/i))
+      // One per: server URL, topic, token, notify_on_start, notify_on_success,
+      // notify_on_failure, notify_on_warning, notify_on_verification, timeout,
+      // keep_last_runs, auto_unlock. That's 11.
+      const infoButtons = screen.getAllByRole('button', { name: /more info/i })
+      expect(infoButtons.length).toBeGreaterThanOrEqual(11)
+    })
+
+    it('links the ntfy server URL input to help text via aria-describedby', async () => {
+      renderWithProviders(<Settings />)
+      await waitFor(() => screen.getByLabelText(/server.*url|ntfy.*url/i))
+      const input = screen.getByLabelText(/server.*url|ntfy.*url/i)
+      const id = input.getAttribute('aria-describedby')
+      expect(id).toBeTruthy()
+      const help = document.getElementById(id!)
+      expect(help).toBeInTheDocument()
+      expect(help!.textContent).toMatch(/ntfy/i)
+    })
+
+    it('links the default timeout input to help text via aria-describedby', async () => {
+      renderWithProviders(<Settings />)
+      await waitFor(() => screen.getByLabelText(/timeout|default.*timeout/i))
+      const input = screen.getByLabelText(/timeout|default.*timeout/i)
+      const id = input.getAttribute('aria-describedby')
+      expect(id).toBeTruthy()
+      expect(document.getElementById(id!)?.textContent).toMatch(/timeout|abort|kill/i)
+    })
+
+    it('links keep_last_runs input to help text via aria-describedby', async () => {
+      renderWithProviders(<Settings />)
+      await waitFor(() => screen.getByLabelText(/keep.*last.*run|run.*history/i))
+      const input = screen.getByLabelText(/keep.*last.*run|run.*history/i)
+      const id = input.getAttribute('aria-describedby')
+      expect(id).toBeTruthy()
+      expect(document.getElementById(id!)?.textContent).toMatch(/run|history|deleted|older/i)
+    })
+
+    it('links auto_unlock checkbox to help text via aria-describedby', async () => {
+      renderWithProviders(<Settings />)
+      await waitFor(() => screen.getByLabelText(/auto.*unlock|stale.*lock/i))
+      const input = screen.getByLabelText(/auto.*unlock|stale.*lock/i)
+      const id = input.getAttribute('aria-describedby')
+      expect(id).toBeTruthy()
+      expect(document.getElementById(id!)?.textContent).toMatch(/lock|restic|unlock/i)
+    })
+  })
+
   describe('restic version display', () => {
     it('shows installed restic version from settings', async () => {
       vi.mocked(api.getSettings).mockResolvedValue(makeSettings({ restic_version: '0.17.3' }))

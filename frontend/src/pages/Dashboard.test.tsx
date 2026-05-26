@@ -176,6 +176,66 @@ describe('Dashboard', () => {
       })
     })
 
+    it('color-codes the Kind column distinctly for backup vs prune', async () => {
+      vi.mocked(api.getRecentRuns).mockResolvedValue([
+        makeRun({ id: 'run-backup', job_name: 'Backup Row', kind: 'backup' }),
+        makeRun({ id: 'run-prune', job_name: 'Prune Row', kind: 'prune' }),
+      ])
+      renderWithProviders(<Dashboard />)
+      await waitFor(() => {
+        const backupBadge = screen.getByTestId('kind-badge-run-backup')
+        const pruneBadge = screen.getByTestId('kind-badge-run-prune')
+        expect(backupBadge).toHaveTextContent(/backup/i)
+        expect(pruneBadge).toHaveTextContent(/prune/i)
+        expect(backupBadge.className).not.toBe(pruneBadge.className)
+      })
+    })
+
+    it('uses a blue-family pastel for backup kind', async () => {
+      vi.mocked(api.getRecentRuns).mockResolvedValue([
+        makeRun({ id: 'run-backup', kind: 'backup' }),
+      ])
+      renderWithProviders(<Dashboard />)
+      await waitFor(() => {
+        const badge = screen.getByTestId('kind-badge-run-backup')
+        expect(badge.className).toMatch(/\bbg-(blue|sky|indigo)-100\b/)
+      })
+    })
+
+    it('uses an amber/orange-family pastel for prune kind', async () => {
+      vi.mocked(api.getRecentRuns).mockResolvedValue([makeRun({ id: 'run-prune', kind: 'prune' })])
+      renderWithProviders(<Dashboard />)
+      await waitFor(() => {
+        const badge = screen.getByTestId('kind-badge-run-prune')
+        expect(badge.className).toMatch(/\bbg-(amber|orange|purple)-100\b/)
+      })
+    })
+
+    it('renders triggered_by as an icon (not plain text) with the value on hover', async () => {
+      vi.mocked(api.getRecentRuns).mockResolvedValue([
+        makeRun({ id: 'run-manual', job_name: 'Manual Row', triggered_by: 'manual' }),
+        makeRun({ id: 'run-scheduler', job_name: 'Sched Row', triggered_by: 'scheduler' }),
+      ])
+      renderWithProviders(<Dashboard />)
+      await waitFor(() => {
+        const manualRow = screen.getByText('Manual Row').closest('tr')!
+        const schedRow = screen.getByText('Sched Row').closest('tr')!
+        const manualCell = manualRow.querySelectorAll('td')[6]
+        const schedCell = schedRow.querySelectorAll('td')[6]
+        // The visible cell should NOT contain the raw text "manual" / "scheduler".
+        expect(manualCell.textContent?.trim()).not.toMatch(/^manual$/i)
+        expect(schedCell.textContent?.trim()).not.toMatch(/^scheduler$/i)
+        // The value should still be discoverable on hover via the title attribute.
+        const manualIcon = manualCell.querySelector('[title]')
+        const schedIcon = schedCell.querySelector('[title]')
+        expect(manualIcon).toHaveAttribute('title', expect.stringMatching(/manual/i))
+        expect(schedIcon).toHaveAttribute('title', expect.stringMatching(/scheduler/i))
+        // And it should render an svg icon.
+        expect(manualCell.querySelector('svg')).toBeInTheDocument()
+        expect(schedCell.querySelector('svg')).toBeInTheDocument()
+      })
+    })
+
     it('shows next run times per job', async () => {
       vi.mocked(api.listJobs).mockResolvedValue([
         makeJob({ next_run_time: '2024-01-15T16:00:00Z' }),
