@@ -146,6 +146,8 @@ async def test_step4_repo_exists_proceeds(engine):
 
 
 async def test_step4_repo_not_found_inits_repo(engine):
+    """restic ≥0.17 returns exit code 10 when the repository does not exist;
+    the runner must call restic_init in response (gaps.md H5)."""
     await _setup_job(engine)
     run_id = str(uuid.uuid4())
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -171,7 +173,7 @@ async def test_step4_repo_not_found_inits_repo(engine):
     with (
         patch(
             "app.services.restic.restic_cat_config",
-            return_value=(1, "", "Fatal: no such file or directory"),
+            return_value=(10, "", "Fatal: unable to open config file"),
         ),
         patch("app.services.restic.restic_init", side_effect=fake_init),
         patch(
@@ -187,6 +189,10 @@ async def test_step4_repo_not_found_inits_repo(engine):
 
 
 async def test_step4_wrong_password_marks_failed(engine):
+    """restic ≥0.17 returns exit code 12 on wrong password; the runner must
+    branch on the exit code, never on a stderr substring (gaps.md H5).
+    The user-visible error message must explicitly say 'password' so the
+    operator knows what to fix."""
     await _setup_job(engine)
     run_id = str(uuid.uuid4())
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -203,9 +209,18 @@ async def test_step4_wrong_password_marks_failed(engine):
         s.add(run)
         await s.commit()
 
-    with patch(
-        "app.services.restic.restic_cat_config",
-        return_value=(1, "", "wrong password or no key found"),
+    init_called = {"v": False}
+
+    async def fake_init(*args, **kwargs):
+        init_called["v"] = True
+        return (0, "", "")
+
+    with (
+        patch(
+            "app.services.restic.restic_cat_config",
+            return_value=(12, "", "Fatal: wrong password or no key found"),
+        ),
+        patch("app.services.restic.restic_init", side_effect=fake_init),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -213,9 +228,16 @@ async def test_step4_wrong_password_marks_failed(engine):
     assert run.status == RunStatus.failed
     assert run.prune_status == PruneStatus.skipped
     assert run.check_status == CheckStatus.skipped
+    assert run.error_output is not None
+    assert "password" in run.error_output.lower()
+    # An rc=12 must never trigger init — the repo is fine, the password is wrong.
+    # Initing on top of a real repo would be both pointless and confusing.
+    assert init_called["v"] is False
 
 
 async def test_step4_init_failure_marks_failed(engine):
+    """rc=10 → init; if init then fails, the run record must surface the init
+    failure's stderr so the operator can see what went wrong."""
     await _setup_job(engine)
     run_id = str(uuid.uuid4())
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -235,7 +257,7 @@ async def test_step4_init_failure_marks_failed(engine):
     with (
         patch(
             "app.services.restic.restic_cat_config",
-            return_value=(1, "", "does not exist"),
+            return_value=(10, "", "Fatal: unable to open config file"),
         ),
         patch(
             "app.services.restic.restic_init", return_value=(1, "", "permission denied")
@@ -245,6 +267,187 @@ async def test_step4_init_failure_marks_failed(engine):
 
     run = await _get_run(engine, run_id)
     assert run.status == RunStatus.failed
+    assert run.error_output is not None
+    assert "permission denied" in run.error_output
+
+
+# ── Step 4: exit-code branching (H5) ─────────────────────────────────────────
+
+
+async def test_step4_rc11_stale_lock_unlocks_and_retries(engine):
+    """restic exit code 11 from `cat config` means the repo was locked at
+    metadata-read time (rare, but possible if a previous abrupt termination
+    left a lock and the periodic auto_unlock pass hasn't fired yet). The
+    runner must call restic_unlock and retry cat_config once before deciding
+    the repo is unreachable (gaps.md H5)."""
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    cat_calls = {"n": 0}
+
+    async def fake_cat_config(*args, **kwargs):
+        cat_calls["n"] += 1
+        if cat_calls["n"] == 1:
+            return (11, "", "Fatal: unable to create lock in backend: already locked")
+        return (0, '{"version":2}', "")
+
+    with (
+        patch("app.services.restic.restic_cat_config", side_effect=fake_cat_config),
+        patch("app.services.restic.restic_unlock", return_value=(0, "removed", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert cat_calls["n"] == 2, "cat_config must be retried once after unlock"
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.success
+
+
+async def test_step4_rc11_lock_retry_capped_at_one(engine):
+    """If unlock + retry still returns rc=11, the run must fail rather than
+    loop forever. Two cat_config attempts total — no third."""
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    cat_calls = {"n": 0}
+
+    async def fake_cat_config(*args, **kwargs):
+        cat_calls["n"] += 1
+        return (11, "", "Fatal: unable to create lock in backend: already locked")
+
+    with (
+        patch("app.services.restic.restic_cat_config", side_effect=fake_cat_config),
+        patch("app.services.restic.restic_unlock", return_value=(0, "", "")),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert cat_calls["n"] == 2, "must not loop past one retry"
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert run.error_output is not None
+    assert "lock" in run.error_output.lower()
+
+
+async def test_step4_generic_failure_does_not_init(engine):
+    """Backwards-compat / safety: a generic non-zero exit code (rc=1) — used
+    by older restic versions for everything, and by current restic for
+    catch-all errors — must NOT trigger init. Initing on top of an
+    unreachable-but-existing repo (network blip, permission glitch) would be
+    incorrect and the substring-based dispatch this fix replaces was making
+    that decision based on whatever happened to be in stderr (gaps.md H5)."""
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    init_called = {"v": False}
+
+    async def fake_init(*args, **kwargs):
+        init_called["v"] = True
+        return (0, "", "")
+
+    with (
+        patch(
+            "app.services.restic.restic_cat_config",
+            return_value=(
+                1,
+                "",
+                "Fatal: backend storage error: connection refused",
+            ),
+        ),
+        patch("app.services.restic.restic_init", side_effect=fake_init),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert init_called["v"] is False, (
+        "generic non-zero rc must not be interpreted as 'repo missing'"
+    )
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert run.error_output is not None
+    # The actual restic stderr must reach the user, not a generic message.
+    assert "connection refused" in run.error_output
+
+
+async def test_step4_generic_failure_surfaces_stderr_to_user(engine):
+    """An unknown restic exit code must put the actual stderr into
+    error_output so the operator sees the real failure mode — not just
+    'backup failed' with no context (gaps.md H5)."""
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    stderr_msg = (
+        "Fatal: unable to open repository: backend storage error: "
+        'Get "https://s3.example/bucket/config": dial tcp: lookup s3.example: '
+        "no such host"
+    )
+
+    with patch(
+        "app.services.restic.restic_cat_config", return_value=(2, "", stderr_msg)
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert run.error_output is not None
+    # The full restic stderr must reach the user verbatim — no truncation,
+    # no replacement with a generic message.
+    assert stderr_msg in run.error_output
 
 
 # ── Step 4.5: auto-unlock (C1) ───────────────────────────────────────────────
@@ -609,8 +812,100 @@ async def test_step5_backup_failure_marks_run_failed(engine):
     run = await _get_run(engine, run_id)
     assert run.status == RunStatus.failed
     assert run.error_output is not None
+    assert "source not found" in run.error_output
     assert run.prune_status == PruneStatus.skipped
     assert run.check_status == CheckStatus.skipped
+
+
+async def test_step5_backup_failure_surfaces_json_errors_from_stdout(engine):
+    """When restic backup fails (rc!=0, !=3) it may still have emitted
+    per-file errors as JSON lines on stdout before giving up. Those messages
+    name the specific file/path that caused the failure, while stderr usually
+    contains only the final fatal line. error_output must include both so the
+    operator can see *which* files restic was working on when it died, not
+    just the post-mortem fatal (gaps.md H5)."""
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    json_errors_stdout = (
+        '{"message_type":"error","error":{"message":"open '
+        '/sources/x/secrets.kdbx: permission denied"},'
+        '"during":"archival","item":"/sources/x/secrets.kdbx"}\n'
+        '{"message_type":"error","error":{"message":"open '
+        '/sources/x/db.sqlite: device or resource busy"},'
+        '"during":"archival","item":"/sources/x/db.sqlite"}\n'
+    )
+    fatal_stderr = "Fatal: unable to save snapshot: tree blob is missing"
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(1, json_errors_stdout, fatal_stderr, None),
+        ),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert run.error_output is not None
+    # Per-file JSON errors from stdout must be surfaced …
+    assert "/sources/x/secrets.kdbx" in run.error_output
+    assert "permission denied" in run.error_output
+    assert "/sources/x/db.sqlite" in run.error_output
+    # … alongside the final fatal stderr.
+    assert "tree blob is missing" in run.error_output
+
+
+async def test_step5_backup_failure_without_json_errors_still_surfaces_stderr(engine):
+    """If stdout has no parseable JSON errors (restic crashed before
+    emitting any), error_output must still contain stderr — the user must
+    never see an empty error_output on a failed run."""
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    stderr_msg = "Fatal: repository corruption detected: pack 1a2b3c missing"
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(1, "", stderr_msg, None),
+        ),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert run.error_output is not None
+    assert stderr_msg in run.error_output
 
 
 async def test_step5_backup_timeout_marks_failed(engine):

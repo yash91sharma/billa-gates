@@ -28,6 +28,13 @@ logger = get_logger(__name__)
 active_jobs: Set[uuid.UUID] = set()
 job_locks: Dict[uuid.UUID, asyncio.Lock] = {}
 
+# Restic exit codes (stable contract since 0.17). Branching on these is the
+# only reliable way to classify a failure — stderr message wording is not a
+# contract and has changed between restic releases (gaps.md H5).
+RESTIC_RC_REPO_NOT_FOUND: int = 10
+RESTIC_RC_LOCK_FAILED: int = 11
+RESTIC_RC_WRONG_PASSWORD: int = 12
+
 
 async def trigger_run(
     job_id: uuid.UUID,
@@ -319,6 +326,27 @@ def _extract_failed_items(backup_stdout: str) -> List[str]:
     return items
 
 
+def _format_backup_error(rc: int, json_errors: List[str], stderr: str) -> str:
+    """Build the user-visible error_output string for a failed backup run.
+
+    Always includes the restic exit code and stderr. When restic emitted
+    per-file JSON error lines on stdout before giving up, those are included
+    too — they name the specific path/operation that caused the failure,
+    which stderr (usually a single post-mortem fatal) does not. Order is
+    chosen so the operator sees the high-level summary first, then the
+    granular per-file context (gaps.md H5).
+    """
+    parts: List[str] = [f"Backup failed (restic exit code {rc})."]
+    if stderr.strip():
+        parts.append("")
+        parts.append(stderr.strip())
+    if json_errors:
+        parts.append("")
+        parts.append("Per-file errors:")
+        parts.extend(json_errors)
+    return "\n".join(parts)
+
+
 async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
     """12-step backup lifecycle orchestration.
 
@@ -410,63 +438,101 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
             source_path = f"{source_path}/{job_source_subpath}"
 
         # Step 4: Init check
+        #
+        # Branch strictly on restic's documented exit codes (≥0.17): 10 = repo
+        # not found, 11 = lock failed, 12 = wrong password. Stderr substring
+        # matching — the previous approach — silently misclassified errors
+        # whenever restic changed its message wording, and could even trigger
+        # `restic init` on top of a real-but-temporarily-unreachable repo
+        # because the stderr happened not to contain "wrong password"
+        # (gaps.md H5). Any unrecognized non-zero rc is treated as a generic
+        # failure with stderr surfaced verbatim to the user.
         logger.debug(
             f"job_id={job_id} run_id={current_run_id} step=init_check "
             f"repo_path={repo_path}"
         )
+
+        async def _fail_init_check(message: str, *, log_tag: str) -> None:
+            logger.error(
+                f"job_id={job_id} run_id={current_run_id} step=init_check "
+                f"error={log_tag}"
+            )
+            async with factory() as s:
+                run_row: BackupRun | None = await s.get(BackupRun, str(current_run_id))
+                if run_row:
+                    now_utc = datetime.now(timezone.utc)
+                    run_row.status = RunStatus.failed
+                    run_row.error_output = message
+                    run_row.finished_at = now_utc
+                    run_row.duration_seconds = 0
+                    run_row.prune_status = PruneStatus.skipped
+                    run_row.check_status = CheckStatus.skipped
+                    await s.commit()
+
         rc: int
         stderr: str
         rc, _, stderr = await restic.restic_cat_config(repo_path, job_password)
-        if rc != 0:
-            if "wrong password" in stderr.lower():
-                logger.error(
+
+        # rc=11 means the repo metadata read was blocked by a stale lock. The
+        # cheapest fix is to call unlock and retry once. Looping further would
+        # hang the runner on a legitimately-contended repo, so we cap retries
+        # at exactly one (matches the rc=11 retry policy on `restic backup`).
+        if rc == RESTIC_RC_LOCK_FAILED:
+            logger.warning(
+                f"job_id={job_id} run_id={current_run_id} step=init_check "
+                f"rc=11 stale_lock_suspected attempting_unlock_and_retry"
+            )
+            try:
+                await restic.restic_unlock(repo_path, job_password)
+            except Exception as exc:
+                logger.warning(
                     f"job_id={job_id} run_id={current_run_id} step=init_check "
-                    f"error=wrong_password"
+                    f"unlock_exception error={exc!r}"
                 )
-                async with factory() as s:
-                    wrong_pwd_run: BackupRun | None = await s.get(
-                        BackupRun, str(current_run_id)
-                    )
-                    if wrong_pwd_run:
-                        now_utc = datetime.now(timezone.utc)
-                        wrong_pwd_run.status = RunStatus.failed
-                        wrong_pwd_run.error_output = stderr
-                        wrong_pwd_run.finished_at = now_utc
-                        wrong_pwd_run.duration_seconds = 0
-                        wrong_pwd_run.prune_status = PruneStatus.skipped
-                        wrong_pwd_run.check_status = CheckStatus.skipped
-                        await s.commit()
+            rc, _, stderr = await restic.restic_cat_config(repo_path, job_password)
+            if rc == RESTIC_RC_LOCK_FAILED:
+                await _fail_init_check(
+                    f"Repository is locked and could not be unlocked: {stderr}",
+                    log_tag="lock_failed",
+                )
                 return
 
-            # Try to init
+        if rc == RESTIC_RC_WRONG_PASSWORD:
+            await _fail_init_check(
+                "Repository password is incorrect. Verify the password "
+                "matches the one used when the repo was initialized.\n\n"
+                f"restic stderr: {stderr}",
+                log_tag="wrong_password",
+            )
+            return
+
+        if rc == RESTIC_RC_REPO_NOT_FOUND:
             logger.info(
                 f"job_id={job_id} run_id={current_run_id} step=init_check "
                 f"repo_not_found initializing"
             )
             rc, _, init_stderr = await restic.restic_init(repo_path, job_password)
             if rc != 0:
-                logger.error(
-                    f"job_id={job_id} run_id={current_run_id} step=init_check "
-                    f"error=init_failed"
+                await _fail_init_check(
+                    f"Failed to initialize repository: {init_stderr}",
+                    log_tag="init_failed",
                 )
-                async with factory() as s:
-                    init_fail_run: BackupRun | None = await s.get(
-                        BackupRun, str(current_run_id)
-                    )
-                    if init_fail_run:
-                        now_utc = datetime.now(timezone.utc)
-                        init_fail_run.status = RunStatus.failed
-                        init_fail_run.error_output = init_stderr
-                        init_fail_run.finished_at = now_utc
-                        init_fail_run.duration_seconds = 0
-                        init_fail_run.prune_status = PruneStatus.skipped
-                        init_fail_run.check_status = CheckStatus.skipped
-                        await s.commit()
                 return
             logger.info(
                 f"job_id={job_id} run_id={current_run_id} step=init_check "
                 f"repo_initialized"
             )
+        elif rc != 0:
+            # Generic failure: network blip, permission glitch, older restic
+            # version returning rc=1 for something we'd otherwise classify.
+            # Crucially we do NOT init here — that would corrupt the user's
+            # mental model of "my repo wasn't found" when in fact the repo
+            # is fine but temporarily unreachable.
+            await _fail_init_check(
+                f"Failed to access repository (restic exit code {rc}): {stderr}",
+                log_tag=f"unrecognized_rc_{rc}",
+            )
+            return
 
         # Step 4.5: Auto-unlock — clear any stale lock left behind by an
         # abrupt termination (OOM, container kill, host reboot). Failure is
@@ -603,17 +669,25 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                         )
                         await s.commit()
             else:
+                # Restic's --json stream emits per-file `message_type=error`
+                # lines naming the path that failed; stderr usually only
+                # carries the final fatal. Stitching both into error_output
+                # gives the operator the *which file* context that pure
+                # stderr does not (gaps.md H5). Falls back gracefully when
+                # one or the other is empty.
                 logger.error(
                     f"job_id={job_id} run_id={current_run_id} step=backup_execution "
                     f"status=failed rc={rc}"
                 )
+                json_errors = _extract_failed_items(stdout)
+                error_msg = _format_backup_error(rc, json_errors, stderr)
                 async with factory() as s:
                     backup_fail_run: BackupRun | None = await s.get(
                         BackupRun, str(current_run_id)
                     )
                     if backup_fail_run:
                         backup_fail_run.status = RunStatus.failed
-                        backup_fail_run.error_output = stderr
+                        backup_fail_run.error_output = error_msg
                         await s.commit()
         except asyncio.TimeoutError:
             hours: int = job_timeout_hours or default_timeout
