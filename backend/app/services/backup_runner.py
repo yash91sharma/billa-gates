@@ -903,7 +903,13 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 final_run.duration_seconds = duration_secs
                 final_check_status: Any = final_run.check_status
                 if not final_check_status:
-                    final_run.check_status = CheckStatus.skipped
+                    is_scheduled = (
+                        job.check_enabled
+                        and job.check_mode is not None
+                        and final_run.status == RunStatus.success
+                    )
+                    if not is_scheduled:
+                        final_run.check_status = CheckStatus.skipped
                 await s.commit()
 
         # Step 11: Completion notification
@@ -1087,7 +1093,6 @@ async def _trim_run_history(
     Snapshots in the restic repo are untouched — this only bounds the row
     count in the `backup_runs` table so it doesn't grow forever.
     """
-    from sqlalchemy import select
 
     async with factory() as s:
         settings: AppSettings | None = await s.get(AppSettings, 1)

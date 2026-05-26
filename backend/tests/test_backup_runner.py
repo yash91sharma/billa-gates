@@ -1496,6 +1496,53 @@ async def test_step10_check_status_skipped_when_check_disabled(engine):
     assert run.check_status == CheckStatus.skipped
 
 
+async def test_step10_check_status_none_when_check_enabled_and_success(engine):
+    from app.db.models import CheckMode, CheckStatus
+
+    await _setup_job(engine, check_enabled=True, check_mode=CheckMode.structural)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    notification_checked = {"v": False}
+
+    async def fake_notify(*args, **kwargs):
+        # Step 11 notification runs after Step 10 finalization and before Step 12 check.
+        # We verify that at this point, check_status has NOT been set to skipped.
+        async with factory() as s:
+            r = await s.get(BackupRun, run_id)
+            assert r is not None
+            assert r.check_status is None
+        notification_checked["v"] = True
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
+        patch("app.services.restic.restic_check", return_value=(0, "no errors", "")),
+        patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert notification_checked["v"] is True
+    run = await _get_run(engine, run_id)
+    assert run.check_status == CheckStatus.passed
+
+
 # ── Step 12: integrity check ──────────────────────────────────────────────────
 
 
