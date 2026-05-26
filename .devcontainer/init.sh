@@ -2,7 +2,7 @@
 set -e
 
 echo "==> Installing Python dependencies..."
-pip install --quiet -r /workspace/backend/requirements.txt
+pip install --quiet -r /workspace/backend/requirements-dev.txt
 
 echo "==> Installing Node dependencies..."
 cd /workspace/frontend && npm install --silent
