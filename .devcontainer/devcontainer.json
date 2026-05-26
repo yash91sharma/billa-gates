@@ -1,5 +1,5 @@
 {
-  "name": "Backup Server Dev",
+  "name": "Billa-Gates Dev",
   "dockerComposeFile": "docker-compose.yml",
   "service": "dev",
   "workspaceFolder": "/workspace",

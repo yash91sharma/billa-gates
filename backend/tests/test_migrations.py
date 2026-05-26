@@ -260,7 +260,7 @@ async def test_migration_falls_back_to_app_database_url(monkeypatch):
     """env.py uses app.db.database.DATABASE_URL when no override is set.
 
     Prevents regression of the alembic/runtime URL split that caused migrations
-    to write to /app/backup.db while the app read from /app/data/backup.db.
+    to write to /app/billa-gates.db while the app read from /app/data/billa-gates.db.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "fallback.db"

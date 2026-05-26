@@ -8,10 +8,10 @@ The image is built from the `Dockerfile` at the repo root.
 
 ```bash
 # Apple Silicon / ARM64 Linux:
-docker build --build-arg RESTIC_ARCH=arm64 -t backup-server:latest .
+docker build --build-arg RESTIC_ARCH=arm64 -t billa-gates:latest .
 
 # Intel/AMD x86-64:
-docker build --build-arg RESTIC_ARCH=amd64 -t backup-server:latest .
+docker build --build-arg RESTIC_ARCH=amd64 -t billa-gates:latest .
 ```
 
 `RESTIC_ARCH` is **required** — the build fails loudly without it. Only
@@ -48,9 +48,9 @@ the container. I use Traefik for reverse-proxy, change if needed.
 
 ```yaml
 services:
-  backup-server:
-    image: backup-server:latest
-    container_name: backup-server
+  billa-gates:
+    image: billa-gates:latest
+    container_name: billa-gates
     environment:
       - TZ=America/Los_Angeles
       - LOG_LEVEL=INFO
@@ -101,7 +101,7 @@ UI when the job is created.
 
 ```bash
 docker compose up -d
-docker compose logs -f backup-server
+docker compose logs -f billa-gates
 ```
 
 The first start runs `alembic upgrade head` to materialise the SQLite
@@ -110,12 +110,12 @@ schema, then boots `uvicorn` on port 12345. Open the UI at
 
 ---
 
-## 6. Backing up the backup server
+## 6. Backing up Billa-Gates
 
-The SQLite database at `data/backup.db` contains every job, run, and
+The SQLite database at `data/billa-gates.db` contains every job, run, and
 snapshot record. The actual restic repositories live under whatever you
 mounted to `/destinations/<label>`. To make config + history survive a
-catastrophic host loss, periodically copy `data/backup.db` (along with
+catastrophic host loss, periodically copy `data/billa-gates.db` (along with
 `data/restic-cache/` if you want to skip rebuilding it) to an off-host
 location. It might be a good idea to turn down the container before
 copying this file.

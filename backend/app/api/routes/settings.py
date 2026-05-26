@@ -140,8 +140,8 @@ async def test_ntfy(session: AsyncSession = Depends(get_session)) -> NtfyTestRes
                 url,
                 headers=headers,
                 json={
-                    "title": "Backup Server Test",
-                    "message": "Test notification from backup server",
+                    "title": "Billa-Gates Test",
+                    "message": "Test notification from Billa-Gates",
                 },
             )
         if resp.status_code == 200:

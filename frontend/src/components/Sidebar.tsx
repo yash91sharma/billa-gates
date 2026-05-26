@@ -35,7 +35,7 @@ export default function Sidebar({ expanded, onToggle, onNavigate }: SidebarProps
         )}
       >
         {expanded && (
-          <span className="font-semibold tracking-tight text-foreground">backup-server</span>
+          <span className="font-semibold tracking-tight text-foreground">Billa-Gates</span>
         )}
         <button
           type="button"

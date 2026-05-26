@@ -76,7 +76,7 @@ export default function Layout() {
           >
             <Menu className="h-5 w-5" />
           </button>
-          <span className="font-semibold tracking-tight">backup-server</span>
+          <span className="font-semibold tracking-tight">Billa-Gates</span>
         </header>
 
         <main className="min-w-0 flex-1 overflow-x-auto">

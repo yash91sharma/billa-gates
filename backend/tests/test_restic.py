@@ -872,7 +872,7 @@ async def test_unlock_default_timeout_is_60_seconds():
 
 
 async def test_backup_includes_pinned_host_flag():
-    """Every backup must run with --host backup-server so retention does not get
+    """Every backup must run with --host billa-gates so retention does not get
     silently split across container rebuilds (each new container otherwise gets a
     random hostname, and `restic forget --keep-last N` groups by host+paths)."""
     proc = _make_process(0, stdout=BACKUP_SUMMARY)
@@ -894,7 +894,7 @@ async def test_backup_includes_pinned_host_flag():
     args_list = list(captured["args"])
     assert "--host" in args_list
     host_idx = args_list.index("--host")
-    assert args_list[host_idx + 1] == "backup-server"
+    assert args_list[host_idx + 1] == "billa-gates"
 
 
 async def test_forget_prune_scopes_by_job_tag_with_empty_group_by():

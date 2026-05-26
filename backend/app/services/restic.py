@@ -213,7 +213,7 @@ async def restic_backup(
         "restic",
         "backup",
         "--host",
-        "backup-server",
+        "billa-gates",
         "--tag",
         f"job:{job_id}",
     ]

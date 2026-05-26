@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1.7
 #
-# Production image for backup-server.
+# Production image for billa-gates.
 #
 # Four stages; only artifacts from stages 1–3 land in the final image
 # (no node, no pip, no build tools). Expected final image: ~165–190 MB.
 #
 # Build:
-#   docker build --build-arg RESTIC_ARCH=arm64 -t backup-server .
-#   docker build --build-arg RESTIC_ARCH=amd64 -t backup-server .
+#   docker build --build-arg RESTIC_ARCH=arm64 -t billa-gates .
+#   docker build --build-arg RESTIC_ARCH=amd64 -t billa-gates .
 #
 # RESTIC_ARCH is required (no default) — build fails loudly without it.
 

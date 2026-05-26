@@ -171,7 +171,7 @@ LOG_FORMAT: str = (
     "%(asctime)s [%(request_id)s] %(levelname)s %(name)s:%(funcName)s - %(message)s"
 )
 
-_OUR_HANDLER_FLAG: str = "_backup_server_log_handler"
+_OUR_HANDLER_FLAG: str = "_billa_gates_log_handler"
 _factory_installed: bool = False
 
 

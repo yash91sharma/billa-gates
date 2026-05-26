@@ -41,7 +41,7 @@ _RESTIC_SNAPSHOTS_JSON = json.dumps(
             "id": "a" * 64,
             "short_id": "a" * 8,
             "time": "2026-05-01T12:00:00Z",
-            "hostname": "backup-server",
+            "hostname": "billa-gates",
             "paths": ["/sources/documents"],
             "tags": [f"job:{JOB_ID}", "weekly"],
             "total_size": 1024 * 1024 * 500,
@@ -50,7 +50,7 @@ _RESTIC_SNAPSHOTS_JSON = json.dumps(
             "id": "b" * 64,
             "short_id": "b" * 8,
             "time": "2026-05-02T12:00:00Z",
-            "hostname": "backup-server",
+            "hostname": "billa-gates",
             "paths": ["/sources/documents"],
             "tags": [f"job:{JOB_ID}"],
             "total_size": 1024 * 1024 * 510,
@@ -128,7 +128,7 @@ async def test_list_snapshots_returns_normalized_dicts():
     first = result[0]
     assert first["snapshot_id"] == "a" * 64
     assert first["snapshot_time"] == "2026-05-01T12:00:00Z"
-    assert first["hostname"] == "backup-server"
+    assert first["hostname"] == "billa-gates"
     assert first["paths"] == ["/sources/documents"]
     assert first["tags"] == [f"job:{JOB_ID}", "weekly"]
     assert first["size_bytes"] == 1024 * 1024 * 500

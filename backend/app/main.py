@@ -27,13 +27,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Run startup tasks (logging, scheduler) then yield for the app lifetime."""
     setup_logging()
     logger = get_logger(__name__)
-    logger.info("backup-server startup: initialising scheduler")
+    logger.info("billa-gates startup: initialising scheduler")
     await start_scheduler()
-    logger.info("backup-server ready")
+    logger.info("billa-gates ready")
     yield
-    logger.info("backup-server shutdown: stopping scheduler")
+    logger.info("billa-gates shutdown: stopping scheduler")
     await shutdown_scheduler()
-    logger.info("backup-server stopped")
+    logger.info("billa-gates stopped")
 
 
 app = FastAPI(
