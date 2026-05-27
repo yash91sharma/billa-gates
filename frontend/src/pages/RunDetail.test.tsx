@@ -336,6 +336,61 @@ describe('RunDetail', () => {
     })
   })
 
+  describe('stop / cancel button', () => {
+    it('renders a Stop button while status is running', async () => {
+      vi.mocked(api.getRun).mockResolvedValue(makeRun({ status: 'running', check_status: null }))
+      renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: /stop|cancel/i })).toBeInTheDocument()
+      )
+    })
+
+    it('does NOT render a Stop button when status is terminal', async () => {
+      vi.mocked(api.getRun).mockResolvedValue(
+        makeRun({ status: 'success', check_status: 'passed' })
+      )
+      renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
+      await waitFor(() => expect(screen.getByText('success')).toBeInTheDocument())
+      expect(screen.queryByRole('button', { name: /^stop$|^cancel$/i })).not.toBeInTheDocument()
+    })
+
+    it('clicking Stop calls cancelRun after confirmation', async () => {
+      const { default: userEvent } = await import('@testing-library/user-event')
+      vi.mocked(api.getRun).mockResolvedValue(makeRun({ status: 'running', check_status: null }))
+      vi.mocked(api.cancelRun).mockResolvedValue(undefined)
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+      renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
+      const btn = await screen.findByRole('button', { name: /stop|cancel/i })
+      await userEvent.setup().click(btn)
+      await waitFor(() => expect(vi.mocked(api.cancelRun)).toHaveBeenCalledWith('run-1'))
+      confirmSpy.mockRestore()
+    })
+
+    it('does not call cancelRun if user dismisses the confirm dialog', async () => {
+      const { default: userEvent } = await import('@testing-library/user-event')
+      vi.mocked(api.getRun).mockResolvedValue(makeRun({ status: 'running', check_status: null }))
+      vi.mocked(api.cancelRun).mockResolvedValue(undefined)
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+      renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
+      const btn = await screen.findByRole('button', { name: /stop|cancel/i })
+      await userEvent.setup().click(btn)
+      expect(vi.mocked(api.cancelRun)).not.toHaveBeenCalled()
+      confirmSpy.mockRestore()
+    })
+  })
+
+  describe('canceled status display', () => {
+    it('shows canceled badge for canceled runs', async () => {
+      vi.mocked(api.getRun).mockResolvedValue(
+        makeRun({ status: 'canceled', reason: 'user_canceled', check_status: 'skipped' })
+      )
+      renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
+      await waitFor(() => expect(screen.getByText('canceled')).toBeInTheDocument())
+    })
+  })
+
   describe('snapshot_id display', () => {
     it('shows snapshot id when present', async () => {
       vi.mocked(api.getRun).mockResolvedValue(

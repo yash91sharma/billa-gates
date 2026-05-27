@@ -607,6 +607,7 @@ async def test_send_notification_no_auth_header_without_token():
 
 async def test_send_notification_logs_error_on_http_failure():
     import httpx
+
     from app.services.notifications import send_notification
 
     mock_response = MagicMock()

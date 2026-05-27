@@ -74,6 +74,9 @@ export default function JobDetail() {
   const unlockDisabled =
     runs === undefined || runs.some((r) => r.status === 'running' || r.check_status === null)
 
+  // First in-flight run (sequential per job — there can be at most one).
+  const activeRun = runs?.find((r) => r.status === 'running')
+
   async function handleRunNow() {
     if (!job) return
     setRunError(null)
@@ -103,6 +106,19 @@ export default function JobDetail() {
       } else {
         setPruneError('Failed to trigger prune.')
       }
+    }
+  }
+
+  async function handleStop() {
+    if (!activeRun) return
+    if (!window.confirm('Cancel this running backup? Already-uploaded data is kept.')) {
+      return
+    }
+    try {
+      await api.cancelRun(activeRun.id)
+      await queryClient.invalidateQueries({ queryKey: ['jobRuns', id] })
+    } catch {
+      // Polling will reconcile; ignore (409 if run just finished, etc).
     }
   }
 
@@ -137,6 +153,14 @@ export default function JobDetail() {
         >
           Run Now
         </button>
+        {activeRun && (
+          <button
+            onClick={handleStop}
+            className="border border-destructive/40 text-destructive hover:bg-destructive/10 px-3 py-1 rounded-sm text-sm"
+          >
+            Stop
+          </button>
+        )}
         <button
           onClick={handlePruneNow}
           className="border px-3 py-1 rounded text-sm"

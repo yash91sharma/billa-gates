@@ -21,7 +21,7 @@ from app.db.models import (
     RunStatus,
     TriggeredBy,
 )
-from app.services import restic, snapshot_listing
+from app.services import process_registry, restic, snapshot_listing
 from app.services.notifications import send_notification
 
 logger = get_logger(__name__)
@@ -280,7 +280,7 @@ async def run_prune(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         repo_path: str = f"/destinations/{job.destination_label}/{str(job_id)}"
 
         rc, _, prune_err = await restic.restic_prune(
-            repo_path, job.restic_password, prune_timeout
+            repo_path, job.restic_password, prune_timeout, run_id=run_id
         )
 
         now: datetime = datetime.now(timezone.utc)
@@ -520,9 +520,72 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     run_row.check_status = CheckStatus.skipped
                     await s.commit()
 
+        async def _was_canceled() -> bool:
+            """Detect user-initiated cancel and finalize the row as canceled.
+
+            Returns True once the row has been written; the caller must then
+            return immediately to short-circuit the rest of the pipeline.
+            Idempotent — clears the registry flag so repeated checks after
+            finalization don't re-fire the notification.
+            """
+            if not process_registry.is_canceled(current_run_id):
+                return False
+
+            now_c: datetime = datetime.now(timezone.utc)
+            cancel_duration: int = 0
+            async with factory() as s:
+                cancel_run: BackupRun | None = await s.get(
+                    BackupRun, str(current_run_id)
+                )
+                if cancel_run is not None:
+                    # Always finalize as canceled even if an earlier
+                    # intermediate write set status=failed (rc!=0 from a
+                    # SIGTERM'd restic process); the user's stop click takes
+                    # precedence — that's the whole point of the cancel
+                    # action.
+                    cancel_run.status = RunStatus.canceled
+                    cancel_run.reason = RunReason.user_canceled
+                    cancel_run.finished_at = now_c
+                    cancel_run.duration_seconds = int(
+                        (
+                            now_c.replace(tzinfo=None) - cancel_run.started_at
+                        ).total_seconds()
+                    )
+                    if not cancel_run.prune_status:
+                        cancel_run.prune_status = PruneStatus.skipped
+                    if not cancel_run.check_status:
+                        cancel_run.check_status = CheckStatus.skipped
+                    if not cancel_run.error_output:
+                        cancel_run.error_output = "Canceled by user."
+                    cancel_duration = cancel_run.duration_seconds or 0
+                    await s.commit()
+
+            ntfy_topic_cancel: str | None = cast(
+                str | None, settings_dict.get("ntfy_topic")
+            )
+            if ntfy_topic_cancel and settings_dict.get("notify_on_warning"):
+                await _try_notify(
+                    cast(str | None, settings_dict.get("ntfy_server_url")),
+                    ntfy_topic_cancel,
+                    f"Backup canceled: {job.name}",
+                    f"Duration: {cancel_duration}s — canceled by user.",
+                    token=cast(str | None, settings_dict.get("ntfy_token")),
+                )
+
+            process_registry.clear_canceled(current_run_id)
+            logger.info(
+                f"job_id={job_id} run_id={current_run_id} status=canceled "
+                f"reason=user_canceled"
+            )
+            return True
+
         rc: int
         stderr: str
-        rc, _, stderr = await restic.restic_cat_config(repo_path, job_password)
+        rc, _, stderr = await restic.restic_cat_config(
+            repo_path, job_password, run_id=current_run_id
+        )
+        if await _was_canceled():
+            return
 
         # rc=11 means the repo metadata read was blocked by a stale lock. The
         # cheapest fix is to call unlock and retry once. Looping further would
@@ -534,13 +597,21 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 f"rc=11 stale_lock_suspected attempting_unlock_and_retry"
             )
             try:
-                await restic.restic_unlock(repo_path, job_password)
+                await restic.restic_unlock(
+                    repo_path, job_password, run_id=current_run_id
+                )
             except Exception as exc:
                 logger.warning(
                     f"job_id={job_id} run_id={current_run_id} step=init_check "
                     f"unlock_exception error={exc!r}"
                 )
-            rc, _, stderr = await restic.restic_cat_config(repo_path, job_password)
+            if await _was_canceled():
+                return
+            rc, _, stderr = await restic.restic_cat_config(
+                repo_path, job_password, run_id=current_run_id
+            )
+            if await _was_canceled():
+                return
             if rc == RESTIC_RC_LOCK_FAILED:
                 await _fail_init_check(
                     f"Repository is locked and could not be unlocked: {stderr}",
@@ -562,7 +633,11 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 f"job_id={job_id} run_id={current_run_id} step=init_check "
                 f"repo_not_found initializing"
             )
-            rc, _, init_stderr = await restic.restic_init(repo_path, job_password)
+            rc, _, init_stderr = await restic.restic_init(
+                repo_path, job_password, run_id=current_run_id
+            )
+            if await _was_canceled():
+                return
             if rc != 0:
                 await _fail_init_check(
                     f"Failed to initialize repository: {init_stderr}",
@@ -593,7 +668,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         if settings_dict.get("auto_unlock", True):
             try:
                 unlock_rc, _, unlock_err = await restic.restic_unlock(
-                    repo_path, job_password
+                    repo_path, job_password, run_id=current_run_id
                 )
                 if unlock_rc == 0:
                     logger.info(
@@ -611,6 +686,9 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     f"status=exception error={exc!r}"
                 )
 
+        if await _was_canceled():
+            return
+
         # Step 5: Backup
         job_timeout_hours: int | None = job.timeout_hours
         default_timeout: int = cast(
@@ -624,7 +702,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         # source_subpath edit) makes restic treat the next backup as a fresh
         # first run (gaps.md C5). Returns None on genuine first run.
         parent_snapshot_id: Optional[str] = await restic.restic_latest_snapshot_id(
-            repo_path, job_password, job_id=str(job_id)
+            repo_path, job_password, job_id=str(job_id), run_id=current_run_id
         )
         logger.info(
             f"job_id={job_id} run_id={current_run_id} step=parent_lookup "
@@ -667,8 +745,11 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 timeout_seconds,
                 job_id=str(job_id),
                 parent_snapshot_id=parent_snapshot_id,
+                run_id=current_run_id,
                 **backup_kwargs,
             )
+            if await _was_canceled():
+                return
             # Exit code 11 = restic failed to acquire the repo lock. The most
             # common cause is a stale lock left by a previous abrupt
             # termination. Clear it and retry exactly once — never loop, or
@@ -679,12 +760,16 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     f"rc=11 stale_lock_suspected attempting_unlock_and_retry"
                 )
                 try:
-                    await restic.restic_unlock(repo_path, job_password)
+                    await restic.restic_unlock(
+                        repo_path, job_password, run_id=current_run_id
+                    )
                 except Exception as exc:
                     logger.warning(
                         f"job_id={job_id} run_id={current_run_id} step=lock_retry "
                         f"unlock_exception error={exc!r}"
                     )
+                if await _was_canceled():
+                    return
                 rc, stdout, stderr, summary = await restic.restic_backup(
                     repo_path,
                     job_password,
@@ -692,8 +777,11 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     timeout_seconds,
                     job_id=str(job_id),
                     parent_snapshot_id=parent_snapshot_id,
+                    run_id=current_run_id,
                     **backup_kwargs,
                 )
+                if await _was_canceled():
+                    return
 
             if rc == 0:
                 backup_success = True
@@ -829,8 +917,11 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     job_password,
                     timeout_seconds,
                     job_id=str(job_id),
+                    run_id=current_run_id,
                     **retention_kwargs,
                 )
+                if await _was_canceled():
+                    return
 
                 async with factory() as s:
                     forget_run: BackupRun | None = await s.get(
@@ -990,7 +1081,10 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     job_check_mode,
                     job_check_percent,
                     check_timeout,
+                    run_id=current_run_id,
                 )
+                if await _was_canceled():
+                    return
 
                 async with factory() as s:
                     check_run: BackupRun | None = await s.get(

@@ -561,4 +561,41 @@ describe('JobDetail', () => {
       expect(cells[7]).toBe('—')
     })
   })
+
+  describe('Stop button', () => {
+    it('shows Stop button when a run is active', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([
+        makeRun({ status: 'running', check_status: null }),
+      ])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: /^stop$/i })).toBeInTheDocument()
+      )
+    })
+
+    it('hides Stop button when no run is active', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([
+        makeRun({ status: 'success', check_status: 'passed' }),
+      ])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: /^run now$/i })).toBeInTheDocument()
+      )
+      expect(screen.queryByRole('button', { name: /^stop$/i })).not.toBeInTheDocument()
+    })
+
+    it('clicking Stop calls cancelRun with the active run id after confirm', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([
+        makeRun({ id: 'active-run', status: 'running', check_status: null }),
+      ])
+      vi.mocked(api.cancelRun).mockResolvedValue(undefined)
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      const btn = await screen.findByRole('button', { name: /^stop$/i })
+      await userEvent.setup().click(btn)
+      await waitFor(() => expect(vi.mocked(api.cancelRun)).toHaveBeenCalledWith('active-run'))
+      confirmSpy.mockRestore()
+    })
+  })
 })

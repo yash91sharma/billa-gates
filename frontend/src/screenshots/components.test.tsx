@@ -33,11 +33,13 @@ afterEach(() => {
 
 // ── RunStatusBadge — one PNG per status value ────────────────────────────────
 
-const STATUSES: Array<'running' | 'success' | 'failed' | 'skipped'> = [
+const STATUSES: Array<'running' | 'success' | 'warning' | 'failed' | 'skipped' | 'canceled'> = [
   'running',
   'success',
+  'warning',
   'failed',
   'skipped',
+  'canceled',
 ]
 
 for (const status of STATUSES) {

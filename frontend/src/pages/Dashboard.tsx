@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import RunStatusBadge from '../components/RunStatusBadge'
 import TriggeredByIcon from '../components/TriggeredByIcon'
@@ -16,10 +16,23 @@ function shouldPoll(runs: BackupRun[]): boolean {
 }
 
 export default function Dashboard() {
+  const queryClient = useQueryClient()
   const { data: jobs, error: jobsError } = useQuery({
     queryKey: ['jobs'],
     queryFn: api.listJobs,
   })
+
+  async function handleStop(runId: string) {
+    if (!window.confirm('Cancel this running backup? Already-uploaded data is kept.')) {
+      return
+    }
+    try {
+      await api.cancelRun(runId)
+      await queryClient.invalidateQueries({ queryKey: ['recentRuns'] })
+    } catch {
+      // The polling refetch will reconcile; ignore (409 if already finished).
+    }
+  }
 
   const { data: runs, error: runsError } = useQuery({
     queryKey: ['recentRuns'],
@@ -97,7 +110,8 @@ export default function Dashboard() {
               <th className="py-2 pr-4">Kind</th>
               <th className="py-2 pr-4">Duration</th>
               <th className="py-2 pr-4">Started</th>
-              <th className="py-2">Triggered By</th>
+              <th className="py-2 pr-4">Triggered By</th>
+              <th className="py-2"></th>
             </tr>
           </thead>
           <tbody className="[&>tr:nth-child(even)]:bg-muted/40">
@@ -127,8 +141,18 @@ export default function Dashboard() {
                   {run.duration_seconds != null ? `${run.duration_seconds}s` : '—'}
                 </td>
                 <td className="py-2 pr-4">{new Date(run.started_at).toLocaleString()}</td>
-                <td className="py-2">
+                <td className="py-2 pr-4">
                   <TriggeredByIcon value={run.triggered_by} />
+                </td>
+                <td className="py-2">
+                  {run.status === 'running' && (
+                    <button
+                      onClick={() => handleStop(run.id)}
+                      className="border border-destructive/40 text-destructive hover:bg-destructive/10 px-2 py-0.5 rounded-sm text-xs"
+                    >
+                      Stop
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}

@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import RunStatusBadge from '../components/RunStatusBadge'
 import * as api from '../lib/api'
@@ -17,6 +17,7 @@ function formatDuration(seconds: number): string {
 
 export default function RunDetail() {
   const { id } = useParams<{ id: string }>()
+  const queryClient = useQueryClient()
 
   const { data: run, error } = useQuery({
     queryKey: ['run', id],
@@ -27,6 +28,20 @@ export default function RunDetail() {
       return shouldPoll(data) ? 100 : false
     },
   })
+
+  async function handleStop() {
+    if (!run) return
+    if (!window.confirm('Cancel this running backup? Already-uploaded data is kept.')) {
+      return
+    }
+    try {
+      await api.cancelRun(run.id)
+      await queryClient.invalidateQueries({ queryKey: ['run', run.id] })
+    } catch {
+      // Polling will pick up any successful cancellation; silent failure is
+      // acceptable here (e.g. 409 if the run just finished naturally).
+    }
+  }
 
   if (error) {
     const status = (error as { status?: number }).status
@@ -54,7 +69,22 @@ export default function RunDetail() {
         </Link>
         <span className="border rounded-sm px-2 py-0.5 text-xs capitalize">{run.kind}</span>
         <RunStatusBadge status={run.status} />
+        {run.status === 'running' && (
+          <button
+            onClick={handleStop}
+            className="border border-destructive/40 text-destructive hover:bg-destructive/10 px-3 py-1 rounded-sm text-sm"
+          >
+            Stop
+          </button>
+        )}
       </div>
+
+      {run.reason === 'user_canceled' && (
+        <div className="bg-slate-100 border border-slate-300 text-foreground rounded-sm p-3 text-sm">
+          This run was canceled by the user. Already-uploaded data is preserved in the repo — the
+          next run will reuse it via deduplication.
+        </div>
+      )}
 
       <div className="text-sm text-muted-foreground space-y-1">
         <div>Started: {new Date(run.started_at).toLocaleString()}</div>

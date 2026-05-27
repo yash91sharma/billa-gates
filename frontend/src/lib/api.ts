@@ -49,6 +49,16 @@ export const getJobSnapshots = (id: string) => request<Snapshot[]>(`/jobs/${id}/
 // ── Runs ──────────────────────────────────────────────────────────────────────
 export const getRecentRuns = (limit = 10) => request<BackupRun[]>(`/runs/recent?limit=${limit}`)
 export const getRun = (id: string) => request<BackupRun>(`/runs/${id}`)
+export const cancelRun = async (id: string): Promise<void> => {
+  const resp = await fetch(`${BASE}/runs/${id}/cancel`, { method: 'POST' })
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }))
+    throw Object.assign(new Error(err.detail ?? resp.statusText), {
+      status: resp.status,
+      data: err,
+    })
+  }
+}
 
 // ── Mounts ────────────────────────────────────────────────────────────────────
 export const listSourceMounts = () => request<string[]>('/mounts/sources')

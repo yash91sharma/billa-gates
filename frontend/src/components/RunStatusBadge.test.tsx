@@ -91,4 +91,16 @@ describe('RunStatusBadge', () => {
     const badge = screen.getByText('success')
     expect(['SPAN', 'DIV', 'BADGE']).toContain(badge.tagName)
   })
+
+  it('renders "canceled" text for canceled status', () => {
+    render(<RunStatusBadge status="canceled" />)
+    expect(screen.getByText('canceled')).toBeInTheDocument()
+  })
+
+  it('applies muted slate styling for canceled', () => {
+    render(<RunStatusBadge status="canceled" />)
+    const badge = screen.getByText('canceled')
+    expect(badge.className).toMatch(/\bbg-slate-100\b/)
+    expect(badge.className).toMatch(/\btext-slate-(600|700|800)\b/)
+  })
 })

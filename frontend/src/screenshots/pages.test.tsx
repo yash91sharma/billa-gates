@@ -263,6 +263,109 @@ test('RunDetail - success', async () => {
   await page.screenshot({ path: `${OUT}/RunDetail.png` })
 })
 
+// ── Cancel-feature scenarios ─────────────────────────────────────────────────
+//
+// The default-state fixtures above all use a successful/terminal run, so the
+// Stop button (visible only while a run is `running`) never appears. These
+// scenarios re-mock the API with an in-flight run to capture the cancel UI on
+// the three pages where it lives, plus the canceled terminal state.
+
+const runningRun: BackupRun = {
+  ...run,
+  id: 'run-running',
+  status: 'running',
+  finished_at: null,
+  duration_seconds: null,
+  snapshot_id: null,
+  files_new: null,
+  files_changed: null,
+  files_unmodified: null,
+  dirs_new: null,
+  dirs_changed: null,
+  dirs_unmodified: null,
+  data_added_bytes: null,
+  data_added_packed_bytes: null,
+  total_bytes_processed: null,
+  backup_output: null,
+  prune_status: null,
+  check_status: null,
+  triggered_by: 'manual',
+}
+
+const canceledRun: BackupRun = {
+  ...run,
+  id: 'run-canceled',
+  status: 'canceled',
+  reason: 'user_canceled',
+  snapshot_id: null,
+  files_new: null,
+  files_changed: null,
+  files_unmodified: null,
+  data_added_bytes: null,
+  backup_output: null,
+  error_output: 'Canceled by user.',
+  prune_status: 'skipped',
+  check_status: 'skipped',
+  triggered_by: 'manual',
+  duration_seconds: 42,
+}
+
+test('Dashboard - running run with Stop button', async () => {
+  vi.mocked(api.getRecentRuns).mockResolvedValue([runningRun, run])
+  vi.mocked(api.getRun).mockResolvedValue(runningRun)
+
+  const result = renderPage('/', <Dashboard />)
+  cleanup = result.unmount
+  await waitFor(() => {
+    const hasStop = Array.from(result.container.querySelectorAll('button')).some(
+      (b) => b.textContent?.trim() === 'Stop'
+    )
+    if (!hasStop) throw new Error('Stop button not rendered yet')
+  })
+  await page.screenshot({ path: `${OUT}/Dashboard--running.png` })
+})
+
+test('JobDetail - running run with Stop button', async () => {
+  vi.mocked(api.getJobRuns).mockResolvedValue([runningRun])
+
+  const result = renderPage('/jobs/:id', <JobDetail />)
+  cleanup = result.unmount
+  await waitFor(() => {
+    const hasStop = Array.from(result.container.querySelectorAll('button')).some(
+      (b) => b.textContent?.trim() === 'Stop'
+    )
+    if (!hasStop) throw new Error('Stop button not rendered yet')
+  })
+  await page.screenshot({ path: `${OUT}/JobDetail--running.png` })
+})
+
+test('RunDetail - running with Stop button', async () => {
+  vi.mocked(api.getRun).mockResolvedValue(runningRun)
+
+  const result = renderPage('/runs/:id', <RunDetail />)
+  cleanup = result.unmount
+  await waitFor(() => {
+    const hasStop = Array.from(result.container.querySelectorAll('button')).some(
+      (b) => b.textContent?.trim() === 'Stop'
+    )
+    if (!hasStop) throw new Error('Stop button not rendered yet')
+  })
+  await page.screenshot({ path: `${OUT}/RunDetail--running.png` })
+})
+
+test('RunDetail - canceled run', async () => {
+  vi.mocked(api.getRun).mockResolvedValue(canceledRun)
+
+  const result = renderPage('/runs/:id', <RunDetail />)
+  cleanup = result.unmount
+  await waitFor(() => {
+    if (!result.container.textContent?.includes('canceled')) {
+      throw new Error('canceled badge not rendered yet')
+    }
+  })
+  await page.screenshot({ path: `${OUT}/RunDetail--canceled.png` })
+})
+
 test('Settings - populated', async () => {
   const result = renderPage('/settings', <Settings />)
   cleanup = result.unmount

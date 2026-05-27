@@ -44,11 +44,13 @@ class RunStatus(str, Enum):
     warning = "warning"
     failed = "failed"
     skipped = "skipped"
+    canceled = "canceled"
 
 
 class RunReason(str, Enum):
     overlapping_run = "overlapping_run"
     container_restart = "container_restart"
+    user_canceled = "user_canceled"
 
 
 class TriggeredBy(str, Enum):

@@ -25,6 +25,10 @@ const STATUS_CONFIG: Record<string, { label: string; className: string }> = {
     label: 'skipped',
     className: `badge-skipped bg-slate-100 text-slate-600 ${BADGE_BASE}`,
   },
+  canceled: {
+    label: 'canceled',
+    className: `badge-canceled bg-slate-100 text-slate-700 ${BADGE_BASE}`,
+  },
   passed: {
     label: 'passed',
     className: `badge-success bg-green-100 text-green-800 ${BADGE_BASE}`,

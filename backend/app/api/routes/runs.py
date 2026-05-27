@@ -1,8 +1,10 @@
 """FastAPI routes for BackupRun history and detail."""
 
+import asyncio
+import uuid
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,7 +12,8 @@ from app.api.deps import get_session
 from app.api.schemas.jobs import RunSummarySchema
 from app.api.schemas.runs import RunDetailSchema
 from app.core.logging import log_call
-from app.db.models import BackupJob, BackupRun
+from app.db.models import BackupJob, BackupRun, RunStatus
+from app.services import process_registry
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -61,3 +64,44 @@ async def get_run(
     if run is None:
         raise HTTPException(status_code=404, detail="Not found")
     return run
+
+
+# ── POST /api/runs/{id}/cancel ────────────────────────────────────────────────
+
+
+@router.post("/{run_id}/cancel", status_code=202)
+@log_call
+async def cancel_run(
+    run_id: str, session: AsyncSession = Depends(get_session)
+) -> Response:
+    """Mark a running backup run for cancellation and SIGTERM its restic
+    subprocess.
+
+    Returns 404 when the run doesn't exist, 409 when the run has already
+    finished (terminal status), and 202 when the cancel flag has been set
+    and termination dispatched. The pipeline observes the flag between
+    restic steps, finalizes the row to ``status=canceled,
+    reason=user_canceled``, and stops further work.
+    """
+    run = await session.get(BackupRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    if run.status != RunStatus.running:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Run is not running (status={run.status.value}); cannot cancel.",
+        )
+
+    try:
+        run_uuid = uuid.UUID(run_id)
+    except ValueError:
+        # If the row exists but its id isn't a valid UUID (shouldn't happen —
+        # we always create with UUIDs), treat as not-found rather than 500.
+        raise HTTPException(status_code=404, detail="Not found")
+
+    process_registry.mark_canceled(run_uuid)
+    # Fire-and-forget the SIGTERM so the API returns immediately. The grace
+    # window inside _terminate_then_kill is up to 10s; blocking the request
+    # on that would make the UI feel sluggish.
+    asyncio.create_task(process_registry.terminate(run_uuid))
+    return Response(status_code=202)

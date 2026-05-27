@@ -1,27 +1,36 @@
 import asyncio
+import contextlib
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+import uuid as _uuid
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from app.core.logging import get_logger, log_call
+from app.services import process_registry
+from app.services.process_registry import _terminate_then_kill
 
 logger = get_logger(__name__)
 
 
-async def _terminate_then_kill(
-    proc: asyncio.subprocess.Process, grace_seconds: float = 10.0
-) -> None:
-    """SIGTERM the process, give it a grace window to clean up, SIGKILL only
-    if it's still alive. Restic catches SIGTERM and removes its lock file —
-    SIGKILL leaves the lock behind and breaks every subsequent backup.
+@contextlib.contextmanager
+def _tracked(
+    run_id: Optional[_uuid.UUID], proc: asyncio.subprocess.Process
+) -> Iterator[None]:
+    """Register the subprocess in the registry for the lifetime of the call.
+
+    No-op when run_id is None — every restic command keeps backwards-compat
+    callers (e.g. restic_version) working unchanged. Cleanup in the finally
+    keeps the registry from leaking even when the wrapper raises.
     """
-    proc.terminate()
+    if run_id is None:
+        yield
+        return
+    process_registry.register(run_id, proc)
     try:
-        await asyncio.wait_for(proc.wait(), timeout=grace_seconds)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+        yield
+    finally:
+        process_registry.unregister(run_id)
 
 
 @log_call
@@ -49,7 +58,11 @@ async def restic_version() -> Optional[str]:
 
 @log_call
 async def restic_cat_config(
-    repo_path: str, password: str, timeout_seconds: int = 60
+    repo_path: str,
+    password: str,
+    timeout_seconds: int = 60,
+    *,
+    run_id: Optional[_uuid.UUID] = None,
 ) -> Tuple[int, str, str]:
     """Check repo exists and password correct.
 
@@ -74,13 +87,14 @@ async def restic_cat_config(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds
-            )
-        except asyncio.TimeoutError:
-            await _terminate_then_kill(proc)
-            return (-1, "", "cat config timed out")
+        with _tracked(run_id, proc):
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                await _terminate_then_kill(proc)
+                return (-1, "", "cat config timed out")
     except Exception as e:
         return (-1, "", str(e))
 
@@ -90,7 +104,11 @@ async def restic_cat_config(
 
 @log_call
 async def restic_init(
-    repo_path: str, password: str, timeout_seconds: int = 60
+    repo_path: str,
+    password: str,
+    timeout_seconds: int = 60,
+    *,
+    run_id: Optional[_uuid.UUID] = None,
 ) -> Tuple[int, str, str]:
     """Initialize a new restic repo.
 
@@ -113,13 +131,14 @@ async def restic_init(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds
-            )
-        except asyncio.TimeoutError:
-            await _terminate_then_kill(proc)
-            return (-1, "", "init timed out")
+        with _tracked(run_id, proc):
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                await _terminate_then_kill(proc)
+                return (-1, "", "init timed out")
     except Exception as e:
         return (-1, "", str(e))
 
@@ -134,6 +153,7 @@ async def restic_latest_snapshot_id(
     *,
     job_id: str,
     timeout_seconds: int = 60,
+    run_id: Optional[_uuid.UUID] = None,
 ) -> Optional[str]:
     """Return the id of the most recent snapshot tagged for this job, or None
     if no prior snapshot exists / the lookup fails. Used to pass --parent to
@@ -161,13 +181,14 @@ async def restic_latest_snapshot_id(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        try:
-            stdout, _ = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds
-            )
-        except asyncio.TimeoutError:
-            await _terminate_then_kill(proc)
-            return None
+        with _tracked(run_id, proc):
+            try:
+                stdout, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                await _terminate_then_kill(proc)
+                return None
     except Exception:
         return None
 
@@ -192,6 +213,7 @@ async def restic_backup(
     *,
     job_id: str,
     parent_snapshot_id: Optional[str] = None,
+    run_id: Optional[_uuid.UUID] = None,
     **kwargs: Any,
 ) -> Tuple[int, str, str, Optional[Dict[str, Any]]]:
     """Run a backup."""
@@ -270,13 +292,14 @@ async def restic_backup(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds
-            )
-        except asyncio.TimeoutError:
-            await _terminate_then_kill(proc)
-            return (-1, "", "backup timed out", None)
+        with _tracked(run_id, proc):
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                await _terminate_then_kill(proc)
+                return (-1, "", "backup timed out", None)
     except Exception as e:
         return (-1, "", str(e), None)
 
@@ -312,6 +335,7 @@ async def restic_forget(
     timeout_seconds: int,
     *,
     job_id: str,
+    run_id: Optional[_uuid.UUID] = None,
     **retention_flags: Any,
 ) -> Tuple[int, str, str]:
     """Apply retention policy by removing snapshot pointers.
@@ -368,13 +392,14 @@ async def restic_forget(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds
-            )
-        except asyncio.TimeoutError:
-            await _terminate_then_kill(proc)
-            return (-1, "", "forget/prune timed out")
+        with _tracked(run_id, proc):
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                await _terminate_then_kill(proc)
+                return (-1, "", "forget/prune timed out")
     except Exception as e:
         return (-1, "", str(e))
 
@@ -387,6 +412,8 @@ async def restic_prune(
     repo_path: str,
     password: str,
     timeout_seconds: int,
+    *,
+    run_id: Optional[_uuid.UUID] = None,
 ) -> Tuple[int, str, str]:
     """Standalone prune (no retention flags). Returns (returncode, stdout, stderr)."""
     env: Dict[str, str] = {
@@ -404,13 +431,14 @@ async def restic_prune(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds
-            )
-        except asyncio.TimeoutError:
-            await _terminate_then_kill(proc)
-            return (-1, "", "prune timed out")
+        with _tracked(run_id, proc):
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                await _terminate_then_kill(proc)
+                return (-1, "", "prune timed out")
     except Exception as e:
         return (-1, "", str(e))
 
@@ -425,6 +453,8 @@ async def restic_check(
     mode: str,
     subset_percent: Optional[int],
     timeout_seconds: int,
+    *,
+    run_id: Optional[_uuid.UUID] = None,
 ) -> Tuple[int, str, str]:
     """Verify repo integrity."""
     env: Dict[str, str] = {
@@ -449,13 +479,14 @@ async def restic_check(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds
-            )
-        except asyncio.TimeoutError:
-            await _terminate_then_kill(proc)
-            return (-1, "", "check timed out")
+        with _tracked(run_id, proc):
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                await _terminate_then_kill(proc)
+                return (-1, "", "check timed out")
     except Exception as e:
         return (-1, "", str(e))
 
@@ -465,7 +496,11 @@ async def restic_check(
 
 @log_call
 async def restic_unlock(
-    repo_path: str, password: str, timeout_seconds: int = 60
+    repo_path: str,
+    password: str,
+    timeout_seconds: int = 60,
+    *,
+    run_id: Optional[_uuid.UUID] = None,
 ) -> Tuple[int, str, str]:
     """Remove stale locks.
 
@@ -488,13 +523,14 @@ async def restic_unlock(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds
-            )
-        except asyncio.TimeoutError:
-            await _terminate_then_kill(proc)
-            return (-1, "", "unlock timed out")
+        with _tracked(run_id, proc):
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                await _terminate_then_kill(proc)
+                return (-1, "", "unlock timed out")
     except Exception as e:
         return (-1, "", str(e))
 

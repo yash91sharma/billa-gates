@@ -2091,7 +2091,7 @@ async def test_step6_repo_path_uses_destination_label(engine):
 
     captured = {}
 
-    async def fake_cat_config(repo, password):
+    async def fake_cat_config(repo, password, *args, **kwargs):
         captured["repo"] = repo
         return (0, "{}", "")
 
@@ -2375,7 +2375,9 @@ async def test_step12_check_subset_passes_percent_to_restic(engine):
 
     captured = {}
 
-    async def fake_check(repo, password, mode, subset_percent, timeout_seconds):
+    async def fake_check(
+        repo, password, mode, subset_percent, timeout_seconds, *args, **kwargs
+    ):
         captured["mode"] = mode
         captured["subset_percent"] = subset_percent
         return (0, "no errors", "")
@@ -2417,7 +2419,9 @@ async def test_step12_check_full_mode_passed_correctly(engine):
 
     captured = {}
 
-    async def fake_check(repo, password, mode, subset_percent, timeout_seconds):
+    async def fake_check(
+        repo, password, mode, subset_percent, timeout_seconds, *args, **kwargs
+    ):
         captured["mode"] = mode
         captured["subset_percent"] = subset_percent
         return (0, "no errors", "")
@@ -2464,7 +2468,9 @@ async def test_step12_check_uses_job_timeout(engine):
 
     captured = {}
 
-    async def fake_check(repo, password, mode, subset_percent, timeout_seconds):
+    async def fake_check(
+        repo, password, mode, subset_percent, timeout_seconds, *args, **kwargs
+    ):
         captured["timeout_seconds"] = timeout_seconds
         return (0, "ok", "")
 
@@ -2512,7 +2518,7 @@ async def test_run_prune_invokes_restic_prune_and_marks_success(engine):
 
     prune_called = {"v": False, "args": None}
 
-    async def fake_prune(repo, password, timeout_seconds):
+    async def fake_prune(repo, password, timeout_seconds, *args, **kwargs):
         prune_called["v"] = True
         prune_called["args"] = (repo, timeout_seconds)
         return (0, "", "")

@@ -344,4 +344,60 @@ describe('Dashboard', () => {
       })
     })
   })
+
+  describe('inline Stop action', () => {
+    it('shows a Stop button on running rows', async () => {
+      vi.mocked(api.listJobs).mockResolvedValue([])
+      vi.mocked(api.getRecentRuns).mockResolvedValue([
+        makeRun({ id: 'run-running', status: 'running', check_status: null }),
+      ])
+      vi.mocked(api.getHealth).mockResolvedValue({
+        scheduler_running: true,
+        restic_version: '0.17.3',
+        db_ok: true,
+      } as HealthStatus)
+
+      renderWithProviders(<Dashboard />)
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: /^stop$/i })).toBeInTheDocument()
+      )
+    })
+
+    it('omits Stop button on terminal rows', async () => {
+      vi.mocked(api.listJobs).mockResolvedValue([])
+      vi.mocked(api.getRecentRuns).mockResolvedValue([
+        makeRun({ id: 'run-done', status: 'success', check_status: 'passed' }),
+      ])
+      vi.mocked(api.getHealth).mockResolvedValue({
+        scheduler_running: true,
+        restic_version: '0.17.3',
+        db_ok: true,
+      } as HealthStatus)
+
+      renderWithProviders(<Dashboard />)
+      await waitFor(() => expect(screen.getByText('Test Job')).toBeInTheDocument())
+      expect(screen.queryByRole('button', { name: /^stop$/i })).not.toBeInTheDocument()
+    })
+
+    it('clicking Stop calls cancelRun after confirm', async () => {
+      const { default: userEvent } = await import('@testing-library/user-event')
+      vi.mocked(api.listJobs).mockResolvedValue([])
+      vi.mocked(api.getRecentRuns).mockResolvedValue([
+        makeRun({ id: 'run-running', status: 'running', check_status: null }),
+      ])
+      vi.mocked(api.cancelRun).mockResolvedValue(undefined)
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+      vi.mocked(api.getHealth).mockResolvedValue({
+        scheduler_running: true,
+        restic_version: '0.17.3',
+        db_ok: true,
+      } as HealthStatus)
+
+      renderWithProviders(<Dashboard />)
+      const btn = await screen.findByRole('button', { name: /^stop$/i })
+      await userEvent.setup().click(btn)
+      await waitFor(() => expect(vi.mocked(api.cancelRun)).toHaveBeenCalledWith('run-running'))
+      confirmSpy.mockRestore()
+    })
+  })
 })

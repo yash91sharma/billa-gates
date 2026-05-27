@@ -143,7 +143,10 @@ class JobCreate(BaseModel):
         if self.check_enabled:
             if not self.check_mode:
                 raise ValueError("check_mode is required when check_enabled is True")
-            if self.check_mode == CheckMode.subset and self.check_subset_percent is None:
+            if (
+                self.check_mode == CheckMode.subset
+                and self.check_subset_percent is None
+            ):
                 raise ValueError(
                     "check_subset_percent is required when check_mode is 'subset'"
                 )
