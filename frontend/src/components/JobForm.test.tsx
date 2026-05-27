@@ -437,6 +437,17 @@ describe('JobForm', () => {
       expect(screen.getByText(/run history.*keep last runs/i)).toBeInTheDocument()
     })
 
+    it('explains that retention policies do not automatically free physical space and require manual prune', async () => {
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={vi.fn()} />)
+      await user.click(screen.getByText(/retention policy/i))
+      expect(
+        screen.getByText(
+          /reclaim physical.*manually run.*prune|reclaim physical.*manual prune|free physical.*manual prune/i
+        )
+      ).toBeInTheDocument()
+    })
+
     it('shows Backup Options section', () => {
       render(<JobForm onSubmit={vi.fn()} />)
       expect(screen.getByText(/backup options/i)).toBeInTheDocument()

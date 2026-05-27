@@ -75,7 +75,7 @@ export default function RunDetail() {
 
       {run.reason === 'container_restart' && (
         <div className="bg-primary/10 border border-primary/30 text-foreground rounded-sm p-3 text-sm">
-          This run was skipped because of a container restart.
+          This run was interrupted and marked failed due to a container restart.
         </div>
       )}
 
@@ -127,7 +127,8 @@ export default function RunDetail() {
 
       {run.kind !== 'prune' && (
         <div className="text-sm">
-          Verification: {run.check_status ?? '—'}
+          <span className="text-muted-foreground mr-2">Verification:</span>
+          <RunStatusBadge status={run.check_status} />
           {run.check_status === 'failed' && run.check_error_output && (
             <pre className="mt-2 bg-destructive/10 text-destructive rounded-sm p-2 text-xs">
               {run.check_error_output}

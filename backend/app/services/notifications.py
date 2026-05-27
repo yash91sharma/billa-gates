@@ -35,11 +35,12 @@ async def send_notification(
 
     try:
         async with httpx.AsyncClient() as client:
-            await client.post(
+            resp = await client.post(
                 f"{server_url}/{topic}",
                 headers=headers,
                 json={"title": title, "message": message},
             )
+            resp.raise_for_status()
         logger.info(f"notification sent successfully to {topic}")
     except Exception as exc:
         logger.error(f"notification failed to {topic}: {exc}")

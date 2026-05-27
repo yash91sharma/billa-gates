@@ -559,6 +559,13 @@ export default function JobForm({
                 <code>restic forget</code>). This is separate from run history, which is capped
                 globally on the Settings page under "Keep last runs".
               </p>
+              <div className="bg-warning/15 border border-warning/40 rounded-sm p-3 text-xs mt-2">
+                ⚠️ <strong>Important:</strong> Restic retention policies (forgetting snapshots) only
+                remove snapshot metadata reference points. They <strong>do not</strong>{' '}
+                automatically free physical disk space. To reclaim physical space and prevent silent
+                disk accumulation, you must manually run a Prune operation from the Job Details
+                page.
+              </div>
               {(
                 [
                   ['retain-keep-last', keepLast, setKeepLast, HELP.keepLast],

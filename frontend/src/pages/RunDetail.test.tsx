@@ -94,15 +94,23 @@ describe('RunDetail', () => {
     })
 
     it('shows prune status', async () => {
-      vi.mocked(api.getRun).mockResolvedValue(makeRun({ prune_status: 'passed' }))
+      vi.mocked(api.getRun).mockResolvedValue(
+        makeRun({ prune_status: 'passed', check_status: 'skipped' })
+      )
       renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
       await waitFor(() => expect(screen.getByText('passed')).toBeInTheDocument())
     })
 
     it('shows check_status badge', async () => {
-      vi.mocked(api.getRun).mockResolvedValue(makeRun({ check_status: 'passed' }))
+      vi.mocked(api.getRun).mockResolvedValue(
+        makeRun({ check_status: 'passed', prune_status: 'skipped' })
+      )
       renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
-      await waitFor(() => expect(screen.getAllByText('passed').length).toBeGreaterThanOrEqual(1))
+      await waitFor(() => {
+        const badge = screen.getByText('passed')
+        expect(badge).toBeInTheDocument()
+        expect(badge).toHaveClass('badge-success')
+      })
     })
   })
 
@@ -139,7 +147,9 @@ describe('RunDetail', () => {
       )
       renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
       await waitFor(() =>
-        expect(screen.getByText(/container.*restart|was skipped.*restart/i)).toBeInTheDocument()
+        expect(
+          screen.getByText('This run was interrupted and marked failed due to a container restart.')
+        ).toBeInTheDocument()
       )
     })
 

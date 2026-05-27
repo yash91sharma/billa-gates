@@ -167,6 +167,14 @@ export default function JobDetail() {
       {unlockOutput && <p className="text-sm text-green-700">Output: {unlockOutput}</p>}
       {unlockError && <p className="text-sm text-destructive">{unlockError}</p>}
 
+      <div className="bg-warning/15 border border-warning/40 rounded-sm p-3 text-xs text-foreground">
+        ⚠️ <strong>Notice on Disk Space:</strong> Restic retention policies (forgetting snapshots)
+        only remove snapshot metadata reference points. They <strong>do not</strong> automatically
+        free physical disk space. To reclaim physical space and avoid silent disk space
+        accumulation, you must click the <strong>Prune Old Files</strong> button above. Pruning is
+        not scheduled or automated to avoid performance impact.
+      </div>
+
       {isEditing && (
         <div className="space-y-3 border-t border-b border-border py-4">
           {editError && (
@@ -305,7 +313,7 @@ export default function JobDetail() {
         <h2 className="text-lg font-semibold mb-2">Restore</h2>
         <pre className="bg-muted rounded-sm p-3 text-xs overflow-auto">
           {`# Restore with restic
-export RESTIC_REPOSITORY=/destinations/${job.destination_label}
+export RESTIC_REPOSITORY=/destinations/${job.destination_label}/${job.id}
 export RESTIC_PASSWORD=your-password-here
 restic snapshots
 restic restore latest --target ./restored`}

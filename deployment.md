@@ -97,6 +97,17 @@ UI when the job is created.
 
 ---
 
+## 4. Concurrency & Locking Constraints
+
+> [!WARNING]
+> Billa-Gates **must** run as a single-process container with exactly one (1) Uvicorn worker, and cannot be scaled horizontally.
+
+- **In-Memory Locking**: The application uses Python's `asyncio.Lock` to coordinate and prevent overlapping backup, prune, or check runs on the same repository.
+- **Single Process Constraint**: Because locks are held in memory, running multiple Uvicorn workers (e.g., `--workers 4`) or scaling the container horizontally across multiple nodes will bypass this locking mechanism.
+- **Repository Corruption Risk**: If multiple workers or container replicas attempt to perform write operations (like backup, prune, or forget) on the same restic repository simultaneously, it will cause lock conflicts, failed runs, or potential repository write collisions.
+
+---
+
 ### Run it
 
 ```bash

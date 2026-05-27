@@ -545,6 +545,7 @@ async def test_send_notification_posts_when_topic_set():
 
     mock_response = AsyncMock()
     mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
 
     with patch("httpx.AsyncClient.post", return_value=mock_response) as mock_post:
         await send_notification(
@@ -561,6 +562,7 @@ async def test_send_notification_includes_auth_header_when_token_set():
 
     mock_response = AsyncMock()
     mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
     captured = {}
 
     async def fake_post(url, **kwargs):
@@ -584,6 +586,7 @@ async def test_send_notification_no_auth_header_without_token():
 
     mock_response = AsyncMock()
     mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
     captured = {}
 
     async def fake_post(url, **kwargs):
@@ -600,3 +603,26 @@ async def test_send_notification_no_auth_header_without_token():
         )
     headers = captured.get("headers", {})
     assert "Authorization" not in headers
+
+
+async def test_send_notification_logs_error_on_http_failure():
+    import httpx
+    from app.services.notifications import send_notification
+
+    mock_response = MagicMock()
+    mock_response.status_code = 500
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "Internal Server Error", request=MagicMock(), response=mock_response
+    )
+
+    with patch("httpx.AsyncClient.post", return_value=mock_response) as mock_post:
+        with patch("app.services.notifications.logger.error") as mock_logger_error:
+            await send_notification(
+                server_url="https://ntfy.sh",
+                topic="my-topic",
+                title="Test",
+                message="msg",
+            )
+    mock_post.assert_called_once()
+    mock_logger_error.assert_called_once()
+    assert "notification failed" in mock_logger_error.call_args[0][0]

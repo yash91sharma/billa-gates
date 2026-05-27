@@ -1075,3 +1075,18 @@ async def test_list_jobs_last_run_populated_after_run(client, engine):
     job = resp.json()[0]
     assert job["last_run"] is not None
     assert job["last_run"]["status"] == "success"
+
+
+async def test_create_job_check_disabled_with_subset_mode_without_percent(client):
+    """If verification is disabled (check_enabled=False), validation should not
+    enforce having a subset percent even if check_mode is set to 'subset'."""
+    payload = make_job_payload(
+        check_enabled=False, check_mode="subset", check_subset_percent=None
+    )
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["check_enabled"] is False
+    assert data["check_mode"] == "subset"
+    assert data["check_subset_percent"] is None

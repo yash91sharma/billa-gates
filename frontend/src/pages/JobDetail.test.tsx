@@ -141,6 +141,13 @@ describe('JobDetail', () => {
         expect(screen.getByRole('button', { name: /prune/i })).toBeInTheDocument()
       )
     })
+
+    it('shows a notice about manual pruning and disk space reclamation', async () => {
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() =>
+        expect(screen.getByText(/only remove snapshot metadata/i)).toBeInTheDocument()
+      )
+    })
   })
 
   describe('Prune Now behavior', () => {
@@ -316,6 +323,13 @@ describe('JobDetail', () => {
       await waitFor(() =>
         expect(screen.getByText(/restic restore|restic snapshots/i)).toBeInTheDocument()
       )
+    })
+
+    it('shows the correct repository path containing the destination label and job ID', async () => {
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() => screen.getByText(/restic restore|restic snapshots/i))
+      const snippetEl = screen.getByText(/restic restore|restic snapshots/i).closest('pre')
+      expect(snippetEl?.textContent).toContain('export RESTIC_REPOSITORY=/destinations/main/job-1')
     })
 
     it('never shows the real restic password in the restore snippet', async () => {
