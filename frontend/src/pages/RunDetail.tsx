@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import RunStatusBadge from '../components/RunStatusBadge'
 import * as api from '../lib/api'
 import type { BackupRun } from '../lib/types'
+import { formatBytes } from '../lib/utils'
 
 function shouldPoll(run: BackupRun): boolean {
   return run.status === 'running' || run.check_status === null
@@ -12,13 +13,6 @@ function formatDuration(seconds: number): string {
   if (seconds >= 3600) return `${Math.round(seconds / 3600)} hr`
   if (seconds >= 60) return `${Math.round(seconds / 60)} min`
   return `${seconds} sec`
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes >= 1073741824) return `${(bytes / 1073741824).toFixed(1)} GB`
-  if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(1)} MB`
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${bytes} B`
 }
 
 export default function RunDetail() {

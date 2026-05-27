@@ -1,17 +1,7 @@
 import type { Snapshot } from '../lib/types'
+import { formatBytes } from '../lib/utils'
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-
-function formatBytes(bytes: number | null): string {
-  if (bytes === null) return '—'
-  const GB = 1073741824
-  const MB = 1048576
-  const KB = 1024
-  if (bytes >= GB) return `${Math.round(bytes / GB)} GB`
-  if (bytes >= MB) return `${Math.round(bytes / MB)} MB`
-  if (bytes >= KB) return `${Math.round(bytes / KB)} KB`
-  return `${bytes} B`
-}
 
 function formatDate(iso: string): string {
   const d = new Date(iso)

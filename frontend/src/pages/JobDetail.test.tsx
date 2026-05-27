@@ -492,4 +492,73 @@ describe('JobDetail', () => {
       expect(screen.getByRole('form')).toBeInTheDocument()
     })
   })
+
+  describe('runs list statistics columns', () => {
+    it('renders Total Size, Added size, Files, and Snapshot columns for runs with stats', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([
+        makeRun({
+          id: 'r-stats',
+          kind: 'backup',
+          status: 'success',
+          total_bytes_processed: 50000000, // ~47.7 MB
+          data_added_bytes: 1024000, // 1000 KB
+          files_new: 10,
+          files_changed: 5,
+          files_unmodified: 1000,
+          snapshot_id: 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+        }),
+      ])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      const table = await screen.findByRole('table')
+
+      // Verify table headers are present
+      expect(screen.getByText('Total Size')).toBeInTheDocument()
+      expect(screen.getByText('Added')).toBeInTheDocument()
+      expect(screen.getByText('Files')).toBeInTheDocument()
+      expect(screen.getByText('Snapshot')).toBeInTheDocument()
+
+      // Verify row values are formatted and displayed
+      const cells = Array.from(table.querySelectorAll('td')).map((c) => c.textContent ?? '')
+      expect(cells).toContain('47.7 MB')
+      expect(cells).toContain('1000 KB')
+      expect(cells).toContain('+10 / ~5 / =1000')
+      expect(cells).toContain('abcdef12')
+    })
+
+    it('renders dashes for stats when they are missing or null (e.g. prune runs)', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([
+        makeRun({
+          id: 'r-prune',
+          kind: 'prune',
+          status: 'success',
+          total_bytes_processed: null,
+          data_added_bytes: null,
+          files_new: null,
+          files_changed: null,
+          files_unmodified: null,
+          snapshot_id: null,
+        }),
+      ])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      const table = await screen.findByRole('table')
+
+      const rows = table.querySelectorAll('tbody tr')
+      expect(rows.length).toBe(1)
+      const cells = Array.from(rows[0].querySelectorAll('td')).map((c) => c.textContent ?? '')
+
+      // Kind (0): 'prune'
+      // Status (1): 'success' (RunStatusBadge)
+      // Started (2): date
+      // Duration (3): duration
+      // Total Size (4): '—'
+      // Added (5): '—'
+      // Files (6): '—'
+      // Snapshot (7): '—'
+      // Triggered By (8): Icon
+      expect(cells[4]).toBe('—')
+      expect(cells[5]).toBe('—')
+      expect(cells[6]).toBe('—')
+      expect(cells[7]).toBe('—')
+    })
+  })
 })

@@ -6,6 +6,7 @@ import RunStatusBadge from '../components/RunStatusBadge'
 import TriggeredByIcon from '../components/TriggeredByIcon'
 import * as api from '../lib/api'
 import type { BackupRun } from '../lib/types'
+import { formatBytes } from '../lib/utils'
 
 type Tab = 'runs' | 'snapshots' | 'settings'
 
@@ -250,6 +251,10 @@ export default function JobDetail() {
                   <th className="py-2 pr-4">Status</th>
                   <th className="py-2 pr-4">Started</th>
                   <th className="py-2 pr-4">Duration</th>
+                  <th className="py-2 pr-4">Total Size</th>
+                  <th className="py-2 pr-4">Added</th>
+                  <th className="py-2 pr-4">Files</th>
+                  <th className="py-2 pr-4">Snapshot</th>
                   <th className="py-2">Triggered By</th>
                 </tr>
               </thead>
@@ -265,6 +270,16 @@ export default function JobDetail() {
                     <td className="py-2 pr-4">{new Date(r.started_at).toLocaleString()}</td>
                     <td className="py-2 pr-4">
                       {r.duration_seconds != null ? `${r.duration_seconds}s` : '—'}
+                    </td>
+                    <td className="py-2 pr-4">{formatBytes(r.total_bytes_processed)}</td>
+                    <td className="py-2 pr-4">{formatBytes(r.data_added_bytes)}</td>
+                    <td className="py-2 pr-4">
+                      {r.files_new != null || r.files_changed != null || r.files_unmodified != null
+                        ? `+${r.files_new ?? 0} / ~${r.files_changed ?? 0} / =${r.files_unmodified ?? 0}`
+                        : '—'}
+                    </td>
+                    <td className="py-2 pr-4 font-mono">
+                      {r.snapshot_id ? r.snapshot_id.substring(0, 8) : '—'}
                     </td>
                     <td className="py-2">
                       <TriggeredByIcon value={r.triggered_by} />
