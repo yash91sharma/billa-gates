@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax disabled: syntax=docker/dockerfile:1.7
 #
 # Production image for billa-gates.
 #

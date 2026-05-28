@@ -520,6 +520,16 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     run_row.check_status = CheckStatus.skipped
                     await s.commit()
 
+            # Notify operator if failure notifications are configured
+            if settings_dict.get("notify_on_failure") and ntfy_topic:
+                await _try_notify(
+                    cast(str | None, settings_dict.get("ntfy_server_url")),
+                    ntfy_topic,
+                    f"Backup failed: {job.name}",
+                    message[:200] if message else "Unknown error during init check",
+                    token=cast(str | None, settings_dict.get("ntfy_token")),
+                )
+
         async def _was_canceled() -> bool:
             """Detect user-initiated cancel and finalize the row as canceled.
 

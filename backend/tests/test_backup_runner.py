@@ -271,6 +271,53 @@ async def test_step4_init_failure_marks_failed(engine):
     assert "permission denied" in run.error_output
 
 
+async def test_step4_init_failure_sends_notification(engine):
+    """If init check fails, the runner must send a failure notification
+    if notify_on_failure is enabled.
+    """
+    await _setup_job(engine)
+
+    from app.db.models import AppSettings
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        settings = await s.get(AppSettings, 1)
+        assert settings is not None
+        settings.ntfy_topic = "alerts"
+        await s.commit()
+
+    run_id = str(uuid.uuid4())
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    notify_called = {"v": False}
+
+    async def fake_notify(url, topic, title, message, **kwargs):
+        if "failed" in title.lower() and "alerts" == topic:
+            notify_called["v"] = True
+
+    with (
+        patch(
+            "app.services.restic.restic_cat_config",
+            return_value=(12, "", "Fatal: wrong password"),
+        ),
+        patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert notify_called["v"] is True
+
+
 # ── Step 4: exit-code branching (H5) ─────────────────────────────────────────
 
 
