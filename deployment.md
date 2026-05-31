@@ -121,7 +121,18 @@ schema, then boots `uvicorn` on port 12345. Open the UI at
 
 ---
 
-## 6. Backing up Billa-Gates
+## 6. Auto build and deploy
+
+It builds for ARM by default.
+```
+git tag vX.Y.Z
+
+git push origin vX.Y.Z
+```
+
+---
+
+## 7. Backing up Billa-Gates
 
 The SQLite database at `data/billa-gates.db` contains every job, run, and
 snapshot record. The actual restic repositories live under whatever you
