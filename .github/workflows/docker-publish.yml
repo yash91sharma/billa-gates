@@ -1,0 +1,61 @@
+name: Build and publish Docker image
+
+# Triggers on version tags only (e.g. v1.2.3). Pushing code to a branch does
+# nothing — you publish a release by creating and pushing a tag:
+#
+#   git tag v1.2.3
+#   git push origin v1.2.3
+#
+# The tag name (minus the leading "v") becomes the image tag, and "latest" is
+# always moved to the newest tag built here.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: version
+        # GITHUB_REF_NAME is the tag (e.g. "v1.2.3"); strip the leading "v".
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # Single-arch arm64 (Apple Silicon) build. The standard GitHub runner is
+      # amd64, so QEMU provides arm64 emulation. For a faster native build you
+      # can instead set `runs-on: ubuntu-24.04-arm` and delete this QEMU step.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push (linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          build-args: |
+            RESTIC_ARCH=arm64
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/billa-gates:${{ steps.version.outputs.version }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/billa-gates:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
