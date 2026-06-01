@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -8,7 +9,7 @@ from typing import Any, Dict, List, Optional, Set, cast
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.logging import get_logger
+from app.core.logging import get_logger, log_call
 from app.db.database import engine
 from app.db.models import (
     AppSettings,
@@ -42,6 +43,19 @@ async def _try_notify(*args: Any, **kwargs: Any) -> None:
 
 active_jobs: Set[uuid.UUID] = set()
 job_locks: Dict[uuid.UUID, asyncio.Lock] = {}
+
+SOURCES_ROOT: str = "/sources"
+
+
+@log_call
+def check_mount_file_exists(source_label: str) -> bool:
+    """Verify that the source mount contains the required sentinel check file.
+
+    Checks for .billa_gates_check at the root of the volume mount.
+    """
+    check_file_path = os.path.join(SOURCES_ROOT, source_label, ".billa_gates_check")
+    return os.path.exists(check_file_path)
+
 
 # Restic exit codes (stable contract since 0.17). Branching on these is the
 # only reliable way to classify a failure — stderr message wording is not a
@@ -464,6 +478,41 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     "default_job_timeout_hours": settings_obj.default_job_timeout_hours,
                     "auto_unlock": settings_obj.auto_unlock,
                 }
+
+        # Step 2.5: Mount verification
+        logger.debug(f"job_id={job_id} run_id={current_run_id} step=verify_mount")
+        if not check_mount_file_exists(job.source_label):
+            error_msg = (
+                f"Mount check failed: '.billa_gates_check' file was not found "
+                f"at the root of the source mount '/sources/{job.source_label}'."
+            )
+            logger.error(
+                f"job_id={job_id} run_id={current_run_id} step=verify_mount "
+                f"error=mount_check_failed source_label={job.source_label}"
+            )
+            async with factory() as s:
+                failed_run = await s.get(BackupRun, str(current_run_id))
+                if failed_run:
+                    now_utc = datetime.now(timezone.utc)
+                    failed_run.status = RunStatus.failed
+                    failed_run.error_output = error_msg
+                    failed_run.finished_at = now_utc
+                    failed_run.duration_seconds = 0
+                    failed_run.prune_status = PruneStatus.skipped
+                    failed_run.check_status = CheckStatus.skipped
+                    await s.commit()
+
+            # Notify operator if failure notifications are configured
+            ntfy_topic = cast(str | None, settings_dict.get("ntfy_topic"))
+            if settings_dict.get("notify_on_failure") and ntfy_topic:
+                await _try_notify(
+                    cast(str | None, settings_dict.get("ntfy_server_url")),
+                    ntfy_topic,
+                    f"Backup failed: {job.name}",
+                    error_msg[:200],
+                    token=cast(str | None, settings_dict.get("ntfy_token")),
+                )
+            return
 
         # Step 3: Start notification
         ntfy_topic: str | None = cast(str | None, settings_dict.get("ntfy_topic"))

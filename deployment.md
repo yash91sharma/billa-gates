@@ -46,6 +46,9 @@ these are populated by scanning those two directories at request time,
 so any volume you add is immediately selectable without a restart of
 the container. I use Traefik for reverse-proxy, change if needed.
 
+> [!IMPORTANT]
+> **Source Mount Verification**: Every source folder mounted under `/sources/<label>` must contain an empty sentinel file named `.billa_gates_check` at its root (e.g., `/sources/nas/.billa_gates_check`). Billa-Gates checks for this file before every backup run to verify the mount is active. If the file is missing (e.g., the underlying SMB/NFS share disconnected), the backup fails immediately to prevent restic from backing up an empty folder and pruning your historical snapshots.
+
 ```yaml
 services:
   billa-gates:
@@ -124,6 +127,7 @@ schema, then boots `uvicorn` on port 12345. Open the UI at
 ## 6. Auto build and deploy
 
 It builds for ARM by default.
+
 ```
 git tag vX.Y.Z
 

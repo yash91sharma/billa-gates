@@ -21,8 +21,8 @@ notified.
 
 ## Screenshots
 
-| Jobs | Job detail | Settings |
-| --- | --- | --- |
+| Jobs                                         | Job detail                                              | Settings                                             |
+| -------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------- |
 | ![Jobs](frontend/screenshots/pages/Jobs.png) | ![Job detail](frontend/screenshots/pages/JobDetail.png) | ![Settings](frontend/screenshots/pages/Settings.png) |
 
 ## Quick start
@@ -45,6 +45,11 @@ Then open <http://localhost:12345>.
 - **Sources** are mounted read-only under `/sources/{label}` and become selectable in the UI.
 - **Destinations** (restic repositories) are mounted under `/destinations/{label}`.
 - Application state (SQLite DB + restic cache) lives in `/app/data` — keep it on a volume.
+
+## Quirks
+
+- **Mount Check Safeguard (`.billa_gates_check`)**:
+  To protect against silent data loss when backing up network shares (like SMB/NFS mounts that can drop and appear empty), Billa-Gates requires a sentinel file named `.billa_gates_check` to be present at the root of **every** mounted source folder (e.g. `/sources/documents/.billa_gates_check`). If this file is missing, the backup job will fail immediately rather than backing up an empty folder and pruning your snapshot history.
 
 ## License
 

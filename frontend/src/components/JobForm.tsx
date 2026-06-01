@@ -34,7 +34,7 @@ const HELP: Record<string, FieldHelp> = {
   source: {
     label: 'Source',
     description:
-      'Mounted folder to back up. Sources come from /sources/<label> in docker-compose and are mounted read-only.',
+      'Mounted folder to back up. Sources come from /sources/<label> in docker-compose and are mounted read-only. IMPORTANT: The root folder of the mount must contain a .billa_gates_check file, or else the backup will fail.',
     example: 'documents',
   },
   subfolder: {
@@ -440,6 +440,12 @@ export default function JobForm({
                 <p className="text-muted-foreground text-xs mt-1">
                   No source mounts configured. Add a volume under{' '}
                   <code>/sources/&lt;label&gt;</code> in your docker compose.
+                </p>
+              )}
+              {sourceLabel && (
+                <p className="text-muted-foreground text-xs mt-1">
+                  ⚠️ The root directory of source <code>{sourceLabel}</code> must contain a{' '}
+                  <code>.billa_gates_check</code> file.
                 </p>
               )}
             </div>

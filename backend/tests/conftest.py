@@ -35,6 +35,13 @@ def _patch_backup_runner_engine(engine):
 
 
 @pytest.fixture(autouse=True)
+def _mock_backup_runner_mount_check():
+    """Autouse fixture to mock Billa-Gates mount check to pass by default."""
+    with patch("app.services.backup_runner.check_mount_file_exists", return_value=True):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_backup_runner_concurrency_state():
     """Reset module-level concurrency state between tests.
 

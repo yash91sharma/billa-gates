@@ -2921,3 +2921,65 @@ async def test_run_prune_unhandled_exception_finalizes_run_to_failed(engine):
         "Traceback" in run.prune_error_output
         or "RuntimeError" in run.prune_error_output
     )
+
+
+async def test_run_backup_mount_check_fails(engine):
+    """Verify that if check_mount_file_exists returns False, the backup is aborted
+    immediately, the status is set to failed, and error_output contains the expected
+    mount failure message. Restic commands must not be called."""
+    from app.db.models import AppSettings, BackupRun, RunStatus, TriggeredBy
+
+    await _setup_job(engine, source_label="documents")
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as s:
+        settings = await s.get(AppSettings, 1)
+        if settings:
+            settings.ntfy_topic = "alerts"
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    cat_config_called = False
+    backup_called = False
+
+    async def fake_cat_config(*args, **kwargs):
+        nonlocal cat_config_called
+        cat_config_called = True
+        return (0, "{}", "")
+
+    async def fake_backup(*args, **kwargs):
+        nonlocal backup_called
+        backup_called = True
+        return (0, "{}", "", None)
+
+    with (
+        patch("app.services.backup_runner.check_mount_file_exists", return_value=False),
+        patch("app.services.restic.restic_cat_config", side_effect=fake_cat_config),
+        patch("app.services.restic.restic_backup", side_effect=fake_backup),
+        patch("app.services.backup_runner.send_notification") as mock_notify,
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert run.error_output is not None
+    assert "Mount check failed" in run.error_output
+    assert ".billa_gates_check" in run.error_output
+    assert "documents" in run.error_output
+
+    # Verify restic was not invoked
+    assert cat_config_called is False
+    assert backup_called is False
+
+    # Verify notification was sent
+    assert mock_notify.call_count == 1
+    assert "Backup failed" in mock_notify.call_args[0][2]
+    assert "Mount check failed" in mock_notify.call_args[0][3]
