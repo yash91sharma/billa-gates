@@ -5,6 +5,7 @@ The schema is defined by a single initial migration. These tests exercise
 deployment takes — and verify the final shape matches what the app expects.
 """
 
+import re
 import tempfile
 from pathlib import Path
 
@@ -278,3 +279,51 @@ async def test_migration_falls_back_to_app_database_url(monkeypatch):
         tables = set(inspector.get_table_names())
         assert {"backup_jobs", "backup_runs", "app_settings"}.issubset(tables)
         engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_migration_enum_values_match_orm():
+    """Every enum value the ORM can persist must be declared in the migration.
+
+    Column-name parity (test_migration_schema_matches_orm_metadata) does NOT
+    catch *enum value* drift: SQLite stores these enums as plain VARCHAR with
+    no CHECK constraint, so a value the migration forgot (e.g.
+    RunStatus.canceled / RunReason.user_canceled) still writes fine on SQLite
+    while silently diverging from the declared schema — and would be rejected
+    the moment a CHECK constraint or a non-SQLite backend is introduced. This
+    pins the migration's declared sa.Enum values to the ORM enums so they
+    cannot drift apart again.
+    """
+    from app.db import models
+
+    migration_src = (
+        Path(__file__).parent.parent / "alembic" / "versions" / "001_initial_schema.py"
+    ).read_text()
+
+    # Extract {enum_name: {values}} from every sa.Enum("a", "b", ..., name="x").
+    declared: dict[str, set[str]] = {}
+    for body, name in re.findall(r"sa\.Enum\((.*?)name=\"(\w+)\"", migration_src, re.S):
+        declared[name] = set(re.findall(r"\"([a-z_]+)\"", body))
+
+    # SQLAlchemy derives each SAEnum `name` from the lowercased Python enum
+    # class name, which is what the migration hard-codes.
+    orm_enums = [
+        models.ScheduleType,
+        models.RunStatus,
+        models.RunReason,
+        models.RunKind,
+        models.PruneStatus,
+        models.CheckStatus,
+        models.CheckMode,
+        models.CompressionMode,
+        models.TriggeredBy,
+    ]
+    for enum_cls in orm_enums:
+        name = enum_cls.__name__.lower()
+        assert name in declared, f"migration is missing sa.Enum(name={name!r})"
+        orm_values = {e.value for e in enum_cls}
+        assert declared[name] == orm_values, (
+            f"enum value drift for {name!r}: "
+            f"only-in-migration={declared[name] - orm_values} "
+            f"only-in-orm={orm_values - declared[name]}"
+        )
