@@ -598,4 +598,93 @@ describe('JobDetail', () => {
       confirmSpy.mockRestore()
     })
   })
+
+  describe('Integrity Check button and modal', () => {
+    beforeEach(() => {
+      vi.mocked(api.triggerCheck).mockResolvedValue({ run_id: 'check-run-new' })
+    })
+
+    it('shows Integrity Check button', async () => {
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: /integrity check/i })).toBeInTheDocument()
+      )
+    })
+
+    it('opens the dialog modal with correct options when clicked', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      const btn = await screen.findByRole('button', { name: /integrity check/i })
+      await user.click(btn)
+
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: /trigger integrity check/i })).toBeInTheDocument()
+        expect(screen.getByLabelText(/check mode/i)).toBeInTheDocument()
+        expect(screen.getByLabelText(/check timeout/i)).toBeInTheDocument()
+      })
+      // By default structural mode is selected, so subset percent is not visible
+      expect(screen.queryByLabelText(/subset percent/i)).not.toBeInTheDocument()
+    })
+
+    it('shows subset percent input when subset mode is selected', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      const btn = await screen.findByRole('button', { name: /integrity check/i })
+      await user.click(btn)
+
+      await waitFor(() => screen.getByLabelText(/check mode/i))
+      const modeSelect = screen.getByLabelText(/check mode/i)
+      await user.selectOptions(modeSelect, 'subset')
+
+      await waitFor(() => {
+        expect(screen.getByLabelText(/subset percent/i)).toBeInTheDocument()
+      })
+    })
+
+    it('calls triggerCheck and navigates to the run page when submitted', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      const btn = await screen.findByRole('button', { name: /integrity check/i })
+      await user.click(btn)
+
+      await waitFor(() => screen.getByLabelText(/check mode/i))
+      const modeSelect = screen.getByLabelText(/check mode/i)
+      await user.selectOptions(modeSelect, 'subset')
+      
+      const percentInput = screen.getByLabelText(/subset percent/i)
+      await user.clear(percentInput)
+      await user.type(percentInput, '10')
+
+      const timeoutInput = screen.getByLabelText(/check timeout/i)
+      await user.type(timeoutInput, '12')
+
+      const submitBtn = screen.getByRole('button', { name: /^run check$/i })
+      await user.click(submitBtn)
+
+      await waitFor(() => {
+        expect(api.triggerCheck).toHaveBeenCalledWith('job-1', {
+          check_mode: 'subset',
+          check_subset_percent: 10,
+          timeout_hours: 12,
+        })
+      })
+    })
+
+    it('shows 409 error in the modal when a run is already in progress', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.triggerCheck).mockRejectedValue(
+        Object.assign(new Error('Run in progress'), { status: 409 })
+      )
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      const btn = await screen.findByRole('button', { name: /integrity check/i })
+      await user.click(btn)
+
+      await waitFor(() => screen.getByRole('button', { name: /^run check$/i }))
+      await user.click(screen.getByRole('button', { name: /^run check$/i }))
+
+      await waitFor(() => {
+        expect(screen.getByText(/already.*progress|in progress|409/i)).toBeInTheDocument()
+      })
+    })
+  })
 })

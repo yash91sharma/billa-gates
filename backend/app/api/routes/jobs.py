@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_session
 from app.api.schemas.jobs import (
+    JobCheckRequest,
     JobCreate,
     JobResponse,
     JobUpdate,
@@ -25,6 +26,7 @@ from app.api.schemas.jobs import (
 from app.core import scheduler as scheduler_module
 from app.core.logging import get_logger, log_call
 from app.db.models import (
+    AppSettings,
     BackupJob,
     BackupRun,
     RunStatus,
@@ -430,6 +432,32 @@ async def trigger_prune(
     return {"run_id": run_id}
 
 
+# ── POST /api/jobs/{id}/check ─────────────────────────────────────────────────
+
+
+@router.post("/{job_id}/check")
+@log_call
+async def trigger_check(
+    job_id: str,
+    body: JobCheckRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str]:
+    """Manually trigger a `restic check` integrity verification run."""
+    await _get_job_or_404(job_id, session)
+    job_uuid = uuid.UUID(job_id)
+
+    run_id = await backup_runner.trigger_check(
+        job_uuid,
+        TriggeredBy.manual,
+        check_mode=body.check_mode.value,
+        subset_percent=body.check_subset_percent,
+        timeout_hours=body.timeout_hours,
+    )
+    if run_id is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"run_id": run_id}
+
+
 # ── POST /api/jobs/{id}/enable ────────────────────────────────────────────────
 
 
@@ -484,9 +512,11 @@ async def unlock_job(
             detail="A backup run is in progress for this job",
         )
 
+    settings = await session.get(AppSettings, 1)
+    timeout = settings.metadata_timeout_seconds if settings else 600
     repo_path = f"{_DESTINATIONS_ROOT}/{job.destination_label}/{job.id}"
     _rc, stdout, stderr = await restic.restic_unlock(
-        repo_path=repo_path, password=job.restic_password
+        repo_path=repo_path, password=job.restic_password, timeout_seconds=timeout
     )
     logger.info("repository unlocked job_id=%s", job_id)
 
@@ -530,10 +560,12 @@ async def list_job_snapshots(
     cached briefly per repo path to absorb dashboard refresh storms.
     """
     job = await _get_job_or_404(job_id, session)
+    settings = await session.get(AppSettings, 1)
+    timeout = settings.metadata_timeout_seconds if settings else 600
     repo_path = snapshot_listing.build_repo_path(job.destination_label, job.id)
     try:
         raw = await snapshot_listing.list_snapshots(
-            repo_path, job.restic_password, job_id=job.id
+            repo_path, job.restic_password, job_id=job.id, timeout_seconds=timeout
         )
     except snapshot_listing.SnapshotListingError as exc:
         # If the repo doesn't exist yet (genuine first run before any backup),

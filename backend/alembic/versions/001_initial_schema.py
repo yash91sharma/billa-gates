@@ -92,7 +92,7 @@ def upgrade() -> None:
         sa.Column("job_id", sa.String(length=36), nullable=False),
         sa.Column(
             "kind",
-            sa.Enum("backup", "prune", name="runkind"),
+            sa.Enum("backup", "prune", "check", name="runkind"),
             nullable=False,
             server_default="backup",
         ),

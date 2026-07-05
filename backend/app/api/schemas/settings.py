@@ -23,6 +23,7 @@ class SettingsUpdate(BaseModel):
     default_job_timeout_hours: int = Field(24, ge=1, le=168)
     keep_last_runs: int = Field(100, ge=1, le=10000)
     auto_unlock: bool = True
+    metadata_timeout_seconds: int = Field(600, ge=10, le=86400)
 
     @field_validator("ntfy_server_url")
     @classmethod
@@ -65,6 +66,7 @@ class SettingsResponse(BaseModel):
     default_job_timeout_hours: int
     keep_last_runs: int
     auto_unlock: bool
+    metadata_timeout_seconds: int
     restic_version: Optional[str] = None
 
 

@@ -37,8 +37,26 @@ def _patch_backup_runner_engine(engine):
 @pytest.fixture(autouse=True)
 def _mock_backup_runner_mount_check():
     """Autouse fixture to mock Billa-Gates mount check to pass by default."""
-    with patch("app.services.backup_runner.check_mount_file_exists", return_value=True):
+    with (
+        patch("app.services.backup_runner.check_mount_file_exists", return_value=True),
+        patch(
+            "app.services.backup_runner.check_destination_mount_file_exists",
+            return_value=True,
+        ),
+    ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _mock_restic_latest_snapshot_id(request):
+    """Autouse fixture to mock restic_latest_snapshot_id to return None by default,
+    except when running unit tests for restic service itself.
+    """
+    if "test_restic" in request.module.__name__:
+        yield
+    else:
+        with patch("app.services.restic.restic_latest_snapshot_id", return_value=None):
+            yield
 
 
 @pytest.fixture(autouse=True)

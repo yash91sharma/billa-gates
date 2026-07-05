@@ -57,6 +57,21 @@ def check_mount_file_exists(source_label: str) -> bool:
     return os.path.exists(check_file_path)
 
 
+DESTINATIONS_ROOT: str = "/destinations"
+
+
+@log_call
+def check_destination_mount_file_exists(destination_label: str) -> bool:
+    """Verify that the destination mount contains the required sentinel check file.
+
+    Checks for .billa_gates_check at the root of the volume mount.
+    """
+    check_file_path = os.path.join(
+        DESTINATIONS_ROOT, destination_label, ".billa_gates_check"
+    )
+    return os.path.exists(check_file_path)
+
+
 # Restic exit codes (stable contract since 0.17). Branching on these is the
 # only reliable way to classify a failure — stderr message wording is not a
 # contract and has changed between restic releases (gaps.md H5).
@@ -367,6 +382,235 @@ async def run_prune(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         logger.info(f"job_id={job_id} run_id={run_id} prune_completed")
 
 
+async def _check_with_cleanup(
+    job_id: uuid.UUID,
+    run_id: uuid.UUID,
+    check_mode: str,
+    subset_percent: Optional[int],
+    timeout_hours: Optional[int],
+) -> None:
+    """Mirror of _run_with_cleanup for check runs — keeps active_jobs identical."""
+    try:
+        await run_check(job_id, run_id, check_mode, subset_percent, timeout_hours)
+    finally:
+        active_jobs.discard(job_id)
+
+
+async def trigger_check(
+    job_id: uuid.UUID,
+    triggered_by: TriggeredBy = TriggeredBy.manual,
+    check_mode: str = "structural",
+    subset_percent: Optional[int] = None,
+    timeout_hours: Optional[int] = None,
+) -> Optional[str]:
+    """Unified entry point for starting a standalone `restic check` run.
+
+    Decoupled from backup pipeline to run manually or separately. Shares locks and
+    active_jobs to serialize operations on the repository.
+    """
+    factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        engine, expire_on_commit=False
+    )
+
+    async with factory() as s:
+        job: BackupJob | None = await s.get(BackupJob, str(job_id))
+    if not job:
+        logger.warning(f"trigger_check job_id={job_id} not_found")
+        return None
+
+    lock: asyncio.Lock = job_locks.setdefault(job_id, asyncio.Lock())
+    now = datetime.now(timezone.utc)
+
+    async with lock:
+        async with factory() as s:
+            result = await s.execute(
+                select(BackupRun).where(
+                    BackupRun.job_id == str(job_id),
+                    BackupRun.status == RunStatus.running,
+                )
+            )
+            running_row: BackupRun | None = result.scalars().first()
+
+            if running_row is not None or job_id in active_jobs:
+                skipped = BackupRun(
+                    id=str(uuid.uuid4()),
+                    job_id=str(job_id),
+                    kind=RunKind.check,
+                    status=RunStatus.skipped,
+                    reason=RunReason.overlapping_run,
+                    started_at=now,
+                    finished_at=now,
+                    prune_status=PruneStatus.skipped,
+                    check_status=CheckStatus.skipped,
+                    triggered_by=triggered_by,
+                )
+                s.add(skipped)
+                await s.commit()
+                logger.info(
+                    f"trigger_check job_id={job_id} run_id={skipped.id} "
+                    f"triggered_by={triggered_by.value} status=skipped "
+                    f"reason=overlapping_run"
+                )
+                return skipped.id
+
+            running = BackupRun(
+                id=str(uuid.uuid4()),
+                job_id=str(job_id),
+                kind=RunKind.check,
+                status=RunStatus.running,
+                started_at=now,
+                triggered_by=triggered_by,
+            )
+            s.add(running)
+            await s.commit()
+            run_id_str = running.id
+            active_jobs.add(job_id)
+            logger.info(
+                f"trigger_check job_id={job_id} run_id={run_id_str} "
+                f"triggered_by={triggered_by.value} status=dispatched"
+            )
+
+    asyncio.create_task(
+        _check_with_cleanup(
+            job_id,
+            uuid.UUID(run_id_str),
+            check_mode,
+            subset_percent,
+            timeout_hours,
+        )
+    )
+    return run_id_str
+
+
+async def run_check(
+    job_id: uuid.UUID,
+    run_id: uuid.UUID,
+    check_mode: str,
+    subset_percent: Optional[int],
+    timeout_hours: Optional[int],
+) -> None:
+    """Execute `restic check` for a job's repo and finalize the run row."""
+    factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        engine, expire_on_commit=False
+    )
+
+    async with factory() as s:
+        job: BackupJob | None = await s.get(BackupJob, str(job_id))
+
+    if not job:
+        logger.warning(f"run_check job_id={job_id} not found in database")
+        return
+
+    logger.info(f"job_id={job_id} run_id={run_id} check_started mode={check_mode}")
+
+    try:
+        async with factory() as s:
+            settings_obj: AppSettings | None = await s.get(AppSettings, 1)
+            default_timeout: int = (
+                settings_obj.default_job_timeout_hours if settings_obj else 24
+            )
+            ntfy_server_url = settings_obj.ntfy_server_url if settings_obj else None
+            ntfy_topic = settings_obj.ntfy_topic if settings_obj else None
+            ntfy_token = settings_obj.ntfy_token if settings_obj else None
+            notify_on_verification = (
+                settings_obj.notify_on_verification if settings_obj else False
+            )
+
+        hours = timeout_hours or job.check_timeout_hours or default_timeout
+        check_timeout: int = hours * 3600
+        repo_path: str = f"/destinations/{job.destination_label}/{str(job_id)}"
+
+        if notify_on_verification and ntfy_topic:
+            await _try_notify(
+                ntfy_server_url,
+                ntfy_topic,
+                f"Verification started: {job.name}",
+                f"Running integrity check (mode: {check_mode})...",
+                token=ntfy_token,
+            )
+
+        rc, _, check_err = await restic.restic_check(
+            repo_path,
+            job.restic_password,
+            check_mode,
+            subset_percent,
+            check_timeout,
+            run_id=run_id,
+        )
+
+        now: datetime = datetime.now(timezone.utc)
+        async with factory() as s:
+            final_run: BackupRun | None = await s.get(BackupRun, str(run_id))
+            if final_run:
+                if rc == 0:
+                    final_run.status = RunStatus.success
+                    final_run.check_status = CheckStatus.passed
+                    logger.info(
+                        f"job_id={job_id} run_id={run_id} step=integrity_check "
+                        f"status=passed"
+                    )
+                else:
+                    final_run.status = RunStatus.failed
+                    final_run.check_status = CheckStatus.failed
+                    final_run.check_error_output = check_err
+                    logger.warning(
+                        f"job_id={job_id} run_id={run_id} step=integrity_check "
+                        f"status=failed rc={rc}"
+                    )
+                final_run.finished_at = now
+                now_naive: datetime = now.replace(tzinfo=None)
+                final_run.duration_seconds = int(
+                    (now_naive - final_run.started_at).total_seconds()
+                )
+                final_run.prune_status = PruneStatus.skipped
+                await s.commit()
+
+        if notify_on_verification and ntfy_topic:
+            status_str: str = "passed" if rc == 0 else "failed"
+            await _try_notify(
+                ntfy_server_url,
+                ntfy_topic,
+                f"Verification {status_str}: {job.name}",
+                f"Check status: {status_str}",
+                token=ntfy_token,
+            )
+
+    except Exception as exc:
+        logger.exception(
+            f"job_id={job_id} run_id={run_id} check_runner_crashed error={exc!r}"
+        )
+        try:
+            crash_now: datetime = datetime.now(timezone.utc)
+            async with factory() as s:
+                crash_run: BackupRun | None = await s.get(BackupRun, str(run_id))
+                if crash_run is not None:
+                    crash_status: Any = crash_run.status
+                    if crash_status == RunStatus.running:
+                        tb: str = traceback.format_exc()
+                        crash_run.status = RunStatus.failed
+                        crash_run.check_status = CheckStatus.failed
+                        crash_run.check_error_output = (
+                            f"Check runner crashed: {exc!r}\n\n{tb}"
+                        )
+                        crash_run.finished_at = crash_now
+                        crash_started: datetime = crash_run.started_at
+                        crash_run.duration_seconds = int(
+                            (
+                                crash_now.replace(tzinfo=None) - crash_started
+                            ).total_seconds()
+                        )
+                        crash_run.prune_status = PruneStatus.skipped
+                        await s.commit()
+        except Exception as recovery_exc:
+            logger.error(
+                f"job_id={job_id} run_id={run_id} "
+                f"crash_recovery_failed error={recovery_exc!r}"
+            )
+    finally:
+        await _trim_run_history(factory, str(job_id))
+        logger.info(f"job_id={job_id} run_id={run_id} check_completed")
+
+
 def _extract_failed_items(backup_stdout: str) -> List[str]:
     """Pull per-file error messages out of restic's --json output stream so
     the run record can show *which* files failed, not just that something did.
@@ -477,6 +721,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     "notify_on_verification": settings_obj.notify_on_verification,
                     "default_job_timeout_hours": settings_obj.default_job_timeout_hours,
                     "auto_unlock": settings_obj.auto_unlock,
+                    "metadata_timeout_seconds": settings_obj.metadata_timeout_seconds,
                 }
 
         # Step 2.5: Mount verification
@@ -489,6 +734,41 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
             logger.error(
                 f"job_id={job_id} run_id={current_run_id} step=verify_mount "
                 f"error=mount_check_failed source_label={job.source_label}"
+            )
+            async with factory() as s:
+                failed_run = await s.get(BackupRun, str(current_run_id))
+                if failed_run:
+                    now_utc = datetime.now(timezone.utc)
+                    failed_run.status = RunStatus.failed
+                    failed_run.error_output = error_msg
+                    failed_run.finished_at = now_utc
+                    failed_run.duration_seconds = 0
+                    failed_run.prune_status = PruneStatus.skipped
+                    failed_run.check_status = CheckStatus.skipped
+                    await s.commit()
+
+            # Notify operator if failure notifications are configured
+            ntfy_topic = cast(str | None, settings_dict.get("ntfy_topic"))
+            if settings_dict.get("notify_on_failure") and ntfy_topic:
+                await _try_notify(
+                    cast(str | None, settings_dict.get("ntfy_server_url")),
+                    ntfy_topic,
+                    f"Backup failed: {job.name}",
+                    error_msg[:200],
+                    token=cast(str | None, settings_dict.get("ntfy_token")),
+                )
+            return
+
+        if not check_destination_mount_file_exists(job.destination_label):
+            error_msg = (
+                f"Destination mount check failed: '.billa_gates_check' file was "
+                f"not found at the root of the destination mount "
+                f"'/destinations/{job.destination_label}'."
+            )
+            logger.error(
+                f"job_id={job_id} run_id={current_run_id} step=verify_mount "
+                f"error=destination_mount_check_failed "
+                f"destination_label={job.destination_label}"
             )
             async with factory() as s:
                 failed_run = await s.get(BackupRun, str(current_run_id))
@@ -640,8 +920,9 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
 
         rc: int
         stderr: str
+        metadata_timeout = settings_dict.get("metadata_timeout_seconds", 600)
         rc, _, stderr = await restic.restic_cat_config(
-            repo_path, job_password, run_id=current_run_id
+            repo_path, job_password, metadata_timeout, run_id=current_run_id
         )
         if await _was_canceled():
             return
@@ -657,7 +938,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
             )
             try:
                 await restic.restic_unlock(
-                    repo_path, job_password, run_id=current_run_id
+                    repo_path, job_password, metadata_timeout, run_id=current_run_id
                 )
             except Exception as exc:
                 logger.warning(
@@ -667,7 +948,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
             if await _was_canceled():
                 return
             rc, _, stderr = await restic.restic_cat_config(
-                repo_path, job_password, run_id=current_run_id
+                repo_path, job_password, metadata_timeout, run_id=current_run_id
             )
             if await _was_canceled():
                 return
@@ -693,7 +974,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 f"repo_not_found initializing"
             )
             rc, _, init_stderr = await restic.restic_init(
-                repo_path, job_password, run_id=current_run_id
+                repo_path, job_password, metadata_timeout, run_id=current_run_id
             )
             if await _was_canceled():
                 return
@@ -727,7 +1008,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         if settings_dict.get("auto_unlock", True):
             try:
                 unlock_rc, _, unlock_err = await restic.restic_unlock(
-                    repo_path, job_password, run_id=current_run_id
+                    repo_path, job_password, metadata_timeout, run_id=current_run_id
                 )
                 if unlock_rc == 0:
                     logger.info(
@@ -760,33 +1041,32 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         # an explicit --parent, any change to host or paths (e.g.
         # source_subpath edit) makes restic treat the next backup as a fresh
         # first run (gaps.md C5). Returns None on genuine first run.
-        parent_snapshot_id: Optional[str] = await restic.restic_latest_snapshot_id(
-            repo_path, job_password, job_id=str(job_id), run_id=current_run_id
-        )
-        logger.info(
-            f"job_id={job_id} run_id={current_run_id} step=parent_lookup "
-            f"parent_snapshot_id={parent_snapshot_id}"
-        )
-
-        logger.info(
-            f"job_id={job_id} run_id={current_run_id} step=backup_execution "
-            f"source_path={source_path} timeout_seconds={timeout_seconds}"
-        )
-        backup_kwargs: Dict[str, Any] = {
-            k: getattr(job, k)
-            for k in [
-                "exclude_patterns",
-                "exclude_caches",
-                "exclude_if_present",
-                "one_file_system",
-                "no_scan",
-                "tags",
-                "compression",
-                "pack_size",
-                "read_concurrency",
-            ]
-            if getattr(job, k) is not None
-        }
+        parent_lookup_success = True
+        parent_snapshot_id: Optional[str] = None
+        try:
+            parent_snapshot_id = await restic.restic_latest_snapshot_id(
+                repo_path,
+                job_password,
+                timeout_seconds=metadata_timeout,
+                job_id=str(job_id),
+                run_id=current_run_id,
+            )
+            logger.info(
+                f"job_id={job_id} run_id={current_run_id} step=parent_lookup "
+                f"parent_snapshot_id={parent_snapshot_id}"
+            )
+        except restic.ResticError as exc:
+            logger.error(
+                f"job_id={job_id} run_id={current_run_id} step=parent_lookup "
+                f"status=failed error={exc!r}"
+            )
+            async with factory() as s:
+                fail_run = await s.get(BackupRun, str(current_run_id))
+                if fail_run:
+                    fail_run.status = RunStatus.failed
+                    fail_run.error_output = f"snapshots command failed: {exc}"
+                    await s.commit()
+            parent_lookup_success = False
 
         backup_success: bool = False
         # rc=3 means restic ran but some files couldn't be read; the snapshot
@@ -796,39 +1076,28 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         summary: Optional[Dict[str, Any]] = None
         stdout: str = ""
 
-        try:
-            rc, stdout, stderr, summary = await restic.restic_backup(
-                repo_path,
-                job_password,
-                source_path,
-                timeout_seconds,
-                job_id=str(job_id),
-                parent_snapshot_id=parent_snapshot_id,
-                run_id=current_run_id,
-                **backup_kwargs,
+        if parent_lookup_success:
+            logger.info(
+                f"job_id={job_id} run_id={current_run_id} step=backup_execution "
+                f"source_path={source_path} timeout_seconds={timeout_seconds}"
             )
-            if await _was_canceled():
-                return
-            # Exit code 11 = restic failed to acquire the repo lock. The most
-            # common cause is a stale lock left by a previous abrupt
-            # termination. Clear it and retry exactly once — never loop, or
-            # a genuinely-contended repo would hang the runner forever.
-            if rc == 11:
-                logger.warning(
-                    f"job_id={job_id} run_id={current_run_id} step=backup_execution "
-                    f"rc=11 stale_lock_suspected attempting_unlock_and_retry"
-                )
-                try:
-                    await restic.restic_unlock(
-                        repo_path, job_password, run_id=current_run_id
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        f"job_id={job_id} run_id={current_run_id} step=lock_retry "
-                        f"unlock_exception error={exc!r}"
-                    )
-                if await _was_canceled():
-                    return
+            backup_kwargs: Dict[str, Any] = {
+                k: getattr(job, k)
+                for k in [
+                    "exclude_patterns",
+                    "exclude_caches",
+                    "exclude_if_present",
+                    "one_file_system",
+                    "no_scan",
+                    "tags",
+                    "compression",
+                    "pack_size",
+                    "read_concurrency",
+                ]
+                if getattr(job, k) is not None
+            }
+
+            try:
                 rc, stdout, stderr, summary = await restic.restic_backup(
                     repo_path,
                     job_password,
@@ -841,67 +1110,104 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 )
                 if await _was_canceled():
                     return
-
-            if rc == 0:
-                backup_success = True
-                logger.info(
-                    f"job_id={job_id} run_id={current_run_id} step=backup_execution "
-                    f"status=success"
-                )
-            elif rc == 3:
-                backup_success = True
-                backup_warning = True
-                failed_items = _extract_failed_items(stdout)
-                logger.warning(
-                    f"job_id={job_id} run_id={current_run_id} step=backup_execution "
-                    f"status=warning rc=3 failed_items={len(failed_items)}"
-                )
-                async with factory() as s:
-                    warn_run: BackupRun | None = await s.get(
-                        BackupRun, str(current_run_id)
+                # Exit code 11 = restic failed to acquire the repo lock. The most
+                # common cause is a stale lock left by a previous abrupt
+                # termination. Clear it and retry exactly once — never loop, or
+                # a genuinely-contended repo would hang the runner forever.
+                if rc == 11:
+                    logger.warning(
+                        f"job_id={job_id} run_id={current_run_id} "
+                        f"step=backup_execution rc=11 stale_lock_suspected "
+                        f"attempting_unlock_and_retry"
                     )
-                    if warn_run:
-                        warn_run.error_output = (
-                            "Partial backup: some files could not be read.\n"
-                            + "\n".join(failed_items)
+                    try:
+                        await restic.restic_unlock(
+                            repo_path,
+                            job_password,
+                            metadata_timeout,
+                            run_id=current_run_id,
                         )
-                        await s.commit()
-            else:
-                # Restic's --json stream emits per-file `message_type=error`
-                # lines naming the path that failed; stderr usually only
-                # carries the final fatal. Stitching both into error_output
-                # gives the operator the *which file* context that pure
-                # stderr does not (gaps.md H5). Falls back gracefully when
-                # one or the other is empty.
+                    except Exception as exc:
+                        logger.warning(
+                            f"job_id={job_id} run_id={current_run_id} step=lock_retry "
+                            f"unlock_exception error={exc!r}"
+                        )
+                    if await _was_canceled():
+                        return
+                    rc, stdout, stderr, summary = await restic.restic_backup(
+                        repo_path,
+                        job_password,
+                        source_path,
+                        timeout_seconds,
+                        job_id=str(job_id),
+                        parent_snapshot_id=parent_snapshot_id,
+                        run_id=current_run_id,
+                        **backup_kwargs,
+                    )
+                    if await _was_canceled():
+                        return
+
+                if rc == 0:
+                    backup_success = True
+                    logger.info(
+                        f"job_id={job_id} run_id={current_run_id} "
+                        f"step=backup_execution status=success"
+                    )
+                elif rc == 3:
+                    backup_success = True
+                    backup_warning = True
+                    failed_items = _extract_failed_items(stdout)
+                    logger.warning(
+                        f"job_id={job_id} run_id={current_run_id} "
+                        f"step=backup_execution status=warning rc=3 "
+                        f"failed_items={len(failed_items)}"
+                    )
+                    async with factory() as s:
+                        warn_run: BackupRun | None = await s.get(
+                            BackupRun, str(current_run_id)
+                        )
+                        if warn_run:
+                            warn_run.error_output = (
+                                "Partial backup: some files could not be read.\n"
+                                + "\n".join(failed_items)
+                            )
+                            await s.commit()
+                else:
+                    # Restic's --json stream emits per-file `message_type=error`
+                    # lines naming the path that failed; stderr usually only
+                    # carries the final fatal. Stitching both into error_output
+                    # gives the operator the *which file* context that pure
+                    # stderr does not (gaps.md H5). Falls back gracefully when
+                    # one or the other is empty.
+                    logger.error(
+                        f"job_id={job_id} run_id={current_run_id} "
+                        f"step=backup_execution status=failed rc={rc}"
+                    )
+                    json_errors = _extract_failed_items(stdout)
+                    error_msg = _format_backup_error(rc, json_errors, stderr)
+                    async with factory() as s:
+                        backup_fail_run: BackupRun | None = await s.get(
+                            BackupRun, str(current_run_id)
+                        )
+                        if backup_fail_run:
+                            backup_fail_run.status = RunStatus.failed
+                            backup_fail_run.error_output = error_msg
+                            await s.commit()
+            except asyncio.TimeoutError:
+                hours: int = job_timeout_hours or default_timeout
                 logger.error(
                     f"job_id={job_id} run_id={current_run_id} step=backup_execution "
-                    f"status=failed rc={rc}"
+                    f"error=timeout timeout_hours={hours}"
                 )
-                json_errors = _extract_failed_items(stdout)
-                error_msg = _format_backup_error(rc, json_errors, stderr)
                 async with factory() as s:
-                    backup_fail_run: BackupRun | None = await s.get(
+                    timeout_run: BackupRun | None = await s.get(
                         BackupRun, str(current_run_id)
                     )
-                    if backup_fail_run:
-                        backup_fail_run.status = RunStatus.failed
-                        backup_fail_run.error_output = error_msg
+                    if timeout_run:
+                        timeout_error_msg: str = f"Backup timed out after {hours} hours"
+                        timeout_run.status = RunStatus.failed
+                        timeout_run.error_output = timeout_error_msg
                         await s.commit()
-        except asyncio.TimeoutError:
-            hours: int = job_timeout_hours or default_timeout
-            logger.error(
-                f"job_id={job_id} run_id={current_run_id} step=backup_execution "
-                f"error=timeout timeout_hours={hours}"
-            )
-            async with factory() as s:
-                timeout_run: BackupRun | None = await s.get(
-                    BackupRun, str(current_run_id)
-                )
-                if timeout_run:
-                    timeout_error_msg: str = f"Backup timed out after {hours} hours"
-                    timeout_run.status = RunStatus.failed
-                    timeout_run.error_output = timeout_error_msg
-                    await s.commit()
 
         # Step 6 & 7: Parse output and update stats (only if backup succeeded)
         if backup_success:
@@ -1053,13 +1359,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 final_run.duration_seconds = duration_secs
                 final_check_status: Any = final_run.check_status
                 if not final_check_status:
-                    is_scheduled = (
-                        job.check_enabled
-                        and job.check_mode is not None
-                        and final_run.status == RunStatus.success
-                    )
-                    if not is_scheduled:
-                        final_run.check_status = CheckStatus.skipped
+                    final_run.check_status = CheckStatus.skipped
                 await s.commit()
 
         # Step 11: Completion notification
@@ -1109,77 +1409,9 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     token=cast(str | None, settings_dict.get("ntfy_token")),
                 )
 
-        # Step 12: Integrity check
-        job_check_enabled: bool = job.check_enabled
-        # When check_enabled=True, the JobCreate schema validator guarantees
-        # check_mode is non-None; assertion keeps pyright happy and surfaces a
-        # clear error if the invariant is ever violated.
-        if job_check_enabled and final_run and job.check_mode is not None:
-            final_status_check: Any = final_run.status
-            if final_status_check == RunStatus.success:
-                job_check_mode: str = job.check_mode.value
-                job_check_percent: int | None = job.check_subset_percent
-                logger.info(
-                    f"job_id={job_id} run_id={current_run_id} step=integrity_check "
-                    f"mode={job_check_mode} enabled=true"
-                )
-                if settings_dict.get("notify_on_verification"):
-                    await _try_notify(
-                        cast(str | None, settings_dict.get("ntfy_server_url")),
-                        cast(str | None, settings_dict.get("ntfy_topic")),
-                        f"Verification started: {job.name}",
-                        "Running integrity check...",
-                        token=cast(str | None, settings_dict.get("ntfy_token")),
-                    )
-
-                job_check_timeout: int | None = job.check_timeout_hours
-                check_timeout: int = (job_check_timeout or default_timeout) * 3600
-                rc, _, check_err = await restic.restic_check(
-                    repo_path,
-                    job_password,
-                    job_check_mode,
-                    job_check_percent,
-                    check_timeout,
-                    run_id=current_run_id,
-                )
-                if await _was_canceled():
-                    return
-
-                async with factory() as s:
-                    check_run: BackupRun | None = await s.get(
-                        BackupRun, str(current_run_id)
-                    )
-                    if check_run:
-                        if rc == 0:
-                            check_run.check_status = CheckStatus.passed
-                            logger.info(
-                                f"job_id={job_id} run_id={current_run_id} "
-                                f"step=integrity_check status=passed"
-                            )
-                        else:
-                            check_run.check_status = CheckStatus.failed
-                            check_run.check_error_output = check_err
-                            logger.warning(
-                                f"job_id={job_id} run_id={current_run_id} "
-                                f"step=integrity_check status=failed error=check_failed"
-                            )
-                        await s.commit()
-
-                if settings_dict.get("notify_on_verification"):
-                    status_str: str = "passed" if rc == 0 else "failed"
-                    await _try_notify(
-                        cast(str | None, settings_dict.get("ntfy_server_url")),
-                        cast(str | None, settings_dict.get("ntfy_topic")),
-                        f"Verification {status_str}: {job.name}",
-                        f"Check status: {status_str}",
-                        token=cast(str | None, settings_dict.get("ntfy_token")),
-                    )
-        else:
-            if not job_check_enabled:
-                logger.debug(
-                    f"job_id={job_id} run_id={current_run_id} step=integrity_check "
-                    f"enabled=false skipped"
-                )
+        # Step 12: Integrity check (removed from backup pipeline,
+        # run manually/separately)
+        pass
 
     except Exception as exc:
         # Top-level safety net: if any unhandled exception bubbles out of the

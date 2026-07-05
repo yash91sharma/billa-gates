@@ -203,33 +203,6 @@ const HELP: Record<string, FieldHelp> = {
       'Maximum hours the backup may run before it is killed and marked failed. Default: the global value from Settings (leave blank).',
     example: '12',
   },
-  checkEnabled: {
-    label: 'Enable integrity check',
-    optional: true,
-    description:
-      'Run `restic check` after every successful backup to verify repository integrity. Default: off.',
-  },
-  checkMode: {
-    label: 'Check mode',
-    optional: true,
-    description:
-      'Options: structural | subset | full. `structural`: index-only check (seconds). `subset`: reads a random % of pack files (~25–30 min on 3 TB at 5%). `full`: reads every pack file (~8–11 h on 3 TB). No default — required when integrity check is enabled.',
-    example: 'subset',
-  },
-  checkSubsetPercent: {
-    label: 'Subset percent',
-    optional: true,
-    description:
-      'Percentage of pack files to read when check mode is `subset`. Range 1–100. At 5% the whole repo is covered statistically over 20 runs. No default — required when check mode is subset.',
-    example: '5',
-  },
-  checkTimeoutHours: {
-    label: 'Check timeout (hours)',
-    optional: true,
-    description:
-      'Maximum hours the integrity check may run before it is killed. A failed check is non-fatal — backup status stays success. Default: the global value from Settings (leave blank).',
-    example: '24',
-  },
 }
 
 const inputCls = 'border rounded px-2 py-1 text-sm w-full'
@@ -298,16 +271,6 @@ export default function JobForm({
   )
   const [timeoutHoursText, setTimeoutHoursText] = useState(job?.timeout_hours?.toString() ?? '')
 
-  // Verification fields
-  const [checkEnabled, setCheckEnabled] = useState(job?.check_enabled ?? false)
-  const [checkMode, setCheckMode] = useState(job?.check_mode ?? '')
-  const [checkSubsetPercent, setCheckSubsetPercent] = useState(
-    job?.check_subset_percent?.toString() ?? ''
-  )
-  const [checkTimeoutHours, setCheckTimeoutHours] = useState(
-    job?.check_timeout_hours?.toString() ?? ''
-  )
-
   // Error state
   const [submitError, setSubmitError] = useState<string | null>(null)
 
@@ -321,16 +284,6 @@ export default function JobForm({
 
     if (sourceSubpath && sourceSubpath.includes('/')) {
       setSubmitError('source_subpath must not contain "/"')
-      return
-    }
-    if (checkEnabled && !checkMode) {
-      setSubmitError(
-        'verification mode required: check_mode is required when verification is enabled'
-      )
-      return
-    }
-    if (checkEnabled && checkMode === 'subset' && !checkSubsetPercent) {
-      setSubmitError('subset_percent is required when check_mode is subset')
       return
     }
 
@@ -365,10 +318,6 @@ export default function JobForm({
       pack_size: packSizeText ? parseInt(packSizeText) : null,
       read_concurrency: readConcurrencyText ? parseInt(readConcurrencyText) : null,
       timeout_hours: timeoutHoursText ? parseInt(timeoutHoursText) : null,
-      check_enabled: checkEnabled,
-      check_mode: checkMode || null,
-      check_subset_percent: checkSubsetPercent ? parseInt(checkSubsetPercent) : null,
-      check_timeout_hours: checkTimeoutHours ? parseInt(checkTimeoutHours) : null,
     })
   }
 
@@ -489,6 +438,12 @@ export default function JobForm({
                 <p className="text-muted-foreground text-xs mt-1">
                   No destination mounts configured. Add a volume under{' '}
                   <code>/destinations/&lt;label&gt;</code> in your docker compose.
+                </p>
+              )}
+              {destinationLabel && (
+                <p className="text-muted-foreground text-xs mt-1">
+                  ⚠️ The root directory of destination <code>{destinationLabel}</code> must contain a{' '}
+                  <code>.billa_gates_check</code> file.
                 </p>
               )}
               {isEdit && (
@@ -781,67 +736,7 @@ export default function JobForm({
           </div>
         </section>
 
-        {/* Verification section */}
-        <section>
-          <h2 className="text-base font-semibold mb-3">Verification</h2>
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <input
-                id="check-enabled"
-                type="checkbox"
-                checked={checkEnabled}
-                onChange={(e) => setCheckEnabled(e.target.checked)}
-                aria-describedby={helpId('check-enabled')}
-              />
-              <FieldLabel htmlFor="check-enabled" help={HELP.checkEnabled} variant="inline" />
-            </div>
 
-            <div>
-              <FieldLabel htmlFor="check-mode" help={HELP.checkMode} />
-              <select
-                id="check-mode"
-                value={checkMode}
-                onChange={(e) => setCheckMode(e.target.value)}
-                aria-describedby={helpId('check-mode')}
-                className={inputCls}
-              >
-                <option value="">Select mode...</option>
-                <option value="structural">Structural</option>
-                <option value="subset">Subset</option>
-                <option value="full">Full</option>
-              </select>
-            </div>
-
-            {checkMode === 'subset' && (
-              <div>
-                <FieldLabel htmlFor="check-subset-percent" help={HELP.checkSubsetPercent} />
-                <input
-                  id="check-subset-percent"
-                  type="number"
-                  value={checkSubsetPercent}
-                  onChange={(e) => setCheckSubsetPercent(e.target.value)}
-                  aria-describedby={helpId('check-subset-percent')}
-                  className={inputCls}
-                  min={1}
-                  max={100}
-                />
-              </div>
-            )}
-
-            <div>
-              <FieldLabel htmlFor="check-timeout-hours" help={HELP.checkTimeoutHours} />
-              <input
-                id="check-timeout-hours"
-                type="number"
-                value={checkTimeoutHours}
-                onChange={(e) => setCheckTimeoutHours(e.target.value)}
-                aria-describedby={helpId('check-timeout-hours')}
-                className={inputCls}
-                min={1}
-              />
-            </div>
-          </div>
-        </section>
 
         <button
           type="submit"

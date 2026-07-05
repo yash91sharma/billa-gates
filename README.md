@@ -8,6 +8,11 @@ A self-hosted web UI for scheduled [restic](https://restic.net/) backups — cre
 backup jobs, run them on a schedule, apply retention, verify integrity, and get
 notified.
 
+Note: I have used AI tools (Claude Code, Codex, Antigravity) to build this project, and I
+use this to backup my NAS directories (Photos, documents, log files). If you are using this,
+please first test (backup+restore) to make sure it works for your use case. Please do start
+and issue if you find a bug.
+
 ![Dashboard](frontend/screenshots/pages/Dashboard.png)
 
 ## Features
@@ -48,8 +53,8 @@ Then open <http://localhost:12345>.
 
 ## Quirks
 
-- **Mount Check Safeguard (`.billa_gates_check`)**:
-  To protect against silent data loss when backing up network shares (like SMB/NFS mounts that can drop and appear empty), Billa-Gates requires a sentinel file named `.billa_gates_check` to be present at the root of **every** mounted source folder (e.g. `/sources/documents/.billa_gates_check`). If this file is missing, the backup job will fail immediately rather than backing up an empty folder and pruning your snapshot history.
+- **Mount Check Safeguards (`.billa_gates_check`)**:
+  To protect against silent data loss when backing up network shares (like SMB/NFS mounts that can drop and appear empty) or external USB drives that might disconnect, Billa-Gates requires a sentinel file named `.billa_gates_check` to be present at the root of **every** mounted source folder (e.g. `/sources/documents/.billa_gates_check`) and **every** destination folder (e.g. `/destinations/main/.billa_gates_check`). If either file is missing, the backup or integrity check will fail immediately rather than running on an empty path or unmounted target.
 
 ## License
 

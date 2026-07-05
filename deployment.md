@@ -47,7 +47,7 @@ so any volume you add is immediately selectable without a restart of
 the container. I use Traefik for reverse-proxy, change if needed.
 
 > [!IMPORTANT]
-> **Source Mount Verification**: Every source folder mounted under `/sources/<label>` must contain an empty sentinel file named `.billa_gates_check` at its root (e.g., `/sources/nas/.billa_gates_check`). Billa-Gates checks for this file before every backup run to verify the mount is active. If the file is missing (e.g., the underlying SMB/NFS share disconnected), the backup fails immediately to prevent restic from backing up an empty folder and pruning your historical snapshots.
+> **Source & Destination Mount Verification**: Every source folder mounted under `/sources/<label>` and every destination folder mounted under `/destinations/<label>` must contain an empty sentinel file named `.billa_gates_check` at its root (e.g., `/sources/nas/.billa_gates_check` and `/destinations/main/.billa_gates_check`). Billa-Gates checks for these files before every run to verify the mounts are active. If either file is missing (e.g., the underlying SMB/NFS share or USB-C drive disconnected), the run fails immediately to prevent silent failures, data loss, or repository inconsistencies.
 
 ```yaml
 services:
@@ -57,6 +57,7 @@ services:
     environment:
       - TZ=America/Los_Angeles
       - LOG_LEVEL=INFO
+      - RESTIC_CACHE_DIR=/app/data/restic-cache
     # ⚠ SECURITY: this port binding bypasses Traefik and any auth middleware.
     # Anyone on the LAN can reach the UI unauthenticated. For production
     # behind Traefik, remove the ports.
@@ -85,14 +86,13 @@ networks:
 
 ### Environment variables
 
-| Variable    | Default | Purpose                                                                                |
-| ----------- | ------- | -------------------------------------------------------------------------------------- |
-| `TZ`        | `UTC`   | IANA timezone used for schedule evaluation and timestamp display.                      |
-| `LOG_LEVEL` | `INFO`  | Root log level. Set to `DEBUG` to surface every `@log_call`-decorated function's args. |
+| Variable           | Default                  | Purpose                                                                                |
+| ------------------ | ------------------------ | -------------------------------------------------------------------------------------- |
+| `TZ`               | `UTC`                    | IANA timezone used for schedule evaluation and timestamp display.                      |
+| `LOG_LEVEL`        | `INFO`                   | Root log level. Set to `DEBUG` to surface every `@log_call`-decorated function's args. |
+| `RESTIC_CACHE_DIR` | `/app/data/restic-cache` | Directory where restic local cache resides. Ensure this is on persistent storage.      |
 
-`RESTIC_CACHE_DIR=/app/data/restic-cache` is set inside the image and
-should not be overridden — it must live on the persistent volume so the
-cache survives container restarts.
+If you have custom caching needs (e.g. mounting to a high-speed SSD separate from configuration), you can override this by setting the `RESTIC_CACHE_DIR` environment variable in your `docker-compose.yml`. Make sure the path remains persistent across container restarts.
 
 Restic repository passwords are **not** environment variables — each
 backup job stores its own password in the SQLite DB (without any encryption), configured via the

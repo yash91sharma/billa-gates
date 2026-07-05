@@ -112,21 +112,6 @@ async def test_create_job_cron_valid_expression(client):
     assert resp.status_code == 201
 
 
-async def test_create_job_check_enabled_without_mode(client):
-    payload = make_job_payload(check_enabled=True, check_mode=None)
-    resp = await client.post("/api/jobs", json=payload)
-    assert resp.status_code == 422
-    assert "check_mode" in resp.json()["detail"].lower()
-
-
-async def test_create_job_check_subset_without_percent(client):
-    payload = make_job_payload(
-        check_enabled=True, check_mode="subset", check_subset_percent=None
-    )
-    resp = await client.post("/api/jobs", json=payload)
-    assert resp.status_code == 422
-
-
 async def test_create_job_source_not_mounted(client):
     payload = make_job_payload()
     with patch("os.path.isdir", return_value=False):
@@ -580,6 +565,75 @@ async def test_trigger_prune_overlapping_returns_skipped(client):
 async def test_trigger_prune_not_found(client):
     """Prune on a non-existent job returns 404."""
     resp = await client.post(f"/api/jobs/{uuid.uuid4()}/prune")
+    assert resp.status_code == 404
+
+
+# ── POST /api/jobs/{id}/check ─────────────────────────────────────────────────
+
+
+async def test_trigger_check_returns_run_id(client):
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+    with patch("app.services.backup_runner.run_check"):
+        resp = await client.post(
+            f"/api/jobs/{created['id']}/check", json={"check_mode": "structural"}
+        )
+    assert resp.status_code == 200
+    assert "run_id" in resp.json()
+
+
+async def test_trigger_check_creates_check_kind_row(client, engine):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import BackupRun, RunKind, RunStatus
+
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+    with patch("app.services.backup_runner.run_check"):
+        resp = await client.post(
+            f"/api/jobs/{created['id']}/check", json={"check_mode": "structural"}
+        )
+
+    run_id = resp.json()["run_id"]
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        run = await s.get(BackupRun, run_id)
+    assert run is not None
+    assert run.kind == RunKind.check
+    assert run.status == RunStatus.running
+
+
+async def test_trigger_check_overlapping_returns_skipped(client):
+    from app.db.models import RunKind, RunReason, RunStatus
+    from app.services import backup_runner
+
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    job_uuid = uuid.UUID(created["id"])
+    backup_runner.active_jobs.add(job_uuid)
+    try:
+        with patch("app.services.backup_runner.run_check"):
+            resp = await client.post(
+                f"/api/jobs/{created['id']}/check", json={"check_mode": "structural"}
+            )
+        assert resp.status_code == 200
+        run_id = resp.json()["run_id"]
+    finally:
+        backup_runner.active_jobs.discard(job_uuid)
+
+    runs_resp = await client.get(f"/api/runs/{run_id}")
+    assert runs_resp.status_code == 200
+    body = runs_resp.json()
+    assert body["status"] == RunStatus.skipped.value
+    assert body["reason"] == RunReason.overlapping_run.value
+    assert body["kind"] == RunKind.check.value
+
+
+async def test_trigger_check_not_found(client):
+    resp = await client.post(
+        f"/api/jobs/{uuid.uuid4()}/check", json={"check_mode": "structural"}
+    )
     assert resp.status_code == 404
 
 

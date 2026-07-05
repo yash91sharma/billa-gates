@@ -103,7 +103,9 @@ async def list_snapshots(
         **os.environ,
         "RESTIC_REPOSITORY": repo_path,
         "RESTIC_PASSWORD": password,
-        "RESTIC_CACHE_DIR": "/app/data/restic-cache",
+        "RESTIC_CACHE_DIR": os.environ.get(
+            "RESTIC_CACHE_DIR", "/app/data/restic-cache"
+        ),
     }
 
     try:

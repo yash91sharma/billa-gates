@@ -289,6 +289,64 @@ async def test_update_settings_timeout_max_valid(client):
     assert resp.status_code == 200
 
 
+async def test_get_settings_metadata_timeout_default(client):
+    resp = await client.get("/api/settings")
+    assert resp.status_code == 200
+    assert resp.json()["metadata_timeout_seconds"] == 600
+
+
+async def test_update_settings_metadata_timeout_valid(client):
+    resp = await client.put(
+        "/api/settings",
+        json={
+            "ntfy_server_url": "https://ntfy.sh",
+            "ntfy_topic": "",
+            "notify_on_start": True,
+            "notify_on_success": True,
+            "notify_on_failure": True,
+            "notify_on_verification": True,
+            "default_job_timeout_hours": 24,
+            "metadata_timeout_seconds": 300,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["metadata_timeout_seconds"] == 300
+
+
+async def test_update_settings_metadata_timeout_invalid_too_small(client):
+    resp = await client.put(
+        "/api/settings",
+        json={
+            "ntfy_server_url": "https://ntfy.sh",
+            "ntfy_topic": "",
+            "notify_on_start": True,
+            "notify_on_success": True,
+            "notify_on_failure": True,
+            "notify_on_verification": True,
+            "default_job_timeout_hours": 24,
+            "metadata_timeout_seconds": 9,
+        },
+    )
+    assert resp.status_code == 422
+
+
+async def test_update_settings_metadata_timeout_invalid_too_large(client):
+    resp = await client.put(
+        "/api/settings",
+        json={
+            "ntfy_server_url": "https://ntfy.sh",
+            "ntfy_topic": "",
+            "notify_on_start": True,
+            "notify_on_success": True,
+            "notify_on_failure": True,
+            "notify_on_verification": True,
+            "default_job_timeout_hours": 24,
+            "metadata_timeout_seconds": 86401,
+        },
+    )
+    assert resp.status_code == 422
+
+
 # ── POST /api/settings/test-ntfy ─────────────────────────────────────────────
 
 

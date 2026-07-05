@@ -258,33 +258,12 @@ async def test_full_backup_lifecycle_failure(client: AsyncClient) -> None:
 
 
 async def test_full_backup_lifecycle_with_verification(client: AsyncClient) -> None:
-    """End-to-end with check_enabled=True: backup succeeds, then restic check runs.
-
-    Per design doc §8 step 12, integrity check only runs when check_enabled=True
-    AND status=success. Verifies the check step is exercised and check_status
-    reflects the result.
+    """End-to-end manually triggered check: check triggered via POST /check, runs,
+    sets kind=check, and check_status=passed.
     """
-    payload = make_job_payload(check_enabled=True, check_mode="structural")
+    payload = make_job_payload()
     with (
         patch("os.path.isdir", return_value=True),
-        patch(
-            "app.services.restic.restic_cat_config",
-            new=AsyncMock(return_value=(0, "{}", "")),
-        ),
-        patch(
-            "app.services.restic.restic_backup",
-            new=AsyncMock(
-                return_value=(0, json.dumps(_BACKUP_SUMMARY), "", _BACKUP_SUMMARY)
-            ),
-        ),
-        patch(
-            "app.services.snapshot_listing.list_snapshots",
-            new=AsyncMock(return_value=_SNAPSHOT_FROM_RESTIC),
-        ),
-        patch(
-            "app.services.restic.restic_forget",
-            new=AsyncMock(return_value=(0, "ok", "")),
-        ),
         patch(
             "app.services.restic.restic_check",
             new=AsyncMock(return_value=(0, "no errors found", "")),
@@ -298,12 +277,16 @@ async def test_full_backup_lifecycle_with_verification(client: AsyncClient) -> N
         assert create_resp.status_code == 201, create_resp.text
         job_id: str = create_resp.json()["id"]
 
-        run_resp = await client.post(f"/api/jobs/{job_id}/run")
+        run_resp = await client.post(
+            f"/api/jobs/{job_id}/check", json={"check_mode": "structural"}
+        )
+        assert run_resp.status_code == 200, run_resp.text
         run_id: str = run_resp.json()["run_id"]
 
         detail = await _wait_for_terminal_status(client, run_id)
 
         assert detail["status"] == "success"
+        assert detail["kind"] == "check"
         assert detail["check_status"] == "passed"
         assert detail["check_error_output"] is None
 

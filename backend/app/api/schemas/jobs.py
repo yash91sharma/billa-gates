@@ -137,21 +137,6 @@ class JobCreate(BaseModel):
         _validate_schedule_value(self.schedule_type, self.schedule_value)
         return self
 
-    @model_validator(mode="after")
-    def validate_check_settings(self) -> "JobCreate":
-        """Validate check settings cross-dependencies."""
-        if self.check_enabled:
-            if not self.check_mode:
-                raise ValueError("check_mode is required when check_enabled is True")
-            if (
-                self.check_mode == CheckMode.subset
-                and self.check_subset_percent is None
-            ):
-                raise ValueError(
-                    "check_subset_percent is required when check_mode is 'subset'"
-                )
-        return self
-
 
 class JobUpdate(JobCreate):
     """All JobCreate fields, but restic_password is optional.
@@ -266,3 +251,19 @@ class JobResponse(BaseModel):
     has_successful_run: bool = False
     next_run_time: Optional[UTCDateTime] = None
     last_run: Optional[RunSummarySchema] = None
+
+
+class JobCheckRequest(BaseModel):
+    """Payload to trigger a manual integrity check."""
+
+    check_mode: CheckMode = CheckMode.structural
+    check_subset_percent: Optional[int] = Field(None, ge=1, le=100)
+    timeout_hours: Optional[int] = Field(None, ge=1, le=168)
+
+    @model_validator(mode="after")
+    def validate_subset_percent(self) -> "JobCheckRequest":
+        if self.check_mode == CheckMode.subset and self.check_subset_percent is None:
+            raise ValueError(
+                "check_subset_percent is required when check_mode is 'subset'"
+            )
+        return self

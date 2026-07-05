@@ -69,6 +69,7 @@ class RunKind(str, Enum):
 
     backup = "backup"
     prune = "prune"
+    check = "check"
 
 
 class PruneStatus(str, Enum):
@@ -257,3 +258,6 @@ class AppSettings(Base):
     # future backups for the job. Defaults True because this is a single-tenant
     # deployment — no other writer can hold a legitimate lock.
     auto_unlock: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    metadata_timeout_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=600
+    )

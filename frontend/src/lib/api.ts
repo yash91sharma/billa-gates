@@ -37,6 +37,18 @@ export const triggerRun = (id: string) =>
   request<{ run_id: string }>(`/jobs/${id}/run`, { method: 'POST' })
 export const triggerPrune = (id: string) =>
   request<{ run_id: string }>(`/jobs/${id}/prune`, { method: 'POST' })
+export const triggerCheck = (
+  id: string,
+  data: {
+    check_mode: string
+    check_subset_percent?: number | null
+    timeout_hours?: number | null
+  }
+) =>
+  request<{ run_id: string }>(`/jobs/${id}/check`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
 export const enableJob = (id: string) =>
   request<{ id: string; enabled: boolean }>(`/jobs/${id}/enable`, { method: 'POST' })
 export const disableJob = (id: string) =>

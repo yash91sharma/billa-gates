@@ -56,6 +56,7 @@ def _settings_response(settings: AppSettings) -> dict[str, object]:
         "default_job_timeout_hours": settings.default_job_timeout_hours,
         "keep_last_runs": settings.keep_last_runs,
         "auto_unlock": settings.auto_unlock,
+        "metadata_timeout_seconds": settings.metadata_timeout_seconds,
         "restic_version": settings.restic_version,
     }
 
@@ -97,6 +98,7 @@ async def update_settings(
     settings.default_job_timeout_hours = body.default_job_timeout_hours
     settings.keep_last_runs = body.keep_last_runs
     settings.auto_unlock = body.auto_unlock
+    settings.metadata_timeout_seconds = body.metadata_timeout_seconds
 
     await session.commit()
     logger.info(

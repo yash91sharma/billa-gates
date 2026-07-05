@@ -7,6 +7,13 @@ import TriggeredByIcon from '../components/TriggeredByIcon'
 import * as api from '../lib/api'
 import type { BackupRun } from '../lib/types'
 import { formatBytes } from '../lib/utils'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '../components/ui/dialog'
 
 type Tab = 'runs' | 'snapshots' | 'settings'
 
@@ -25,6 +32,11 @@ export default function JobDetail() {
   const [unlockError, setUnlockError] = useState<string | null>(null)
   const [isEditing, setIsEditing] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
+  const [isCheckModalOpen, setIsCheckModalOpen] = useState(false)
+  const [checkMode, setCheckMode] = useState<'structural' | 'subset' | 'full'>('structural')
+  const [checkSubsetPercent, setCheckSubsetPercent] = useState('5')
+  const [checkTimeoutHours, setCheckTimeoutHours] = useState('')
+  const [checkError, setCheckError] = useState<string | null>(null)
 
   const { data: job, error: jobError } = useQuery({
     queryKey: ['job', id],
@@ -134,6 +146,29 @@ export default function JobDetail() {
     }
   }
 
+  async function handleCheckSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!job) return
+    setCheckError(null)
+    try {
+      const result = await api.triggerCheck(job.id, {
+        check_mode: checkMode,
+        check_subset_percent: checkMode === 'subset' ? parseInt(checkSubsetPercent) : null,
+        timeout_hours: checkTimeoutHours ? parseInt(checkTimeoutHours) : null,
+      })
+      setIsCheckModalOpen(false)
+      navigate(`/runs/${result.run_id}`)
+    } catch (err: unknown) {
+      const status = (err as { status?: number }).status
+      if (status === 409) {
+        setCheckError('A run is already in progress for this job.')
+      } else {
+        const detail = (err as { data?: { detail?: string } }).data?.detail
+        setCheckError(detail || 'Failed to trigger integrity check.')
+      }
+    }
+  }
+
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center gap-3 flex-wrap">
@@ -167,6 +202,16 @@ export default function JobDetail() {
           title="Reclaim space by running restic prune. This is heavy — run when you have time."
         >
           Prune Old Files
+        </button>
+        <button
+          onClick={() => {
+            setCheckError(null)
+            setIsCheckModalOpen(true)
+          }}
+          className="border px-3 py-1 rounded text-sm"
+          title="Verify repository integrity with restic check."
+        >
+          Integrity Check
         </button>
         <button
           onClick={() => {
@@ -358,6 +403,90 @@ restic snapshots
 restic restore latest --target ./restored`}
         </pre>
       </div>
+
+      <Dialog open={isCheckModalOpen} onOpenChange={setIsCheckModalOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Trigger Integrity Check</DialogTitle>
+            <DialogDescription>
+              Verify the structural consistency and completeness of your backup repository.
+            </DialogDescription>
+          </DialogHeader>
+
+          {checkError && (
+            <div className="bg-destructive/10 border border-destructive/30 rounded-sm p-3 text-sm text-destructive">
+              {checkError}
+            </div>
+          )}
+
+          <form onSubmit={handleCheckSubmit} className="space-y-4">
+            <div className="space-y-1">
+              <label htmlFor="modal-check-mode" className="text-xs font-semibold text-muted-foreground block">
+                Check Mode
+              </label>
+              <select
+                id="modal-check-mode"
+                value={checkMode}
+                onChange={(e) => setCheckMode(e.target.value as any)}
+                className="border rounded px-2 py-1 text-sm w-full bg-background"
+              >
+                <option value="structural">Structural</option>
+                <option value="subset">Subset</option>
+                <option value="full">Full</option>
+              </select>
+            </div>
+
+            {checkMode === 'subset' && (
+              <div className="space-y-1">
+                <label htmlFor="modal-check-subset-percent" className="text-xs font-semibold text-muted-foreground block">
+                  Subset Percent
+                </label>
+                <input
+                  id="modal-check-subset-percent"
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={checkSubsetPercent}
+                  onChange={(e) => setCheckSubsetPercent(e.target.value)}
+                  className="border rounded px-2 py-1 text-sm w-full bg-background"
+                  required
+                />
+              </div>
+            )}
+
+            <div className="space-y-1">
+              <label htmlFor="modal-check-timeout-hours" className="text-xs font-semibold text-muted-foreground block">
+                Check Timeout (hours)
+              </label>
+              <input
+                id="modal-check-timeout-hours"
+                type="number"
+                min={1}
+                value={checkTimeoutHours}
+                onChange={(e) => setCheckTimeoutHours(e.target.value)}
+                placeholder="24"
+                className="border rounded px-2 py-1 text-sm w-full bg-background"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t mt-4">
+              <button
+                type="button"
+                onClick={() => setIsCheckModalOpen(false)}
+                className="px-4 py-2 border rounded text-sm hover:bg-muted font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 bg-primary text-primary-foreground hover:bg-primary/90 rounded text-sm font-medium"
+              >
+                Run Check
+              </button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

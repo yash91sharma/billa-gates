@@ -13,6 +13,12 @@ from app.services.process_registry import _terminate_then_kill
 logger = get_logger(__name__)
 
 
+class ResticError(Exception):
+    """Raised when a restic operation fails or times out."""
+
+    pass
+
+
 @contextlib.contextmanager
 def _tracked(
     run_id: Optional[_uuid.UUID], proc: asyncio.subprocess.Process
@@ -31,6 +37,20 @@ def _tracked(
         yield
     finally:
         process_registry.unregister(run_id)
+
+
+def _get_restic_env(repo_path: str, password: str) -> Dict[str, str]:
+    """Build the process environment dictionary with configured repository path,
+    password, and cache directory. Respects RESTIC_CACHE_DIR from host environment.
+    """
+    return {
+        **os.environ,
+        "RESTIC_REPOSITORY": repo_path,
+        "RESTIC_PASSWORD": password,
+        "RESTIC_CACHE_DIR": os.environ.get(
+            "RESTIC_CACHE_DIR", "/app/data/restic-cache"
+        ),
+    }
 
 
 @log_call
@@ -72,12 +92,7 @@ async def restic_cat_config(
     holding the run row at status=running and locking the job out of every
     future trigger via trigger_run's overlap check.
     """
-    env: Dict[str, str] = {
-        **os.environ,
-        "RESTIC_REPOSITORY": repo_path,
-        "RESTIC_PASSWORD": password,
-        "RESTIC_CACHE_DIR": "/app/data/restic-cache",
-    }
+    env = _get_restic_env(repo_path, password)
     try:
         proc = await asyncio.create_subprocess_exec(
             "restic",
@@ -117,12 +132,7 @@ async def restic_init(
     the runner is wedged indefinitely. A 60s timeout is more than enough for
     a healthy backend (init is metadata-only).
     """
-    env: Dict[str, str] = {
-        **os.environ,
-        "RESTIC_REPOSITORY": repo_path,
-        "RESTIC_PASSWORD": password,
-        "RESTIC_CACHE_DIR": "/app/data/restic-cache",
-    }
+    env = _get_restic_env(repo_path, password)
     try:
         proc = await asyncio.create_subprocess_exec(
             "restic",
@@ -161,12 +171,7 @@ async def restic_latest_snapshot_id(
     (gaps.md C5). Read-only — uses --no-lock so it never blocks on a write
     lock held by a concurrent backup or by a stale lock file.
     """
-    env: Dict[str, str] = {
-        **os.environ,
-        "RESTIC_REPOSITORY": repo_path,
-        "RESTIC_PASSWORD": password,
-        "RESTIC_CACHE_DIR": "/app/data/restic-cache",
-    }
+    env = _get_restic_env(repo_path, password)
     try:
         proc = await asyncio.create_subprocess_exec(
             "restic",
@@ -183,25 +188,38 @@ async def restic_latest_snapshot_id(
         )
         with _tracked(run_id, proc):
             try:
-                stdout, _ = await asyncio.wait_for(
+                stdout, stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=timeout_seconds
                 )
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
                 await _terminate_then_kill(proc)
-                return None
-    except Exception:
-        return None
+                raise ResticError(
+                    f"snapshots command timed out after {timeout_seconds} seconds"
+                ) from exc
+    except ResticError:
+        raise
+    except Exception as e:
+        raise ResticError(f"failed to launch restic snapshots: {e}") from e
 
     if proc.returncode != 0:
-        return None
+        raise ResticError(
+            f"snapshots command failed with exit code {proc.returncode}: "
+            f"{stderr.decode()}"
+        )
     try:
         snapshots = json.loads(stdout.decode())
-    except json.JSONDecodeError:
-        return None
+    except json.JSONDecodeError as exc:
+        raise ResticError(f"snapshots command returned malformed JSON: {exc}") from exc
+    if not isinstance(snapshots, list):
+        raise ResticError(
+            f"snapshots command returned non-list JSON: {type(snapshots).__name__}"
+        )
     if not snapshots:
         return None
     snap_id = snapshots[0].get("id")
-    return snap_id if isinstance(snap_id, str) else None
+    if not isinstance(snap_id, str):
+        raise ResticError("snapshots command returned snapshot without a string ID")
+    return snap_id
 
 
 @log_call
@@ -217,12 +235,7 @@ async def restic_backup(
     **kwargs: Any,
 ) -> Tuple[int, str, str, Optional[Dict[str, Any]]]:
     """Run a backup."""
-    env: Dict[str, str] = {
-        **os.environ,
-        "RESTIC_REPOSITORY": repo_path,
-        "RESTIC_PASSWORD": password,
-        "RESTIC_CACHE_DIR": "/app/data/restic-cache",
-    }
+    env = _get_restic_env(repo_path, password)
 
     # --host is pinned to a fixed string so retention isn't silently split
     # per container ID (each rebuild gets a new hostname, and `restic forget`
@@ -345,12 +358,7 @@ async def restic_forget(
     here. Run :func:`restic_prune` separately (manual trigger or its own
     schedule) so a backup window stays predictable (gaps.md H1).
     """
-    env: Dict[str, str] = {
-        **os.environ,
-        "RESTIC_REPOSITORY": repo_path,
-        "RESTIC_PASSWORD": password,
-        "RESTIC_CACHE_DIR": "/app/data/restic-cache",
-    }
+    env = _get_restic_env(repo_path, password)
 
     # Scope retention by --tag job:<job_id> with --group-by '' (single group)
     # so retention applies across any historical path or host change. The
@@ -416,12 +424,7 @@ async def restic_prune(
     run_id: Optional[_uuid.UUID] = None,
 ) -> Tuple[int, str, str]:
     """Standalone prune (no retention flags). Returns (returncode, stdout, stderr)."""
-    env: Dict[str, str] = {
-        **os.environ,
-        "RESTIC_REPOSITORY": repo_path,
-        "RESTIC_PASSWORD": password,
-        "RESTIC_CACHE_DIR": "/app/data/restic-cache",
-    }
+    env = _get_restic_env(repo_path, password)
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -457,12 +460,7 @@ async def restic_check(
     run_id: Optional[_uuid.UUID] = None,
 ) -> Tuple[int, str, str]:
     """Verify repo integrity."""
-    env: Dict[str, str] = {
-        **os.environ,
-        "RESTIC_REPOSITORY": repo_path,
-        "RESTIC_PASSWORD": password,
-        "RESTIC_CACHE_DIR": "/app/data/restic-cache",
-    }
+    env = _get_restic_env(repo_path, password)
 
     args: List[str] = ["restic", "check"]
 
@@ -509,12 +507,7 @@ async def restic_unlock(
     60s is far more than needed for a metadata-only delete on a healthy
     backend.
     """
-    env: Dict[str, str] = {
-        **os.environ,
-        "RESTIC_REPOSITORY": repo_path,
-        "RESTIC_PASSWORD": password,
-        "RESTIC_CACHE_DIR": "/app/data/restic-cache",
-    }
+    env = _get_restic_env(repo_path, password)
     try:
         proc = await asyncio.create_subprocess_exec(
             "restic",

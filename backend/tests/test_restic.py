@@ -128,6 +128,26 @@ async def test_cat_config_passes_env_vars():
     assert env.get("RESTIC_PASSWORD") == PASSWORD
 
 
+async def test_cat_config_respects_custom_cache_dir():
+    import os
+
+    proc = _make_process(0, stdout='{"version":2}')
+    captured_kwargs = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return proc
+
+    with (
+        patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        patch.dict(os.environ, {"RESTIC_CACHE_DIR": "/my/custom/cache"}),
+    ):
+        await restic_cat_config(REPO, PASSWORD)
+
+    env = captured_kwargs.get("env", {})
+    assert env.get("RESTIC_CACHE_DIR") == "/my/custom/cache"
+
+
 async def test_cat_config_times_out_returns_minus_one_and_terminates_process():
     """A hung backend (NFS unresponsive, SMB offline, cloud mount stalled)
     must not wedge the backup runner. `restic cat config` runs on every
@@ -516,24 +536,28 @@ async def test_latest_snapshot_id_returns_none_on_empty_list():
     assert result is None
 
 
-async def test_latest_snapshot_id_returns_none_on_nonzero_rc():
-    from app.services.restic import restic_latest_snapshot_id
+async def test_latest_snapshot_id_raises_on_nonzero_rc():
+    import pytest
+
+    from app.services.restic import ResticError, restic_latest_snapshot_id
 
     proc = _make_process(1, stderr="Fatal: unable to open repo")
     with patch("asyncio.create_subprocess_exec", return_value=proc):
-        result = await restic_latest_snapshot_id(REPO, PASSWORD, job_id=TEST_JOB_ID)
-    assert result is None
+        with pytest.raises(ResticError) as exc_info:
+            await restic_latest_snapshot_id(REPO, PASSWORD, job_id=TEST_JOB_ID)
+    assert "snapshots command failed with exit code 1" in str(exc_info.value)
 
 
-async def test_latest_snapshot_id_returns_none_on_malformed_json():
-    """If restic exits 0 but emits non-JSON for any reason, the caller must
-    fall back to omitting --parent rather than crash mid-backup."""
-    from app.services.restic import restic_latest_snapshot_id
+async def test_latest_snapshot_id_raises_on_malformed_json():
+    import pytest
+
+    from app.services.restic import ResticError, restic_latest_snapshot_id
 
     proc = _make_process(0, stdout="not-json-at-all")
     with patch("asyncio.create_subprocess_exec", return_value=proc):
-        result = await restic_latest_snapshot_id(REPO, PASSWORD, job_id=TEST_JOB_ID)
-    assert result is None
+        with pytest.raises(ResticError) as exc_info:
+            await restic_latest_snapshot_id(REPO, PASSWORD, job_id=TEST_JOB_ID)
+    assert "malformed JSON" in str(exc_info.value)
 
 
 async def test_latest_snapshot_id_uses_tag_and_latest_flags():

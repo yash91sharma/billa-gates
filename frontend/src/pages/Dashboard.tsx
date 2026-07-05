@@ -9,6 +9,7 @@ const KIND_BADGE_BASE = 'rounded-sm px-2 py-0.5 text-xs font-medium capitalize'
 const KIND_CLASS: Record<RunKind, string> = {
   backup: `bg-sky-100 text-sky-800 ${KIND_BADGE_BASE}`,
   prune: `bg-amber-100 text-amber-800 ${KIND_BADGE_BASE}`,
+  check: `bg-purple-100 text-purple-800 ${KIND_BADGE_BASE}`,
 }
 
 function shouldPoll(runs: BackupRun[]): boolean {

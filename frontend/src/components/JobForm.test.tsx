@@ -282,32 +282,7 @@ describe('JobForm', () => {
     })
   })
 
-  describe('check_enabled validation', () => {
-    it('requires check_mode when check_enabled is toggled on', async () => {
-      const onSubmit = vi.fn()
-      const user = userEvent.setup()
-      render(<JobForm onSubmit={onSubmit} />)
-      await user.click(screen.getByLabelText(/enable.*check|check_enabled/i))
-      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      expect(
-        screen.getByText(/check_mode.*required|verification mode required/i)
-      ).toBeInTheDocument()
-      expect(onSubmit).not.toHaveBeenCalled()
-    })
 
-    it('requires check_subset_percent when check_mode is subset', async () => {
-      const onSubmit = vi.fn()
-      const user = userEvent.setup()
-      render(<JobForm onSubmit={onSubmit} />)
-      await user.click(screen.getByLabelText(/enable.*check/i))
-      await user.selectOptions(screen.getByLabelText(/check mode/i), 'subset')
-      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      // Match the exact validation error string emitted by the form, since the
-      // word "required" also appears in the tooltip text for this field.
-      expect(screen.getByText(/subset_percent is required/i)).toBeInTheDocument()
-      expect(onSubmit).not.toHaveBeenCalled()
-    })
-  })
 
   describe('backup options', () => {
     it('exposes exclude_patterns as a textarea (one pattern per line)', async () => {
@@ -453,10 +428,6 @@ describe('JobForm', () => {
       expect(screen.getByText(/backup options/i)).toBeInTheDocument()
     })
 
-    it('shows Verification section', () => {
-      render(<JobForm onSubmit={vi.fn()} />)
-      expect(screen.getByText(/verification/i)).toBeInTheDocument()
-    })
   })
 
   // The user explicitly asked for tooltips on every field with description +
@@ -470,9 +441,6 @@ describe('JobForm', () => {
       const user = userEvent.setup()
       const utils = render(<JobForm onSubmit={vi.fn()} />)
       await user.click(screen.getByText(/retention policy/i))
-      await user.click(screen.getByLabelText(/integrity check/i))
-      // Select subset mode so the subset_percent field is rendered.
-      await user.selectOptions(screen.getByLabelText(/^check mode$/i), 'subset')
       return { user, ...utils }
     }
 
@@ -514,10 +482,6 @@ describe('JobForm', () => {
       { label: /^pack size/i, optional: true, describes: /pack|MiB|128/i },
       { label: /^read concurrency$/i, optional: true, describes: /parallel|concurren/i },
       { label: /^timeout \(hours\)$/i, optional: true, describes: /timeout|kill|hours/i },
-      { label: /enable.*integrity check/i, optional: true, describes: /integrity|check|verify/i },
-      { label: /^check mode$/i, optional: true, describes: /structural|subset|full/i },
-      { label: /^subset percent$/i, optional: true, describes: /percent|1.*100|pack/i },
-      { label: /^check timeout/i, optional: true, describes: /timeout|non-fatal|check/i },
     ]
 
     // Drive the matrix with it.each so failures point at the specific field.
@@ -563,8 +527,6 @@ describe('JobForm', () => {
       { label: /^pack size/i, defaultMatcher: /default:\s*128/i },
       { label: /^read concurrency$/i, defaultMatcher: /default:.*restic/i },
       { label: /^timeout \(hours\)$/i, defaultMatcher: /default:.*global|default:.*settings/i },
-      { label: /enable.*integrity check/i, defaultMatcher: /default:\s*off/i },
-      { label: /^check timeout/i, defaultMatcher: /default:.*global|default:.*settings/i },
     ]
 
     it.each(fieldsWithDefaults)(
@@ -581,10 +543,6 @@ describe('JobForm', () => {
       {
         label: /^compression$/i,
         optionsMatcher: /options:.*auto.*max.*off|options:.*auto.*off.*max/i,
-      },
-      {
-        label: /^check mode$/i,
-        optionsMatcher: /options:.*structural.*subset.*full/i,
       },
     ]
 

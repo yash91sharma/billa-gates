@@ -131,6 +131,7 @@ const settings: AppSettings = {
   notify_on_verification: false,
   restic_version: '0.17.3',
   default_job_timeout_hours: 24,
+  metadata_timeout_seconds: 600,
 }
 
 const health: HealthStatus = {

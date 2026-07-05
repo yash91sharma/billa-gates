@@ -1,5 +1,5 @@
 export type ScheduleType = 'cron' | 'interval'
-export type RunKind = 'backup' | 'prune'
+export type RunKind = 'backup' | 'prune' | 'check'
 export type RunStatus = 'running' | 'success' | 'warning' | 'failed' | 'skipped' | 'canceled'
 export type RunReason = 'overlapping_run' | 'container_restart' | 'user_canceled'
 export type TriggeredBy = 'scheduler' | 'manual'
@@ -114,6 +114,7 @@ export interface AppSettings {
   default_job_timeout_hours: number
   keep_last_runs: number
   auto_unlock: boolean
+  metadata_timeout_seconds: number
 }
 
 export interface HealthStatus {

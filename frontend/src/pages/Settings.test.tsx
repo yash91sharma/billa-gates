@@ -21,6 +21,7 @@ const makeSettings = (overrides: Partial<AppSettings> = {}): AppSettings => ({
   default_job_timeout_hours: 24,
   keep_last_runs: 100,
   auto_unlock: true,
+  metadata_timeout_seconds: 600,
   ...overrides,
 })
 
