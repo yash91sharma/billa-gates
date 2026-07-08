@@ -1204,3 +1204,29 @@ async def test_create_job_check_disabled_with_subset_mode_without_percent(client
     assert data["check_enabled"] is False
     assert data["check_mode"] == "subset"
     assert data["check_subset_percent"] is None
+
+
+# ── Hung-mount probes (event-loop safety) ─────────────────────────────────────
+
+
+async def test_create_job_hung_mount_probe_returns_422_promptly(client):
+    """os.path.isdir against a hung SMB mount must not freeze the event loop
+    during job creation — the probe times out and the mount is reported as
+    not mounted (422)."""
+    import time as _time
+
+    def hung_isdir(path: str) -> bool:
+        _time.sleep(1.0)  # simulates stat() stuck on a dead mount
+        return True
+
+    start = _time.monotonic()
+    with (
+        patch("os.path.isdir", side_effect=hung_isdir),
+        patch("app.core.fs.FS_PROBE_TIMEOUT_SECONDS", 0.2),
+    ):
+        resp = await client.post("/api/jobs", json=make_job_payload())
+    elapsed = _time.monotonic() - start
+
+    assert resp.status_code == 422
+    assert "not mounted" in resp.json()["detail"].lower()
+    assert elapsed < 0.9, "route must answer at the probe timeout"

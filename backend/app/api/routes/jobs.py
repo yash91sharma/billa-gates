@@ -23,6 +23,7 @@ from app.api.schemas.jobs import (
     RunSummarySchema,
     SnapshotResponse,
 )
+from app.core import fs
 from app.core import scheduler as scheduler_module
 from app.core.logging import get_logger, log_call
 from app.db.models import (
@@ -108,14 +109,23 @@ async def _build_job_response(
 
 
 @log_call
-def _validate_mounts(source_label: str, destination_label: str) -> None:
-    """Raise HTTP 422 if either mount directory does not exist."""
-    if not os.path.isdir(f"{_SOURCES_ROOT}/{source_label}"):
+async def _validate_mounts(source_label: str, destination_label: str) -> None:
+    """Raise HTTP 422 if either mount directory does not exist.
+
+    isdir runs through fs.run_probe: on a hung network mount the stat()
+    would otherwise block the event loop and freeze the whole app. A probe
+    timeout is reported as "not mounted".
+    """
+    if not await fs.run_probe(
+        os.path.isdir, f"{_SOURCES_ROOT}/{source_label}", default=False
+    ):
         raise HTTPException(
             status_code=422,
             detail=f"Source mount '/sources/{source_label}' is not mounted",
         )
-    if not os.path.isdir(f"{_DESTINATIONS_ROOT}/{destination_label}"):
+    if not await fs.run_probe(
+        os.path.isdir, f"{_DESTINATIONS_ROOT}/{destination_label}", default=False
+    ):
         raise HTTPException(
             status_code=422,
             detail=(
@@ -224,7 +234,7 @@ async def create_job(
     the schedule/check configuration is internally consistent (done by the
     JobCreate schema).
     """
-    _validate_mounts(body.source_label, body.destination_label)
+    await _validate_mounts(body.source_label, body.destination_label)
     await _check_duplicate(
         body.source_label, body.source_subpath, body.destination_label, session
     )
@@ -307,7 +317,9 @@ async def update_job(
 
     # Re-validate source mount only when the label actually changes.
     if body.source_label != job.source_label:
-        if not os.path.isdir(f"{_SOURCES_ROOT}/{body.source_label}"):
+        if not await fs.run_probe(
+            os.path.isdir, f"{_SOURCES_ROOT}/{body.source_label}", default=False
+        ):
             raise HTTPException(
                 status_code=422,
                 detail=f"Source mount '/sources/{body.source_label}' is not mounted",

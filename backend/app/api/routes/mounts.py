@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_session
 from app.api.schemas.mounts import RenameDestinationRequest, RenameDestinationResult
+from app.core import fs
 from app.core.logging import get_logger, log_call
 from app.db.models import BackupJob
 from app.services import backup_runner
@@ -47,8 +48,12 @@ def _list_dirs(root: str) -> List[str]:
 @router.get("/sources", response_model=List[str])
 @log_call
 async def list_sources() -> List[str]:
-    """Return directory names found directly under SOURCES_ROOT."""
-    return _list_dirs(SOURCES_ROOT)
+    """Return directory names found directly under SOURCES_ROOT.
+
+    The scandir runs through fs.run_probe so a hung network mount can't
+    freeze the event loop; a probe timeout yields an empty list.
+    """
+    return await fs.run_probe(_list_dirs, SOURCES_ROOT, default=[])
 
 
 # ── GET /api/mounts/sources/{label}/subdirs ───────────────────────────────────
@@ -62,9 +67,9 @@ async def list_source_subdirs(label: str) -> List[str]:
     Returns 404 if the source mount directory does not exist.
     """
     path = os.path.join(SOURCES_ROOT, label)
-    if not os.path.isdir(path):
+    if not await fs.run_probe(os.path.isdir, path, default=False):
         raise HTTPException(status_code=404, detail=f"Source mount '{label}' not found")
-    return _list_dirs(path)
+    return await fs.run_probe(_list_dirs, path, default=[])
 
 
 # ── GET /api/mounts/destinations ─────────────────────────────────────────────
@@ -73,8 +78,12 @@ async def list_source_subdirs(label: str) -> List[str]:
 @router.get("/destinations", response_model=List[str])
 @log_call
 async def list_destinations() -> List[str]:
-    """Return directory names found directly under DESTINATIONS_ROOT."""
-    return _list_dirs(DESTINATIONS_ROOT)
+    """Return directory names found directly under DESTINATIONS_ROOT.
+
+    Probed like list_sources — a hung mount yields an empty list rather
+    than a frozen event loop.
+    """
+    return await fs.run_probe(_list_dirs, DESTINATIONS_ROOT, default=[])
 
 
 # ── POST /api/mounts/destinations/rename ─────────────────────────────────────
@@ -96,7 +105,7 @@ async def rename_destination(
     """
     # Validate that the new label is already mounted.
     new_path = os.path.join(DESTINATIONS_ROOT, body.new_label)
-    if not os.path.isdir(new_path):
+    if not await fs.run_probe(os.path.isdir, new_path, default=False):
         raise HTTPException(
             status_code=422,
             detail=f"New destination '{body.new_label}' is not mounted",

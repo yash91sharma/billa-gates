@@ -266,3 +266,28 @@ async def test_rename_does_not_require_old_label_mounted(client, tmp_path):
             },
         )
     assert resp.status_code == 200
+
+
+# ── Hung-mount probes (event-loop safety) ─────────────────────────────────────
+
+
+async def test_list_sources_hung_scandir_returns_empty_promptly(client):
+    """A scandir against a hung SMB-backed root must not freeze the event
+    loop — the route returns an empty list once the probe timeout expires."""
+    import time as _time
+
+    def hung_list(root: str):
+        _time.sleep(1.0)  # simulates scandir stuck on a dead mount
+        return ["nas"]
+
+    start = _time.monotonic()
+    with (
+        patch("app.api.routes.mounts._list_dirs", side_effect=hung_list),
+        patch("app.core.fs.FS_PROBE_TIMEOUT_SECONDS", 0.2),
+    ):
+        resp = await client.get("/api/mounts/sources")
+    elapsed = _time.monotonic() - start
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+    assert elapsed < 0.9, "route must answer at the probe timeout"

@@ -3078,6 +3078,63 @@ async def test_run_backup_destination_mount_check_fails(engine):
     assert "Destination mount check failed" in mock_notify.call_args[0][3]
 
 
+async def test_run_backup_hung_mount_check_fails_run_promptly(engine):
+    """A mounted-but-hung SMB share makes the sentinel stat() block in the
+    kernel. The probe must run on a worker thread with a deadline so the run
+    fails within the probe timeout instead of freezing the event loop (and
+    with it the API, the scheduler, and every other job). Restic must never
+    be invoked."""
+    import time as _time
+
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    await _setup_job(engine, source_label="documents")
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    def hung_check(label: str) -> bool:
+        _time.sleep(1.0)  # simulates stat() stuck on a dead SMB mount
+        return True
+
+    cat_config_called = False
+
+    async def fake_cat_config(*args, **kwargs):
+        nonlocal cat_config_called
+        cat_config_called = True
+        return (0, "{}", "")
+
+    start = _time.monotonic()
+    with (
+        patch(
+            "app.services.backup_runner.check_mount_file_exists",
+            side_effect=hung_check,
+        ),
+        patch("app.core.fs.FS_PROBE_TIMEOUT_SECONDS", 0.2),
+        patch("app.services.restic.restic_cat_config", side_effect=fake_cat_config),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+    elapsed = _time.monotonic() - start
+
+    assert elapsed < 0.9, "run_backup must give up at the probe timeout"
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert run.error_output is not None
+    assert "Mount check failed" in run.error_output
+    assert cat_config_called is False
+
+
 async def test_run_backup_fails_on_parent_lookup_failure(engine):
     """Verify that if restic_latest_snapshot_id raises a ResticError (such as a timeout
     or network failure), the backup fails cleanly and records the error, preventing

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Set, cast
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core import fs
 from app.core.logging import get_logger, log_call
 from app.db.database import engine
 from app.db.models import (
@@ -749,12 +750,20 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     "metadata_timeout_seconds": settings_obj.metadata_timeout_seconds,
                 }
 
-        # Step 2.5: Mount verification
+        # Step 2.5: Mount verification. The sentinel stat() runs through
+        # fs.run_probe: on a mounted-but-hung SMB share the kernel call can
+        # block for minutes, and doing that on the event loop would freeze
+        # the whole app (API, scheduler, every other job). A probe timeout
+        # is treated as "mount not verified" — exactly the don't-back-up-now
+        # condition the sentinel exists to detect.
         logger.debug(f"job_id={job_id} run_id={current_run_id} step=verify_mount")
-        if not check_mount_file_exists(job.source_label):
+        if not await fs.run_probe(
+            check_mount_file_exists, job.source_label, default=False
+        ):
             error_msg = (
                 f"Mount check failed: '.billa_gates_check' file was not found "
-                f"at the root of the source mount '/sources/{job.source_label}'."
+                f"at the root of the source mount '/sources/{job.source_label}' "
+                f"(or the mount did not respond within the probe timeout)."
             )
             logger.error(
                 f"job_id={job_id} run_id={current_run_id} step=verify_mount "
@@ -784,11 +793,14 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 )
             return
 
-        if not check_destination_mount_file_exists(job.destination_label):
+        if not await fs.run_probe(
+            check_destination_mount_file_exists, job.destination_label, default=False
+        ):
             error_msg = (
                 f"Destination mount check failed: '.billa_gates_check' file was "
                 f"not found at the root of the destination mount "
-                f"'/destinations/{job.destination_label}'."
+                f"'/destinations/{job.destination_label}' "
+                f"(or the mount did not respond within the probe timeout)."
             )
             logger.error(
                 f"job_id={job_id} run_id={current_run_id} step=verify_mount "
