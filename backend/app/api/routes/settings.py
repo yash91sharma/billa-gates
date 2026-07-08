@@ -131,7 +131,10 @@ async def test_ntfy(session: AsyncSession = Depends(get_session)) -> NtfyTestRes
             detail="ntfy_topic is not configured",
         )
 
-    url = f"{settings.ntfy_server_url}/{settings.ntfy_topic}"
+    # ntfy JSON publishing goes to the server ROOT with the topic in the
+    # payload; posting JSON to {server}/{topic} delivers the raw JSON string
+    # as the message body with no title (same contract as send_notification).
+    url = settings.ntfy_server_url.rstrip("/")
     headers: dict[str, str] = {}
     if settings.ntfy_token:
         headers["Authorization"] = f"Bearer {settings.ntfy_token}"
@@ -142,6 +145,7 @@ async def test_ntfy(session: AsyncSession = Depends(get_session)) -> NtfyTestRes
                 url,
                 headers=headers,
                 json={
+                    "topic": settings.ntfy_topic,
                     "title": "Billa-Gates Test",
                     "message": "Test notification from Billa-Gates",
                 },

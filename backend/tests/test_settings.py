@@ -390,6 +390,14 @@ async def test_test_ntfy_success(client, engine):
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
 
+    # ntfy JSON publishing must target the server ROOT with the topic inside
+    # the payload — posting JSON to {server}/{topic} would deliver the raw
+    # JSON string as the message body with no title.
+    post_args = mock_http.post.call_args
+    assert post_args.args[0] == "https://ntfy.sh"
+    assert post_args.kwargs["json"]["topic"] == "test"
+    assert "title" in post_args.kwargs["json"]
+
 
 async def test_test_ntfy_failure_returns_ok_false(client, engine):
     from sqlalchemy.ext.asyncio import async_sessionmaker

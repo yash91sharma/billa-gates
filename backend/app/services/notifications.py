@@ -17,6 +17,11 @@ async def send_notification(
 ) -> None:
     """Send a push notification via ntfy.
 
+    Uses ntfy's JSON publishing endpoint: POST to the server ROOT with the
+    topic inside the payload. Posting JSON to ``{server}/{topic}`` would make
+    ntfy treat the serialized JSON blob as the literal message body (no
+    title) — that endpoint only accepts raw message text.
+
     Silently no-ops when server_url or topic are empty, so callers do not need
     to guard against unconfigured notification settings. The Authorization
     header is included only when a token is provided.
@@ -31,14 +36,15 @@ async def send_notification(
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    logger.info(f"sending notification to {server_url}/{topic} title={title}")
+    url = server_url.rstrip("/")
+    logger.info(f"sending notification to {url} topic={topic} title={title}")
 
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{server_url}/{topic}",
+                url,
                 headers=headers,
-                json={"title": title, "message": message},
+                json={"topic": topic, "title": title, "message": message},
             )
             resp.raise_for_status()
         logger.info(f"notification sent successfully to {topic}")
