@@ -291,9 +291,12 @@ async def restic_backup(
     if kwargs.get("read_concurrency"):
         args.extend(["--read-concurrency", str(kwargs["read_concurrency"])])
 
-    # Always add JSON and verbose
+    # Always emit JSON so summary/error lines are machine-parseable. Never
+    # add --verbose: it makes restic print one JSON line per new/changed
+    # file, which on a multi-million-file source is hundreds of MB buffered
+    # through communicate() and persisted to the run row. Error lines and
+    # the final summary are emitted regardless of verbosity.
     args.append("--json")
-    args.append("--verbose")
 
     # Add source path
     args.append(source_path)

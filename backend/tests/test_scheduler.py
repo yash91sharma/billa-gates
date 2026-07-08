@@ -495,14 +495,16 @@ async def test_job_rescheduled_when_schedule_changes(client, engine):
             )
         ).json()
 
-    reschedule_calls = []
+    # PUT now syncs via add_job(replace_existing=True) — it both replaces the
+    # trigger of a registered job and registers a job the scheduler doesn't
+    # know yet (e.g. one enabled through PUT).
+    add_calls = []
     with mpatch("os.path.isdir", return_value=True):
         with mpatch("app.core.scheduler.scheduler") as mock_sched:
             mock_sched.running = True
-            mock_sched.reschedule_job = MagicMock(
-                side_effect=lambda *a, **kw: reschedule_calls.append(kw)
+            mock_sched.add_job = MagicMock(
+                side_effect=lambda *a, **kw: add_calls.append(kw)
             )
-            mock_sched.get_job = MagicMock(return_value=MagicMock())
             await client.put(
                 f"/api/jobs/{created['id']}",
                 json={
@@ -515,4 +517,6 @@ async def test_job_rescheduled_when_schedule_changes(client, engine):
                 },
             )
 
-    assert len(reschedule_calls) >= 1
+    assert any(
+        kw.get("id") == created["id"] and kw.get("replace_existing") for kw in add_calls
+    )

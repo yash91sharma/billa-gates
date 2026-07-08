@@ -635,6 +635,31 @@ def _extract_failed_items(backup_stdout: str) -> List[str]:
     return items
 
 
+def _filter_backup_output(backup_stdout: str) -> str:
+    """Strip restic's JSON progress lines (message_type=status) before the
+    stdout is persisted to BackupRun.backup_output.
+
+    The stored output exists to answer "what happened in this run" — error
+    lines, the summary, and any non-JSON diagnostics. Progress lines are
+    emitted throttled for the whole duration of the run and carry no
+    post-mortem value; on a many-hour run they are thousands of lines that
+    bloat the DB row and the run-detail page.
+    """
+    kept: List[str] = []
+    for line in backup_stdout.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("{"):
+            try:
+                obj = json.loads(stripped)
+            except json.JSONDecodeError:
+                kept.append(line)
+                continue
+            if obj.get("message_type") == "status":
+                continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _format_backup_error(rc: int, json_errors: List[str], stderr: str) -> str:
     """Build the user-visible error_output string for a failed backup run.
 
@@ -1240,7 +1265,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                         stats_run.data_added_packed_bytes = data_added_packed
                         stats_run.total_bytes_processed = total_bytes_proc
                         stats_run.snapshot_id = snap_id
-                    stats_run.backup_output = stdout
+                    stats_run.backup_output = _filter_backup_output(stdout)
                     await s.commit()
 
             # Step 8: Prune (only if backup succeeded)

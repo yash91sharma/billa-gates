@@ -1055,23 +1055,83 @@ async def test_disable_removes_job_from_scheduler(client):
 
 
 async def test_update_job_reschedules_in_scheduler(client):
+    """Editing an enabled job re-registers it so a schedule change takes
+    effect. add_job(replace_existing=True) covers both replacing the trigger
+    of a registered job and registering one the scheduler doesn't know yet."""
     with patch("os.path.isdir", return_value=True):
         created = (await client.post("/api/jobs", json=make_job_payload())).json()
 
-    reschedule_calls = []
+    add_calls = []
     with patch("os.path.isdir", return_value=True):
         with patch("app.core.scheduler.scheduler") as mock_sched:
             mock_sched.running = True
-            mock_sched.reschedule_job = MagicMock(
-                side_effect=lambda *a, **kw: reschedule_calls.append(kw)
+            mock_sched.add_job = MagicMock(
+                side_effect=lambda *a, **kw: add_calls.append(kw)
             )
-            mock_sched.get_job = MagicMock(return_value=MagicMock())
             await client.put(
                 f"/api/jobs/{created['id']}",
                 json=make_job_payload(schedule_value="12h"),
             )
 
-    assert len(reschedule_calls) >= 1
+    assert any(
+        kw.get("id") == created["id"] and kw.get("replace_existing") for kw in add_calls
+    )
+
+
+async def test_update_job_enabling_via_put_registers_in_scheduler(client):
+    """A disabled job is not in the scheduler. Flipping enabled=True through
+    PUT (the edit form path) must register it — otherwise the DB says
+    'enabled' while the scheduler never fires it: silent missed backups."""
+    with patch("os.path.isdir", return_value=True):
+        created = (
+            await client.post("/api/jobs", json=make_job_payload(enabled=False))
+        ).json()
+
+    add_calls = []
+    with patch("os.path.isdir", return_value=True):
+        with patch("app.core.scheduler.scheduler") as mock_sched:
+            mock_sched.running = True
+            mock_sched.add_job = MagicMock(
+                side_effect=lambda *a, **kw: add_calls.append(kw)
+            )
+            resp = await client.put(
+                f"/api/jobs/{created['id']}",
+                json=make_job_payload(enabled=True),
+            )
+
+    assert resp.status_code == 200
+    assert resp.json()["enabled"] is True
+    assert any(kw.get("id") == created["id"] for kw in add_calls)
+
+
+async def test_update_job_disabling_via_put_removes_from_scheduler(client):
+    """Flipping enabled=False through PUT must remove the scheduler entry —
+    otherwise the job keeps firing while the UI shows it as disabled."""
+    with patch("os.path.isdir", return_value=True):
+        created = (
+            await client.post("/api/jobs", json=make_job_payload(enabled=True))
+        ).json()
+
+    add_calls = []
+    remove_calls = []
+    with patch("os.path.isdir", return_value=True):
+        with patch("app.core.scheduler.scheduler") as mock_sched:
+            mock_sched.running = True
+            mock_sched.add_job = MagicMock(
+                side_effect=lambda *a, **kw: add_calls.append(kw)
+            )
+            mock_sched.remove_job = MagicMock(
+                side_effect=lambda jid, **kw: remove_calls.append(jid)
+            )
+            resp = await client.put(
+                f"/api/jobs/{created['id']}",
+                json=make_job_payload(enabled=False),
+            )
+
+    assert resp.status_code == 200
+    assert resp.json()["enabled"] is False
+    assert created["id"] in remove_calls
+    assert not any(kw.get("id") == created["id"] for kw in add_calls)
 
 
 # ── Duplicate source+destination conflict ─────────────────────────────────────

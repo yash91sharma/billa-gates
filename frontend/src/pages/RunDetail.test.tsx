@@ -201,15 +201,31 @@ describe('RunDetail', () => {
     })
 
     it('continues polling when status is success but check_status is null', async () => {
-      vi.mocked(api.getRun).mockResolvedValue(makeRun({ status: 'success', check_status: null }))
-      renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
-      await waitFor(() => expect(vi.mocked(api.getRun)).toHaveBeenCalledTimes(2))
+      // Polling runs at a 60s interval — advance a fake clock instead of
+      // waiting real time. shouldAdvanceTime keeps waitFor's own timers alive.
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        vi.mocked(api.getRun).mockResolvedValue(makeRun({ status: 'success', check_status: null }))
+        renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
+        await waitFor(() => expect(vi.mocked(api.getRun)).toHaveBeenCalled())
+        await vi.advanceTimersByTimeAsync(60_000)
+        await waitFor(() => expect(vi.mocked(api.getRun)).toHaveBeenCalledTimes(2))
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it('continues polling when status is failed but check_status is null', async () => {
-      vi.mocked(api.getRun).mockResolvedValue(makeRun({ status: 'failed', check_status: null }))
-      renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
-      await waitFor(() => expect(vi.mocked(api.getRun)).toHaveBeenCalledTimes(2))
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        vi.mocked(api.getRun).mockResolvedValue(makeRun({ status: 'failed', check_status: null }))
+        renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
+        await waitFor(() => expect(vi.mocked(api.getRun)).toHaveBeenCalled())
+        await vi.advanceTimersByTimeAsync(60_000)
+        await waitFor(() => expect(vi.mocked(api.getRun)).toHaveBeenCalledTimes(2))
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 

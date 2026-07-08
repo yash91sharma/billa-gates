@@ -1285,6 +1285,64 @@ async def test_step7_stats_populated_from_summary(engine):
     assert run.total_bytes_processed == 50000000
 
 
+async def test_step7_backup_output_drops_status_lines(engine):
+    """Persisted backup_output must exclude restic's JSON progress lines
+    (message_type=status) — over a many-hour run those are thousands of
+    lines of noise that bloat the DB row and the run-detail page. Error
+    lines, the summary line, and any non-JSON output must be kept: they
+    are the record of what happened and what failed."""
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=str(JOB_ID),
+            status=RunStatus.running,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    status_line = json.dumps(
+        {"message_type": "status", "percent_done": 0.5, "files_done": 3}
+    )
+    error_line = json.dumps(
+        {
+            "message_type": "error",
+            "error": {"message": "permission denied"},
+            "item": "/sources/documents/locked.txt",
+        }
+    )
+    plain_line = "restic said something un-JSON here"
+    stdout = "\n".join(
+        [status_line, plain_line, status_line, error_line, json.dumps(BACKUP_SUMMARY)]
+    )
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, stdout, "", BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.success
+    assert run.backup_output is not None
+    assert '"message_type": "status"' not in run.backup_output
+    assert "percent_done" not in run.backup_output
+    assert "locked.txt" in run.backup_output
+    assert '"message_type": "summary"' in run.backup_output
+    assert plain_line in run.backup_output
+
+
 # ── Step 8: forget (gaps.md H1: prune is now a separate operation) ───────────
 
 

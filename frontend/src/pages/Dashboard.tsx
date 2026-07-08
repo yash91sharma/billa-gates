@@ -38,7 +38,10 @@ export default function Dashboard() {
   const { data: runs, error: runsError } = useQuery({
     queryKey: ['recentRuns'],
     queryFn: () => api.getRecentRuns(10),
-    refetchInterval: (query) => (shouldPoll(query.state.data ?? []) ? 100 : false),
+    // Poll at most once a minute while a run is live — anything faster
+    // hammers the backend (and its request log) for the whole duration of
+    // a multi-hour backup without telling the user anything new.
+    refetchInterval: (query) => (shouldPoll(query.state.data ?? []) ? 60_000 : false),
   })
 
   const { data: health } = useQuery({

@@ -327,21 +327,17 @@ async def update_job(
         sorted(update_data.keys()),
     )
 
-    # Reschedule if the job is registered.
-    sched: Any = scheduler_module.scheduler
-    if sched.running:
-        existing: Any = sched.get_job(job_id)
-        if existing:
-            trigger = scheduler_module.build_trigger(
-                job.schedule_type, job.schedule_value
-            )
-            sched.reschedule_job(job_id, trigger=trigger)
-            logger.info(
-                "scheduler rescheduled job_id=%s schedule=%s/%s",
-                job_id,
-                job.schedule_type,
-                job.schedule_value,
-            )
+    # Sync the scheduler with the job's new state. PUT can change both the
+    # schedule and the enabled flag, so the scheduler entry must be brought
+    # in line unconditionally: add_job(replace_existing=True) registers a
+    # previously-disabled job and replaces the trigger of a registered one;
+    # a disabled job is removed so it stops firing. Rescheduling only when
+    # already registered (the previous behavior) silently desynced the
+    # scheduler from the DB whenever `enabled` was flipped through PUT.
+    if job.enabled:
+        _register_in_scheduler(job)
+    else:
+        _remove_from_scheduler(job_id)
 
     return await _build_job_response(job, session)
 

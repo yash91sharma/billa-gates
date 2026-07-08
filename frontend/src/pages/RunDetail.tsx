@@ -25,7 +25,8 @@ export default function RunDetail() {
     refetchInterval: (query) => {
       const data = query.state.data
       if (!data) return false
-      return shouldPoll(data) ? 100 : false
+      // At most once a minute — see Dashboard.tsx for rationale.
+      return shouldPoll(data) ? 60_000 : false
     },
   })
 

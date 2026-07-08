@@ -494,6 +494,32 @@ async def test_backup_job_tag_coexists_with_user_tags():
     assert "weekly" in tag_values
 
 
+async def test_backup_does_not_pass_verbose():
+    """--verbose makes restic emit one JSON line per new/changed file; on a
+    multi-million-file source that is hundreds of MB buffered in memory and
+    persisted to the DB. Progress/summary/error reporting all work without
+    it, so the backup command must not include it. --json must stay."""
+    proc = _make_process(0, stdout=BACKUP_SUMMARY)
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = args
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await restic_backup(
+            REPO,
+            PASSWORD,
+            "/sources/documents",
+            timeout_seconds=3600,
+            job_id=TEST_JOB_ID,
+        )
+
+    args_list = list(captured["args"])
+    assert "--verbose" not in args_list
+    assert "--json" in args_list
+
+
 async def test_backup_password_never_in_stdout():
     output = f"some output {PASSWORD} more output"
     proc = _make_process(0, stdout=output + "\n" + BACKUP_SUMMARY)

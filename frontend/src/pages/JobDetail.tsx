@@ -46,7 +46,8 @@ export default function JobDetail() {
   const { data: runs } = useQuery({
     queryKey: ['jobRuns', id],
     queryFn: () => api.getJobRuns(id ?? ''),
-    refetchInterval: (q) => (shouldPoll(q.state.data ?? []) ? 100 : false),
+    // At most once a minute — see Dashboard.tsx for rationale.
+    refetchInterval: (q) => (shouldPoll(q.state.data ?? []) ? 60_000 : false),
   })
 
   const { data: snapshots } = useQuery({
@@ -421,7 +422,10 @@ restic restore latest --target ./restored`}
 
           <form onSubmit={handleCheckSubmit} className="space-y-4">
             <div className="space-y-1">
-              <label htmlFor="modal-check-mode" className="text-xs font-semibold text-muted-foreground block">
+              <label
+                htmlFor="modal-check-mode"
+                className="text-xs font-semibold text-muted-foreground block"
+              >
                 Check Mode
               </label>
               <select
@@ -438,7 +442,10 @@ restic restore latest --target ./restored`}
 
             {checkMode === 'subset' && (
               <div className="space-y-1">
-                <label htmlFor="modal-check-subset-percent" className="text-xs font-semibold text-muted-foreground block">
+                <label
+                  htmlFor="modal-check-subset-percent"
+                  className="text-xs font-semibold text-muted-foreground block"
+                >
                   Subset Percent
                 </label>
                 <input
@@ -455,7 +462,10 @@ restic restore latest --target ./restored`}
             )}
 
             <div className="space-y-1">
-              <label htmlFor="modal-check-timeout-hours" className="text-xs font-semibold text-muted-foreground block">
+              <label
+                htmlFor="modal-check-timeout-hours"
+                className="text-xs font-semibold text-muted-foreground block"
+              >
                 Check Timeout (hours)
               </label>
               <input
