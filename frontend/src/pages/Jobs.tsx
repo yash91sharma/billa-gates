@@ -79,8 +79,13 @@ export default function Jobs() {
       await api.deleteJob(jobToDelete.id)
       setJobToDelete(null)
       refetch()
-    } catch {
-      setDeleteError('Error: failed to delete job.')
+    } catch (err: unknown) {
+      const status = (err as { status?: number }).status
+      setDeleteError(
+        status === 409
+          ? 'Cannot delete: a run is in progress for this job.'
+          : 'Error: failed to delete job.'
+      )
       setJobToDelete(null)
     }
   }

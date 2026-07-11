@@ -69,6 +69,10 @@ export default function Settings() {
   const [serverUrl, setServerUrl] = useState('')
   const [topic, setTopic] = useState('')
   const [token, setToken] = useState('')
+  // The API never returns the stored token, so the field always loads empty.
+  // Only send its value when the user actually touched it: null = keep the
+  // stored token, '' = explicitly clear it.
+  const [tokenDirty, setTokenDirty] = useState(false)
   const [notifyStart, setNotifyStart] = useState(false)
   const [notifySuccess, setNotifySuccess] = useState(false)
   const [notifyFailure, setNotifyFailure] = useState(false)
@@ -77,6 +81,9 @@ export default function Settings() {
   const [timeoutHours, setTimeoutHours] = useState(24)
   const [keepLastRuns, setKeepLastRuns] = useState(100)
   const [autoUnlock, setAutoUnlock] = useState(true)
+  // No UI field for this yet — carried through the save payload so the
+  // backend default (600) doesn't silently overwrite a stored value.
+  const [metadataTimeout, setMetadataTimeout] = useState(600)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [ntfyMessage, setNtfyMessage] = useState<string | null>(null)
   const [oldLabel, setOldLabel] = useState('')
@@ -114,6 +121,7 @@ export default function Settings() {
       setTimeoutHours(settings.default_job_timeout_hours)
       setKeepLastRuns(settings.keep_last_runs)
       setAutoUnlock(settings.auto_unlock)
+      setMetadataTimeout(settings.metadata_timeout_seconds)
       setTimeout(() => setNtfyVisible(true), 100)
     }
   }, [settings])
@@ -147,7 +155,7 @@ export default function Settings() {
       await api.updateSettings({
         ntfy_server_url: serverUrl,
         ntfy_topic: topic,
-        ntfy_token: token || null,
+        ntfy_token: tokenDirty ? token : null,
         notify_on_start: notifyStart,
         notify_on_success: notifySuccess,
         notify_on_failure: notifyFailure,
@@ -156,6 +164,7 @@ export default function Settings() {
         default_job_timeout_hours: timeoutHours,
         keep_last_runs: keepLastRuns,
         auto_unlock: autoUnlock,
+        metadata_timeout_seconds: metadataTimeout,
       })
     } catch {
       setSaveError('Error: failed to save settings.')
@@ -232,7 +241,10 @@ export default function Settings() {
                   id="ntfy-token"
                   type="password"
                   value={token}
-                  onChange={(e) => setToken(e.target.value)}
+                  onChange={(e) => {
+                    setToken(e.target.value)
+                    setTokenDirty(true)
+                  }}
                   aria-describedby={helpId('ntfy-token')}
                   className="border rounded px-2 py-1 text-sm w-full"
                 />

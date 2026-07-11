@@ -53,7 +53,7 @@ const makeJob = (overrides: Partial<BackupJob> = {}): BackupJob => ({
 
 beforeEach(() => {
   vi.mocked(api.listJobs).mockResolvedValue([])
-  vi.mocked(api.deleteJob).mockResolvedValue(new Response(null, { status: 204 }))
+  vi.mocked(api.deleteJob).mockResolvedValue(undefined)
   vi.mocked(api.enableJob).mockResolvedValue({ id: 'job-1', enabled: true })
   vi.mocked(api.disableJob).mockResolvedValue({ id: 'job-1', enabled: false })
   vi.mocked(api.triggerRun).mockResolvedValue({ run_id: 'run-abc' })
@@ -311,6 +311,23 @@ describe('Jobs', () => {
       await waitFor(() =>
         expect(screen.getByText(/error|failed|could not load/i)).toBeInTheDocument()
       )
+    })
+
+    it('shows a run-in-progress message when delete fails with 409', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.listJobs).mockResolvedValue([makeJob({ id: 'job-1', name: 'Test Job' })])
+      vi.mocked(api.deleteJob).mockRejectedValue(
+        Object.assign(new Error('A backup run is in progress for this job'), {
+          status: 409,
+          data: { detail: 'A backup run is in progress for this job' },
+        })
+      )
+      renderWithProviders(<Jobs />)
+      await waitFor(() => screen.getByText('Test Job'))
+      await user.click(screen.getByRole('button', { name: /delete/i }))
+      await waitFor(() => screen.getByText(/confirm|are you sure/i))
+      await user.click(screen.getByRole('button', { name: /confirm|yes.*delete|delete.*job/i }))
+      await waitFor(() => expect(screen.getByText(/run.*in progress/i)).toBeInTheDocument())
     })
 
     it('shows error when delete fails with non-409 error', async () => {

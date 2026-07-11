@@ -103,6 +103,54 @@ describe('Settings', () => {
       await user.click(screen.getByRole('button', { name: /save/i }))
       expect(vi.mocked(api.updateSettings)).toHaveBeenCalled()
     })
+
+    it('preserves the stored metadata_timeout_seconds when saving', async () => {
+      // The Settings page has no field for metadata_timeout_seconds; the
+      // backend defaults an omitted value to 600, so the save payload must
+      // carry the loaded value through or every save silently resets it.
+      const user = userEvent.setup()
+      vi.mocked(api.getSettings).mockResolvedValue(makeSettings({ metadata_timeout_seconds: 1200 }))
+      renderWithProviders(<Settings />)
+      await waitFor(() => screen.getByLabelText(/topic/i))
+      await user.click(screen.getByRole('button', { name: /save/i }))
+      expect(vi.mocked(api.updateSettings)).toHaveBeenCalledWith(
+        expect.objectContaining({ metadata_timeout_seconds: 1200 })
+      )
+    })
+
+    it('sends null ntfy_token when the field was not touched (keep stored token)', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<Settings />)
+      await waitFor(() => screen.getByLabelText(/topic/i))
+      await user.click(screen.getByRole('button', { name: /save/i }))
+      expect(vi.mocked(api.updateSettings)).toHaveBeenCalledWith(
+        expect.objectContaining({ ntfy_token: null })
+      )
+    })
+
+    it('sends the typed ntfy_token when the user sets one', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<Settings />)
+      await waitFor(() => screen.getByLabelText(/token/i))
+      await user.type(screen.getByLabelText(/token/i), 'tok-123')
+      await user.click(screen.getByRole('button', { name: /save/i }))
+      expect(vi.mocked(api.updateSettings)).toHaveBeenCalledWith(
+        expect.objectContaining({ ntfy_token: 'tok-123' })
+      )
+    })
+
+    it('sends an empty ntfy_token when the user types and clears it (clear stored token)', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<Settings />)
+      await waitFor(() => screen.getByLabelText(/token/i))
+      const tokenInput = screen.getByLabelText(/token/i)
+      await user.type(tokenInput, 'tok-123')
+      await user.clear(tokenInput)
+      await user.click(screen.getByRole('button', { name: /save/i }))
+      expect(vi.mocked(api.updateSettings)).toHaveBeenCalledWith(
+        expect.objectContaining({ ntfy_token: '' })
+      )
+    })
   })
 
   describe('Test Notification button', () => {
