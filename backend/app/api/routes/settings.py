@@ -88,8 +88,10 @@ async def update_settings(
 
     settings.ntfy_server_url = body.ntfy_server_url
     settings.ntfy_topic = body.ntfy_topic
+    # null = keep the stored token (it is never echoed to the client, so
+    # ordinary saves send null); empty string = explicitly clear it.
     if body.ntfy_token is not None:
-        settings.ntfy_token = body.ntfy_token
+        settings.ntfy_token = body.ntfy_token or None
     settings.notify_on_start = body.notify_on_start
     settings.notify_on_success = body.notify_on_success
     settings.notify_on_failure = body.notify_on_failure

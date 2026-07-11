@@ -374,6 +374,64 @@ async def test_update_job_password_absent_leaves_unchanged(client):
     assert resp.status_code == 200
 
 
+async def test_update_job_password_absent_preserves_stored_value(client, engine):
+    """Omitting restic_password on PUT must keep the stored password intact —
+    it is the one field where null means 'keep', not 'clear'."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import BackupJob
+
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+    update = make_job_payload()
+    update.pop("restic_password")
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.put(f"/api/jobs/{created['id']}", json=update)
+    assert resp.status_code == 200
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        job = await s.get(BackupJob, created["id"])
+        assert job is not None
+        assert job.restic_password == "secret123"
+
+
+async def test_update_job_clears_nullable_fields(client):
+    """The edit form sends cleared fields as explicit nulls; PUT must apply
+    them. Silently keeping the old values means e.g. a cleared source_subpath
+    keeps backing up only the subfolder while the user believes the whole
+    mount is protected."""
+    with patch("os.path.isdir", return_value=True):
+        created = (
+            await client.post(
+                "/api/jobs",
+                json=make_job_payload(
+                    source_subpath="photos",
+                    retain_keep_last=5,
+                    tags=["daily"],
+                    timeout_hours=12,
+                ),
+            )
+        ).json()
+    assert created["source_subpath"] == "photos"
+
+    update = make_job_payload(
+        source_subpath=None,
+        retain_keep_last=None,
+        tags=None,
+        timeout_hours=None,
+    )
+    update.pop("restic_password")
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.put(f"/api/jobs/{created['id']}", json=update)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["source_subpath"] is None
+    assert data["retain_keep_last"] is None
+    assert data["tags"] is None
+    assert data["timeout_hours"] is None
+
+
 async def test_update_job_not_found(client):
     resp = await client.put(f"/api/jobs/{uuid.uuid4()}", json=make_job_payload())
     assert resp.status_code == 404

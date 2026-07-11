@@ -325,8 +325,13 @@ async def update_job(
                 detail=f"Source mount '/sources/{body.source_label}' is not mounted",
             )
 
-    # Apply all provided fields.
-    update_data = body.model_dump(exclude_none=True)
+    # Apply the full payload — the edit form always sends every field, and an
+    # explicit null means "clear this value". restic_password is the one
+    # exception: null means "keep the stored password" (it is never echoed to
+    # the client, so the form cannot round-trip it).
+    update_data = body.model_dump()
+    if update_data.get("restic_password") is None:
+        update_data.pop("restic_password", None)
     for field, value in update_data.items():
         setattr(job, field, value)
 

@@ -347,6 +347,63 @@ async def test_update_settings_metadata_timeout_invalid_too_large(client):
     assert resp.status_code == 422
 
 
+def _settings_put_payload(**overrides) -> dict:
+    base = {
+        "ntfy_server_url": "https://ntfy.sh",
+        "ntfy_topic": "x",
+        "notify_on_start": True,
+        "notify_on_success": True,
+        "notify_on_failure": True,
+        "notify_on_warning": True,
+        "notify_on_verification": True,
+        "default_job_timeout_hours": 24,
+    }
+    base.update(overrides)
+    return base
+
+
+async def _stored_ntfy_token(engine):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import AppSettings
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        settings = await s.get(AppSettings, 1)
+        assert settings is not None
+        return settings.ntfy_token
+
+
+async def test_update_settings_ntfy_token_null_preserves_stored_token(client, engine):
+    """null / omitted token means 'keep the stored one' — the UI never gets
+    the token back, so it sends null on every ordinary save."""
+    resp = await client.put(
+        "/api/settings", json=_settings_put_payload(ntfy_token="tok-123")
+    )
+    assert resp.status_code == 200
+    assert await _stored_ntfy_token(engine) == "tok-123"
+
+    resp = await client.put(
+        "/api/settings", json=_settings_put_payload(ntfy_token=None)
+    )
+    assert resp.status_code == 200
+    assert await _stored_ntfy_token(engine) == "tok-123"
+
+
+async def test_update_settings_ntfy_token_empty_string_clears(client, engine):
+    """An explicit empty string means 'remove the stored token' — without
+    this, a token can be replaced but never removed."""
+    resp = await client.put(
+        "/api/settings", json=_settings_put_payload(ntfy_token="tok-123")
+    )
+    assert resp.status_code == 200
+    assert await _stored_ntfy_token(engine) == "tok-123"
+
+    resp = await client.put("/api/settings", json=_settings_put_payload(ntfy_token=""))
+    assert resp.status_code == 200
+    assert await _stored_ntfy_token(engine) is None
+
+
 # ── POST /api/settings/test-ntfy ─────────────────────────────────────────────
 
 
