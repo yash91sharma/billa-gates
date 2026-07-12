@@ -282,8 +282,6 @@ describe('JobForm', () => {
     })
   })
 
-
-
   describe('backup options', () => {
     it('exposes exclude_patterns as a textarea (one pattern per line)', async () => {
       const onSubmit = vi.fn()
@@ -384,6 +382,86 @@ describe('JobForm', () => {
     })
   })
 
+  describe('integrity verification section', () => {
+    // The form must expose every job setting (except the password) so an
+    // edit round-trips the full configuration — check_* fields were
+    // historically missing, and each save silently reset them.
+    it('exposes check_enabled as a checkbox (default off)', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      const cb = screen.getByLabelText(/scheduled integrity check/i) as HTMLInputElement
+      expect(cb.checked).toBe(false)
+      await user.click(cb)
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ check_enabled: true }))
+    })
+
+    it('exposes check_mode as a select and sends null when unset', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      const select = screen.getByLabelText(/check mode/i)
+      expect(select.tagName).toBe('SELECT')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ check_mode: null, check_subset_percent: null })
+      )
+    })
+
+    it('shows subset percent input only when subset mode is selected', async () => {
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={vi.fn()} sourceMounts={['m']} destinationMounts={['d']} />)
+      expect(screen.queryByLabelText(/subset percent/i)).not.toBeInTheDocument()
+      await user.selectOptions(screen.getByLabelText(/check mode/i), 'subset')
+      expect(screen.getByLabelText(/subset percent/i)).toBeInTheDocument()
+    })
+
+    it('exposes check_timeout_hours as a number input', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      await user.type(screen.getByLabelText(/check timeout/i), '6')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ check_timeout_hours: 6 }))
+    })
+
+    it('round-trips check settings when editing an existing job', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(
+        <JobForm
+          job={{
+            ...baseJob,
+            check_enabled: true,
+            check_mode: 'subset',
+            check_subset_percent: 10,
+            check_timeout_hours: 6,
+          }}
+          onSubmit={onSubmit}
+          sourceMounts={['documents']}
+          destinationMounts={['main']}
+        />
+      )
+      expect(
+        (screen.getByLabelText(/scheduled integrity check/i) as HTMLInputElement).checked
+      ).toBe(true)
+      expect((screen.getByLabelText(/check mode/i) as HTMLSelectElement).value).toBe('subset')
+      expect((screen.getByLabelText(/subset percent/i) as HTMLInputElement).value).toBe('10')
+      expect((screen.getByLabelText(/check timeout/i) as HTMLInputElement).value).toBe('6')
+
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          check_enabled: true,
+          check_mode: 'subset',
+          check_subset_percent: 10,
+          check_timeout_hours: 6,
+        })
+      )
+    })
+  })
+
   describe('collapsible sections', () => {
     it('shows Basic section expanded by default', () => {
       render(<JobForm onSubmit={vi.fn()} />)
@@ -427,7 +505,6 @@ describe('JobForm', () => {
       render(<JobForm onSubmit={vi.fn()} />)
       expect(screen.getByText(/backup options/i)).toBeInTheDocument()
     })
-
   })
 
   // The user explicitly asked for tooltips on every field with description +

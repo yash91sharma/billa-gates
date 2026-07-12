@@ -538,3 +538,170 @@ async def test_send_notification_canceled_branch_invokes_httpx():
 
     assert sent, "Expected an HTTP POST to be issued for the canceled notification"
     assert "canceled" in sent[0]["json"]["title"].lower()
+
+
+# ── 5. run_prune / run_check honor the cancel flag ────────────────────────────
+#
+# The cancel endpoint sets the flag and SIGTERMs the subprocess for ANY
+# running run. Prune and check pipelines must observe the flag and finalize
+# the row as canceled/user_canceled (not failed), then clear the flag so the
+# registry set stays bounded.
+
+
+async def _create_running_kind_run(engine, job_id: str, kind) -> str:
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = str(uuid.uuid4())
+    async with factory() as s:
+        run = BackupRun(
+            id=run_id,
+            job_id=job_id,
+            kind=kind,
+            status=RunStatus.running,
+            started_at=datetime.now(timezone.utc),
+            triggered_by=TriggeredBy.manual,
+        )
+        s.add(run)
+        await s.commit()
+    return run_id
+
+
+async def test_run_prune_finalizes_as_canceled_when_flag_set(engine):
+    """A canceled prune must be recorded as canceled/user_canceled — not as a
+    failed run with the SIGTERM'd process's stderr as the error."""
+    from app.db.models import BackupRun, RunKind, RunReason, RunStatus
+    from app.services import backup_runner, process_registry
+
+    job_id = await _create_job_row(engine)
+    run_id = await _create_running_kind_run(engine, job_id, RunKind.prune)
+    process_registry._processes.clear()
+    process_registry._canceled.clear()
+    process_registry.mark_canceled(uuid.UUID(run_id))
+
+    # Simulate the SIGTERM'd restic prune returning non-zero.
+    async def fake_prune(*a, **kw):
+        return (-15, "", "terminated")
+
+    with (
+        patch.object(backup_runner.restic, "restic_prune", side_effect=fake_prune),
+        patch.object(backup_runner, "_try_notify", new=AsyncMock()),
+    ):
+        await backup_runner.run_prune(uuid.UUID(job_id), uuid.UUID(run_id))
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        run = await s.get(BackupRun, run_id)
+        assert run is not None
+        assert run.status == RunStatus.canceled
+        assert run.reason == RunReason.user_canceled
+        assert run.finished_at is not None
+        assert run.duration_seconds is not None
+    # Flag must be cleared so the module-level set stays bounded.
+    assert not process_registry.is_canceled(uuid.UUID(run_id))
+
+
+async def test_run_prune_canceled_before_start_skips_restic(engine):
+    """Cancel arriving before the subprocess spawns must prevent the (possibly
+    hours-long) prune from running at all."""
+    from app.db.models import BackupRun, RunKind, RunReason, RunStatus
+    from app.services import backup_runner, process_registry
+
+    job_id = await _create_job_row(engine)
+    run_id = await _create_running_kind_run(engine, job_id, RunKind.prune)
+    process_registry._processes.clear()
+    process_registry._canceled.clear()
+    process_registry.mark_canceled(uuid.UUID(run_id))
+
+    prune_mock = AsyncMock(return_value=(0, "", ""))
+    with (
+        patch.object(backup_runner.restic, "restic_prune", prune_mock),
+        patch.object(backup_runner, "_try_notify", new=AsyncMock()),
+    ):
+        await backup_runner.run_prune(uuid.UUID(job_id), uuid.UUID(run_id))
+
+    prune_mock.assert_not_called()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        run = await s.get(BackupRun, run_id)
+        assert run is not None
+        assert run.status == RunStatus.canceled
+        assert run.reason == RunReason.user_canceled
+
+
+async def test_run_check_finalizes_as_canceled_when_flag_set(engine):
+    """A canceled integrity check must be recorded as canceled/user_canceled,
+    with check_status left as skipped rather than failed."""
+    from app.db.models import BackupRun, CheckStatus, RunKind, RunReason, RunStatus
+    from app.services import backup_runner, process_registry
+
+    job_id = await _create_job_row(engine)
+    run_id = await _create_running_kind_run(engine, job_id, RunKind.check)
+    process_registry._processes.clear()
+    process_registry._canceled.clear()
+    process_registry.mark_canceled(uuid.UUID(run_id))
+
+    async def fake_check(*a, **kw):
+        return (-15, "", "terminated")
+
+    with (
+        patch.object(backup_runner.restic, "restic_check", side_effect=fake_check),
+        patch.object(backup_runner, "_try_notify", new=AsyncMock()),
+    ):
+        await backup_runner.run_check(
+            uuid.UUID(job_id), uuid.UUID(run_id), "structural", None, None
+        )
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        run = await s.get(BackupRun, run_id)
+        assert run is not None
+        assert run.status == RunStatus.canceled
+        assert run.reason == RunReason.user_canceled
+        assert run.check_status == CheckStatus.skipped
+        assert run.finished_at is not None
+    assert not process_registry.is_canceled(uuid.UUID(run_id))
+
+
+async def test_run_check_canceled_sends_warning_notification(engine):
+    """Cancel of a check mirrors the backup-cancel notification behavior:
+    a notify_on_warning message naming the cancellation."""
+    from app.db.models import AppSettings, RunKind
+    from app.services import backup_runner, process_registry
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(
+            AppSettings(
+                id=1,
+                ntfy_server_url="https://ntfy.test",
+                ntfy_topic="t",
+                notify_on_warning=True,
+            )
+        )
+        await s.commit()
+
+    job_id = await _create_job_row(engine)
+    run_id = await _create_running_kind_run(engine, job_id, RunKind.check)
+    process_registry._processes.clear()
+    process_registry._canceled.clear()
+    process_registry.mark_canceled(uuid.UUID(run_id))
+
+    async def fake_check(*a, **kw):
+        return (-15, "", "terminated")
+
+    notify_mock = AsyncMock()
+    with (
+        patch.object(backup_runner.restic, "restic_check", side_effect=fake_check),
+        patch.object(backup_runner, "_try_notify", notify_mock),
+    ):
+        await backup_runner.run_check(
+            uuid.UUID(job_id), uuid.UUID(run_id), "structural", None, None
+        )
+
+    titles = [
+        call.args[2] for call in notify_mock.call_args_list if len(call.args) >= 3
+    ]
+    assert any("canceled" in t.lower() for t in titles), (
+        f"No canceled notification fired. Titles: {titles}"
+    )

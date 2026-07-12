@@ -432,6 +432,158 @@ async def test_update_job_clears_nullable_fields(client):
     assert data["timeout_hours"] is None
 
 
+async def test_update_job_active_run_returns_409(client):
+    """A job with an in-flight run cannot be edited — the pipeline reads job
+    fields (paths, password, retention) mid-run, so an edit would race it.
+    The user must cancel the run first."""
+    from app.services import backup_runner
+
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    job_uuid = uuid.UUID(created["id"])
+    backup_runner.active_jobs.add(job_uuid)
+    try:
+        resp = await client.put(f"/api/jobs/{created['id']}", json={"name": "New Name"})
+        assert resp.status_code == 409
+        assert "in progress" in resp.json()["detail"].lower()
+    finally:
+        backup_runner.active_jobs.discard(job_uuid)
+
+
+async def test_update_job_running_db_row_returns_409(client, engine):
+    """The edit guard must also honor a status=running DB row (same dual
+    check trigger_run uses), not only the in-memory active_jobs set."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=str(uuid.uuid4()),
+                job_id=created["id"],
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    resp = await client.put(f"/api/jobs/{created['id']}", json={"name": "New Name"})
+    assert resp.status_code == 409
+    assert "in progress" in resp.json()["detail"].lower()
+
+
+async def test_update_job_partial_payload_keeps_omitted_fields(client):
+    """PUT is a partial update: any field absent from the payload keeps its
+    stored value. Silently resetting omitted fields to schema defaults is
+    data loss."""
+    with patch("os.path.isdir", return_value=True):
+        created = (
+            await client.post(
+                "/api/jobs",
+                json=make_job_payload(
+                    source_subpath="photos",
+                    retain_keep_last=5,
+                    tags=["daily"],
+                    timeout_hours=12,
+                    exclude_caches=True,
+                ),
+            )
+        ).json()
+
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.put(f"/api/jobs/{created['id']}", json={"name": "Renamed"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "Renamed"
+    assert data["source_subpath"] == "photos"
+    assert data["retain_keep_last"] == 5
+    assert data["tags"] == ["daily"]
+    assert data["timeout_hours"] == 12
+    assert data["exclude_caches"] is True
+    assert data["schedule_value"] == "6h"
+
+
+async def test_update_job_without_check_fields_keeps_check_config(client):
+    """Regression: the edit form historically did not send check_* fields and
+    every save silently reset them to defaults. A payload omitting check_*
+    must leave the stored integrity-check configuration untouched."""
+    with patch("os.path.isdir", return_value=True):
+        created = (
+            await client.post(
+                "/api/jobs",
+                json=make_job_payload(
+                    check_enabled=True,
+                    check_mode="subset",
+                    check_subset_percent=10,
+                    check_timeout_hours=6,
+                ),
+            )
+        ).json()
+    assert created["check_enabled"] is True
+
+    # A full form-like payload that omits every check_* key.
+    update = make_job_payload(name="Edited")
+    update.pop("restic_password")
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.put(f"/api/jobs/{created['id']}", json=update)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["check_enabled"] is True
+    assert data["check_mode"] == "subset"
+    assert data["check_subset_percent"] == 10
+    assert data["check_timeout_hours"] == 6
+
+
+async def test_update_job_explicit_null_on_non_nullable_field_rejected(client):
+    """Explicit null means 'clear this value' — but only nullable fields can
+    be cleared. Null on a required column must 422, not crash on commit."""
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    resp = await client.put(f"/api/jobs/{created['id']}", json={"name": None})
+    assert resp.status_code == 422
+    assert "name" in resp.json()["detail"].lower()
+
+
+async def test_update_job_schedule_value_validated_against_stored_type(client):
+    """A partial update of schedule_value alone must be validated against the
+    stored schedule_type — otherwise an invalid value lands in the DB and
+    crashes scheduler registration."""
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    resp = await client.put(
+        f"/api/jobs/{created['id']}", json={"schedule_value": "bogus"}
+    )
+    assert resp.status_code == 422
+
+    with patch("os.path.isdir", return_value=True):
+        ok = await client.put(
+            f"/api/jobs/{created['id']}", json={"schedule_value": "12h"}
+        )
+    assert ok.status_code == 200
+    assert ok.json()["schedule_value"] == "12h"
+
+
+async def test_update_job_schedule_type_change_requires_valid_pair(client):
+    """Switching schedule_type without a matching schedule_value must 422 —
+    the stored '6h' interval value is not a valid cron expression."""
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    resp = await client.put(
+        f"/api/jobs/{created['id']}", json={"schedule_type": "cron"}
+    )
+    assert resp.status_code == 422
+
+
 async def test_update_job_not_found(client):
     resp = await client.put(f"/api/jobs/{uuid.uuid4()}", json=make_job_payload())
     assert resp.status_code == 404
@@ -518,7 +670,11 @@ async def test_trigger_run_creates_running_row(client, engine):
     assert run.status == RunStatus.running
 
 
-async def test_trigger_run_overlapping_returns_skipped(client):
+async def test_trigger_run_overlapping_returns_409(client):
+    """Manual trigger during an in-flight run returns 409 so the UI can tell
+    the user a run is already active (the documented contract), while a
+    skipped/overlapping_run audit row is still recorded."""
+    from app.db.models import RunReason, RunStatus
     from app.services import backup_runner
 
     with patch("os.path.isdir", return_value=True):
@@ -529,13 +685,18 @@ async def test_trigger_run_overlapping_returns_skipped(client):
     try:
         with patch("app.services.backup_runner.run_backup"):
             resp = await client.post(f"/api/jobs/{created['id']}/run")
-        assert resp.status_code == 200
-        run_id = resp.json()["run_id"]
-
-        # The returned run_id should be a skipped row
-        assert run_id is not None
+        assert resp.status_code == 409
+        assert "in progress" in resp.json()["detail"].lower()
     finally:
         backup_runner.active_jobs.discard(job_uuid)
+
+    # The skipped audit row must still exist.
+    runs = (await client.get(f"/api/jobs/{created['id']}/runs")).json()
+    assert any(
+        r["status"] == RunStatus.skipped.value
+        and r["reason"] == RunReason.overlapping_run.value
+        for r in runs
+    )
 
 
 async def test_trigger_run_not_found(client):
@@ -590,10 +751,11 @@ async def test_trigger_prune_creates_prune_kind_row(client, engine):
     assert run.status == RunStatus.running
 
 
-async def test_trigger_prune_overlapping_returns_skipped(client):
-    """If a backup is already running for this job, the prune trigger must
-    return a skipped/overlapping_run row rather than racing against the
-    backup against the same restic repo."""
+async def test_trigger_prune_overlapping_returns_409(client):
+    """If a backup is already running for this job, the prune trigger returns
+    409 (so the UI shows 'already in progress') and records a
+    skipped/overlapping_run audit row rather than racing the backup against
+    the same restic repo."""
     from app.db.models import RunKind, RunReason, RunStatus
     from app.services import backup_runner
 
@@ -605,19 +767,19 @@ async def test_trigger_prune_overlapping_returns_skipped(client):
     try:
         with patch("app.services.backup_runner.run_prune"):
             resp = await client.post(f"/api/jobs/{created['id']}/prune")
-        assert resp.status_code == 200
-        run_id = resp.json()["run_id"]
+        assert resp.status_code == 409
+        assert "in progress" in resp.json()["detail"].lower()
     finally:
         backup_runner.active_jobs.discard(job_uuid)
 
-    # Read the row back through the runs endpoint so we don't need direct
-    # DB access from this test.
-    runs_resp = await client.get(f"/api/runs/{run_id}")
-    assert runs_resp.status_code == 200
-    body = runs_resp.json()
-    assert body["status"] == RunStatus.skipped.value
-    assert body["reason"] == RunReason.overlapping_run.value
-    assert body["kind"] == RunKind.prune.value
+    # The skipped audit row must still exist, tagged kind=prune.
+    runs = (await client.get(f"/api/jobs/{created['id']}/runs")).json()
+    assert any(
+        r["status"] == RunStatus.skipped.value
+        and r["reason"] == RunReason.overlapping_run.value
+        and r["kind"] == RunKind.prune.value
+        for r in runs
+    )
 
 
 async def test_trigger_prune_not_found(client):
@@ -661,7 +823,7 @@ async def test_trigger_check_creates_check_kind_row(client, engine):
     assert run.status == RunStatus.running
 
 
-async def test_trigger_check_overlapping_returns_skipped(client):
+async def test_trigger_check_overlapping_returns_409(client):
     from app.db.models import RunKind, RunReason, RunStatus
     from app.services import backup_runner
 
@@ -675,17 +837,18 @@ async def test_trigger_check_overlapping_returns_skipped(client):
             resp = await client.post(
                 f"/api/jobs/{created['id']}/check", json={"check_mode": "structural"}
             )
-        assert resp.status_code == 200
-        run_id = resp.json()["run_id"]
+        assert resp.status_code == 409
+        assert "in progress" in resp.json()["detail"].lower()
     finally:
         backup_runner.active_jobs.discard(job_uuid)
 
-    runs_resp = await client.get(f"/api/runs/{run_id}")
-    assert runs_resp.status_code == 200
-    body = runs_resp.json()
-    assert body["status"] == RunStatus.skipped.value
-    assert body["reason"] == RunReason.overlapping_run.value
-    assert body["kind"] == RunKind.check.value
+    runs = (await client.get(f"/api/jobs/{created['id']}/runs")).json()
+    assert any(
+        r["status"] == RunStatus.skipped.value
+        and r["reason"] == RunReason.overlapping_run.value
+        and r["kind"] == RunKind.check.value
+        for r in runs
+    )
 
 
 async def test_trigger_check_not_found(client):

@@ -138,15 +138,75 @@ class JobCreate(BaseModel):
         return self
 
 
-class JobUpdate(JobCreate):
-    """All JobCreate fields, but restic_password is optional.
+class JobUpdate(BaseModel):
+    """Partial update for a BackupJob — every field is optional.
 
-    Omitting restic_password leaves the stored password unchanged.
-    The destination_label and (after a successful run) restic_password are
-    enforced as immutable at the route layer, not here.
+    The route applies ``model_dump(exclude_unset=True)``: a field absent from
+    the payload keeps its stored value; an explicit null clears a nullable
+    field (nulls on non-nullable columns are rejected at the route).
+    restic_password is the one exception — both absent and null mean "keep
+    the stored password" (it is never echoed to the client, so the edit form
+    cannot round-trip it).
+
+    destination_label immutability, password immutability after a successful
+    run, and schedule validation against the merged (stored + updated) pair
+    are enforced at the route layer, where the stored values are available.
     """
 
-    restic_password: Optional[str] = None  # type: ignore[assignment]
+    name: Optional[str] = Field(None, max_length=128)
+    source_label: Optional[str] = None
+    source_subpath: Optional[str] = None
+    destination_label: Optional[str] = None
+    restic_password: Optional[str] = None
+    schedule_type: Optional[ScheduleType] = None
+    schedule_value: Optional[str] = None
+    enabled: Optional[bool] = None
+
+    retain_keep_last: Optional[int] = Field(None, ge=1, le=9999)
+    retain_keep_hourly: Optional[int] = Field(None, ge=1, le=9999)
+    retain_keep_daily: Optional[int] = Field(None, ge=1, le=9999)
+    retain_keep_weekly: Optional[int] = Field(None, ge=1, le=9999)
+    retain_keep_monthly: Optional[int] = Field(None, ge=1, le=9999)
+    retain_keep_yearly: Optional[int] = Field(None, ge=1, le=9999)
+    retain_keep_within: Optional[str] = None
+    retain_keep_within_hourly: Optional[str] = None
+    retain_keep_within_daily: Optional[str] = None
+    retain_keep_within_weekly: Optional[str] = None
+    retain_keep_within_monthly: Optional[str] = None
+    retain_keep_within_yearly: Optional[str] = None
+
+    exclude_patterns: Optional[List[str]] = None
+    exclude_caches: Optional[bool] = None
+    exclude_if_present: Optional[List[str]] = None
+    one_file_system: Optional[bool] = None
+    no_scan: Optional[bool] = None
+    tags: Optional[List[str]] = None
+    compression: Optional[CompressionMode] = None
+    pack_size: Optional[int] = Field(None, ge=1, le=1500)
+    read_concurrency: Optional[int] = None
+    timeout_hours: Optional[int] = None
+
+    check_enabled: Optional[bool] = None
+    check_mode: Optional[CheckMode] = None
+    check_subset_percent: Optional[int] = Field(None, ge=1, le=100)
+    check_timeout_hours: Optional[int] = None
+
+    @field_validator("source_label")
+    @classmethod
+    def validate_source_label(cls, v: Optional[str]) -> Optional[str]:
+        return v if v is None else _validate_label(v, "source_label")
+
+    @field_validator("destination_label")
+    @classmethod
+    def validate_destination_label(cls, v: Optional[str]) -> Optional[str]:
+        return v if v is None else _validate_label(v, "destination_label")
+
+    @field_validator("source_subpath")
+    @classmethod
+    def validate_source_subpath(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and "/" in v:
+            raise ValueError("source_subpath must not contain '/'")
+        return v
 
 
 class RunSummarySchema(BaseModel):

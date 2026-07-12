@@ -293,11 +293,12 @@ async def test_full_backup_lifecycle_with_verification(client: AsyncClient) -> N
     backup_runner.active_jobs.discard(uuid.UUID(job_id))
 
 
-async def test_overlapping_manual_run_creates_skipped_record(
+async def test_overlapping_manual_run_returns_409_and_records_skipped_row(
     client: AsyncClient,
 ) -> None:
-    """End-to-end overlap: when a run is in progress, a second trigger creates
-    a skipped row (per design doc §7 concurrent run guard)."""
+    """End-to-end overlap: when a run is in progress, a second manual trigger
+    returns 409 (the contract the UI pattern-matches on) while a skipped
+    audit row is still recorded (per design doc §7 concurrent run guard)."""
     with patch("os.path.isdir", return_value=True):
         create_resp = await client.post("/api/jobs", json=make_job_payload())
         assert create_resp.status_code == 201
@@ -309,15 +310,15 @@ async def test_overlapping_manual_run_creates_skipped_record(
     backup_runner.active_jobs.add(job_uuid)
     try:
         run_resp = await client.post(f"/api/jobs/{job_id}/run")
-        assert run_resp.status_code == 200
-        skipped_run_id: str = run_resp.json()["run_id"]
+        assert run_resp.status_code == 409
+        assert "in progress" in run_resp.json()["detail"].lower()
     finally:
         backup_runner.active_jobs.discard(job_uuid)
 
     # The skipped row is recorded immediately (no backup_runner involved).
-    detail_resp = await client.get(f"/api/runs/{skipped_run_id}")
-    assert detail_resp.status_code == 200
-    detail = detail_resp.json()
-    assert detail["status"] == "skipped"
-    assert detail["reason"] == "overlapping_run"
-    assert detail["triggered_by"] == "manual"
+    runs_resp = await client.get(f"/api/jobs/{job_id}/runs")
+    assert runs_resp.status_code == 200
+    skipped = [r for r in runs_resp.json() if r["status"] == "skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["reason"] == "overlapping_run"
+    assert skipped[0]["triggered_by"] == "manual"

@@ -203,6 +203,32 @@ const HELP: Record<string, FieldHelp> = {
       'Maximum hours the backup may run before it is killed and marked failed. Default: the global value from Settings (leave blank).',
     example: '12',
   },
+  checkEnabled: {
+    label: 'Scheduled integrity check',
+    optional: true,
+    description:
+      'Store an integrity-check configuration with this job (restic check). Checks are run from the Job Details page. Default: off.',
+  },
+  checkMode: {
+    label: 'Check Mode',
+    optional: true,
+    description:
+      'Options: structural | subset | full. `structural` verifies repository metadata only. `subset` reads a percentage of the pack data. `full` reads all data (slowest, most thorough).',
+    example: 'structural',
+  },
+  checkSubsetPercent: {
+    label: 'Subset Percent',
+    optional: true,
+    description: 'Percentage of pack data to read when Check Mode is `subset` (1–100).',
+    example: '5',
+  },
+  checkTimeoutHours: {
+    label: 'Check Timeout (hours)',
+    optional: true,
+    description:
+      'Maximum hours an integrity check may run before it is killed and marked failed. Default: the global value from Settings (leave blank).',
+    example: '6',
+  },
 }
 
 const inputCls = 'border rounded px-2 py-1 text-sm w-full'
@@ -271,6 +297,17 @@ export default function JobForm({
   )
   const [timeoutHoursText, setTimeoutHoursText] = useState(job?.timeout_hours?.toString() ?? '')
 
+  // Integrity verification fields — shown so an edit round-trips the full
+  // job configuration (omitting them used to silently reset check settings).
+  const [checkEnabled, setCheckEnabled] = useState(job?.check_enabled ?? false)
+  const [checkMode, setCheckMode] = useState<string>(job?.check_mode ?? '')
+  const [checkSubsetText, setCheckSubsetText] = useState(
+    job?.check_subset_percent?.toString() ?? ''
+  )
+  const [checkTimeoutText, setCheckTimeoutText] = useState(
+    job?.check_timeout_hours?.toString() ?? ''
+  )
+
   // Error state
   const [submitError, setSubmitError] = useState<string | null>(null)
 
@@ -318,6 +355,11 @@ export default function JobForm({
       pack_size: packSizeText ? parseInt(packSizeText) : null,
       read_concurrency: readConcurrencyText ? parseInt(readConcurrencyText) : null,
       timeout_hours: timeoutHoursText ? parseInt(timeoutHoursText) : null,
+      check_enabled: checkEnabled,
+      check_mode: checkMode || null,
+      check_subset_percent:
+        checkMode === 'subset' && checkSubsetText ? parseInt(checkSubsetText) : null,
+      check_timeout_hours: checkTimeoutText ? parseInt(checkTimeoutText) : null,
     })
   }
 
@@ -442,8 +484,8 @@ export default function JobForm({
               )}
               {destinationLabel && (
                 <p className="text-muted-foreground text-xs mt-1">
-                  ⚠️ The root directory of destination <code>{destinationLabel}</code> must contain a{' '}
-                  <code>.billa_gates_check</code> file.
+                  ⚠️ The root directory of destination <code>{destinationLabel}</code> must contain
+                  a <code>.billa_gates_check</code> file.
                 </p>
               )}
               {isEdit && (
@@ -736,7 +778,68 @@ export default function JobForm({
           </div>
         </section>
 
+        <section>
+          <h2 className="text-base font-semibold mb-3">Integrity Verification</h2>
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <input
+                id="check-enabled"
+                type="checkbox"
+                checked={checkEnabled}
+                onChange={(e) => setCheckEnabled(e.target.checked)}
+                aria-describedby={helpId('check-enabled')}
+              />
+              <FieldLabel htmlFor="check-enabled" help={HELP.checkEnabled} variant="inline" />
+            </div>
 
+            <div>
+              <FieldLabel htmlFor="check-mode" help={HELP.checkMode} />
+              <select
+                id="check-mode"
+                value={checkMode}
+                onChange={(e) => setCheckMode(e.target.value)}
+                aria-describedby={helpId('check-mode')}
+                className={`${inputCls} bg-background`}
+              >
+                <option value="">Not configured</option>
+                <option value="structural">structural</option>
+                <option value="subset">subset</option>
+                <option value="full">full</option>
+              </select>
+            </div>
+
+            {checkMode === 'subset' && (
+              <div>
+                <FieldLabel htmlFor="check-subset-percent" help={HELP.checkSubsetPercent} />
+                <input
+                  id="check-subset-percent"
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={checkSubsetText}
+                  onChange={(e) => setCheckSubsetText(e.target.value)}
+                  placeholder="5"
+                  aria-describedby={helpId('check-subset-percent')}
+                  className={inputCls}
+                />
+              </div>
+            )}
+
+            <div>
+              <FieldLabel htmlFor="check-timeout-hours" help={HELP.checkTimeoutHours} />
+              <input
+                id="check-timeout-hours"
+                type="number"
+                min={1}
+                value={checkTimeoutText}
+                onChange={(e) => setCheckTimeoutText(e.target.value)}
+                placeholder="24"
+                aria-describedby={helpId('check-timeout-hours')}
+                className={inputCls}
+              />
+            </div>
+          </div>
+        </section>
 
         <button
           type="submit"

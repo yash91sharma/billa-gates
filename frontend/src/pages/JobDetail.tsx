@@ -220,7 +220,17 @@ export default function JobDetail() {
             setIsEditing((v) => !v)
           }}
           aria-pressed={isEditing}
-          className="border px-3 py-1 rounded text-sm"
+          // A live run reads job fields mid-pipeline and the backend rejects
+          // PUT with 409 — don't offer an edit that can only fail. The run
+          // must be stopped first. (Kept clickable while already editing so
+          // the form can still be closed.)
+          disabled={!!activeRun && !isEditing}
+          title={
+            activeRun && !isEditing
+              ? 'A run is in progress — stop it before editing this job.'
+              : undefined
+          }
+          className="border px-3 py-1 rounded text-sm disabled:opacity-50"
         >
           {isEditing ? 'Cancel Edit' : 'Edit'}
         </button>

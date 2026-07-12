@@ -491,6 +491,24 @@ describe('JobDetail', () => {
       )
       expect(screen.getByRole('form')).toBeInTheDocument()
     })
+
+    it('disables the Edit button while a run is active (cancel first)', async () => {
+      // The backend rejects PUT with 409 during a live run; the UI must not
+      // offer an edit that can only fail — the run can only be stopped.
+      vi.mocked(api.getJobRuns).mockResolvedValue([
+        makeRun({ id: 'run-live', status: 'running', check_status: null }),
+      ])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() => expect(screen.getByRole('button', { name: /stop/i })).toBeInTheDocument())
+      expect(screen.getByRole('button', { name: /^edit$/i })).toBeDisabled()
+    })
+
+    it('enables the Edit button when no run is active', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([makeRun({ status: 'success' })])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() => screen.getByRole('button', { name: /^edit$/i }))
+      expect(screen.getByRole('button', { name: /^edit$/i })).not.toBeDisabled()
+    })
   })
 
   describe('runs list statistics columns', () => {
@@ -618,7 +636,9 @@ describe('JobDetail', () => {
       await user.click(btn)
 
       await waitFor(() => {
-        expect(screen.getByRole('heading', { name: /trigger integrity check/i })).toBeInTheDocument()
+        expect(
+          screen.getByRole('heading', { name: /trigger integrity check/i })
+        ).toBeInTheDocument()
         expect(screen.getByLabelText(/check mode/i)).toBeInTheDocument()
         expect(screen.getByLabelText(/check timeout/i)).toBeInTheDocument()
       })
@@ -650,7 +670,7 @@ describe('JobDetail', () => {
       await waitFor(() => screen.getByLabelText(/check mode/i))
       const modeSelect = screen.getByLabelText(/check mode/i)
       await user.selectOptions(modeSelect, 'subset')
-      
+
       const percentInput = screen.getByLabelText(/subset percent/i)
       await user.clear(percentInput)
       await user.type(percentInput, '10')

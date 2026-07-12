@@ -267,6 +267,63 @@ async def trigger_prune(
     return run_id_str
 
 
+async def _finalize_if_canceled(
+    factory: async_sessionmaker[AsyncSession],
+    job_name: str,
+    run_id: uuid.UUID,
+    *,
+    kind_label: str,
+) -> bool:
+    """Finalize a prune/check run row as canceled if the cancel flag is set.
+
+    Counterpart of run_backup's inner ``_was_canceled`` for the standalone
+    prune and check pipelines: the cancel endpoint sets the flag and SIGTERMs
+    the subprocess for *any* running run, so these pipelines must record the
+    user's stop click as ``canceled/user_canceled`` — not as a failed run
+    with the terminated process's stderr as the error. Clears the flag so
+    the registry set stays bounded. Returns True when the row was finalized;
+    the caller must then return immediately.
+    """
+    if not process_registry.is_canceled(run_id):
+        return False
+
+    now: datetime = datetime.now(timezone.utc)
+    duration: int = 0
+    async with factory() as s:
+        run: BackupRun | None = await s.get(BackupRun, str(run_id))
+        if run is not None:
+            run.status = RunStatus.canceled
+            run.reason = RunReason.user_canceled
+            run.finished_at = now
+            run.duration_seconds = int(
+                (now.replace(tzinfo=None) - run.started_at).total_seconds()
+            )
+            if not run.prune_status:
+                run.prune_status = PruneStatus.skipped
+            if not run.check_status:
+                run.check_status = CheckStatus.skipped
+            if not run.error_output:
+                run.error_output = "Canceled by user."
+            duration = run.duration_seconds or 0
+            await s.commit()
+
+    # Mirror the backup pipeline's cancel notification (notify_on_warning).
+    async with factory() as s:
+        settings_obj: AppSettings | None = await s.get(AppSettings, 1)
+    if settings_obj and settings_obj.notify_on_warning and settings_obj.ntfy_topic:
+        await _try_notify(
+            settings_obj.ntfy_server_url,
+            settings_obj.ntfy_topic,
+            f"{kind_label} canceled: {job_name}",
+            f"Duration: {duration}s — canceled by user.",
+            token=settings_obj.ntfy_token,
+        )
+
+    process_registry.clear_canceled(run_id)
+    logger.info(f"run_id={run_id} status=canceled reason=user_canceled")
+    return True
+
+
 async def run_prune(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
     """Execute `restic prune` for a job's repo and finalize the run row.
 
@@ -309,9 +366,16 @@ async def run_prune(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         prune_timeout: int = (job.timeout_hours or default_timeout) * 3600
         repo_path: str = f"/destinations/{job.destination_label}/{str(job_id)}"
 
+        # A cancel that lands before the subprocess spawns must stop the
+        # (possibly hours-long) prune from starting at all.
+        if await _finalize_if_canceled(factory, job.name, run_id, kind_label="Prune"):
+            return
+
         rc, _, prune_err = await restic.restic_prune(
             repo_path, job.restic_password, prune_timeout, run_id=run_id
         )
+        if await _finalize_if_canceled(factory, job.name, run_id, kind_label="Prune"):
+            return
 
         now: datetime = datetime.now(timezone.utc)
         async with factory() as s:
@@ -521,6 +585,13 @@ async def run_check(
         check_timeout: int = hours * 3600
         repo_path: str = f"/destinations/{job.destination_label}/{str(job_id)}"
 
+        # A cancel that lands before the subprocess spawns must stop the
+        # check (and its start notification) from firing at all.
+        if await _finalize_if_canceled(
+            factory, job.name, run_id, kind_label="Verification"
+        ):
+            return
+
         if notify_on_verification and ntfy_topic:
             await _try_notify(
                 ntfy_server_url,
@@ -538,6 +609,10 @@ async def run_check(
             check_timeout,
             run_id=run_id,
         )
+        if await _finalize_if_canceled(
+            factory, job.name, run_id, kind_label="Verification"
+        ):
+            return
 
         now: datetime = datetime.now(timezone.utc)
         async with factory() as s:

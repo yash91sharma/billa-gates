@@ -22,6 +22,7 @@ from app.api.schemas.jobs import (
     JobUpdate,
     RunSummarySchema,
     SnapshotResponse,
+    _validate_schedule_value,
 )
 from app.core import fs
 from app.core import scheduler as scheduler_module
@@ -30,6 +31,7 @@ from app.db.models import (
     AppSettings,
     BackupJob,
     BackupRun,
+    RunReason,
     RunStatus,
     TriggeredBy,
 )
@@ -55,6 +57,52 @@ async def _get_job_or_404(job_id: str, session: AsyncSession) -> BackupJob:
     if job is None:
         raise HTTPException(status_code=404, detail="Not found")
     return job
+
+
+@log_call
+async def _ensure_no_active_run(job_id: str, session: AsyncSession) -> None:
+    """Raise HTTP 409 when a run is currently live for this job.
+
+    Mirrors trigger_run's dual check: the in-memory active_jobs set covers
+    runs dispatched by this process; a status=running DB row covers the
+    window between row creation and pipeline start. Editing a job mid-run
+    would race the pipeline, which re-reads job fields (paths, password,
+    retention) between steps.
+    """
+    if uuid.UUID(job_id) in backup_runner.active_jobs:
+        raise HTTPException(
+            status_code=409,
+            detail="A run is in progress for this job; cancel it before editing.",
+        )
+    result = await session.execute(
+        select(BackupRun)
+        .where(BackupRun.job_id == job_id, BackupRun.status == RunStatus.running)
+        .limit(1)
+    )
+    if result.scalars().first() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="A run is in progress for this job; cancel it before editing.",
+        )
+
+
+async def _raise_409_if_overlapping(run_id: str, session: AsyncSession) -> None:
+    """Translate a skipped/overlapping_run trigger result into HTTP 409.
+
+    The trigger functions record a skipped audit row (kept — it documents
+    the attempt) and return its id; the manual API contract is 409 so the
+    UI can tell the user a run is already active.
+    """
+    run = await session.get(BackupRun, run_id)
+    if (
+        run is not None
+        and run.status == RunStatus.skipped
+        and run.reason == RunReason.overlapping_run
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="A run is already in progress for this job",
+        )
 
 
 @log_call
@@ -283,55 +331,93 @@ async def update_job(
     body: JobUpdate,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    """Update a BackupJob.
+    """Update a BackupJob (partial update).
 
-    Enforces immutability rules:
-    - destination_label cannot be changed after creation.
-    - restic_password cannot be changed after the job has a successful run.
+    Fields absent from the payload keep their stored values; an explicit
+    null clears a nullable field. Rejected outright:
+    - editing while a run is in progress (409 — cancel the run first),
+    - changing destination_label (permanently immutable),
+    - changing restic_password after the job has a successful run,
+    - explicit null on a non-nullable field,
+    - a merged schedule_type/schedule_value pair that is invalid.
     """
     job = await _get_job_or_404(job_id, session)
 
+    # A live run reads job fields between pipeline steps — editing under it
+    # would race the pipeline. The user must cancel the run first.
+    await _ensure_no_active_run(job_id, session)
+
+    # Only fields the client actually sent take effect (partial update).
+    update_data = body.model_dump(exclude_unset=True)
+
+    # restic_password: absent and explicit null both mean "keep the stored
+    # password" (it is never echoed to the client, so the form cannot
+    # round-trip it).
+    if update_data.get("restic_password") is None:
+        update_data.pop("restic_password", None)
+
+    # Explicit null is only a valid "clear" instruction for nullable columns.
+    for field, value in update_data.items():
+        column = BackupJob.__table__.columns.get(field)
+        if value is None and column is not None and not column.nullable:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{field} cannot be null",
+            )
+
     # Destination label is permanently immutable.
-    if body.destination_label != job.destination_label:
+    if (
+        "destination_label" in update_data
+        and update_data["destination_label"] != job.destination_label
+    ):
         raise HTTPException(
             status_code=422,
             detail="destination_label cannot be changed after job creation",
         )
 
     # Password is immutable once the restic repo has a successful backup.
-    if body.restic_password is not None and await _has_successful_run(job_id, session):
+    if "restic_password" in update_data and await _has_successful_run(job_id, session):
         raise HTTPException(
             status_code=422,
             detail="restic_password cannot be changed after a successful backup run",
         )
 
-    # Uniqueness check comes before mount validation so a conflict returns 409
-    # even when the mount is not present (avoids a misleading 422).
+    # Validate the merged schedule pair — a partial edit of either half must
+    # not leave an invalid combination in the DB (it would crash scheduler
+    # registration).
+    if "schedule_type" in update_data or "schedule_value" in update_data:
+        effective_type = update_data.get("schedule_type", job.schedule_type)
+        effective_value = update_data.get("schedule_value", job.schedule_value)
+        try:
+            _validate_schedule_value(effective_type, effective_value)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+    # Uniqueness check (on merged values) comes before mount validation so a
+    # conflict returns 409 even when the mount is not present (avoids a
+    # misleading 422).
     await _check_duplicate(
-        body.source_label,
-        body.source_subpath,
-        body.destination_label,
+        update_data.get("source_label", job.source_label),
+        update_data.get("source_subpath", job.source_subpath),
+        update_data.get("destination_label", job.destination_label),
         session,
         exclude_id=job_id,
     )
 
     # Re-validate source mount only when the label actually changes.
-    if body.source_label != job.source_label:
+    if (
+        "source_label" in update_data
+        and update_data["source_label"] != job.source_label
+    ):
+        new_source = update_data["source_label"]
         if not await fs.run_probe(
-            os.path.isdir, f"{_SOURCES_ROOT}/{body.source_label}", default=False
+            os.path.isdir, f"{_SOURCES_ROOT}/{new_source}", default=False
         ):
             raise HTTPException(
                 status_code=422,
-                detail=f"Source mount '/sources/{body.source_label}' is not mounted",
+                detail=f"Source mount '/sources/{new_source}' is not mounted",
             )
 
-    # Apply the full payload — the edit form always sends every field, and an
-    # explicit null means "clear this value". restic_password is the one
-    # exception: null means "keep the stored password" (it is never echoed to
-    # the client, so the form cannot round-trip it).
-    update_data = body.model_dump()
-    if update_data.get("restic_password") is None:
-        update_data.pop("restic_password", None)
     for field, value in update_data.items():
         setattr(job, field, value)
 
@@ -400,8 +486,8 @@ async def trigger_run(
     Delegates to :func:`backup_runner.trigger_run` which holds the single
     per-job critical section shared by manual and scheduled triggers. If a
     run is already in flight (in-memory active_jobs or a `status=running` DB
-    row), a skipped/overlapping_run row is created instead of firing a
-    duplicate backup.
+    row), a skipped/overlapping_run audit row is recorded and this endpoint
+    returns 409 so the UI can tell the user a run is already active.
     """
     await _get_job_or_404(job_id, session)
     job_uuid = uuid.UUID(job_id)
@@ -411,6 +497,7 @@ async def trigger_run(
     # None if the job vanished mid-request — surface that as 404 too.
     if run_id is None:
         raise HTTPException(status_code=404, detail="Not found")
+    await _raise_409_if_overlapping(run_id, session)
     return {"run_id": run_id}
 
 
@@ -431,8 +518,9 @@ async def trigger_prune(
     is invoked here on operator demand.
 
     Shares the per-job lock + active_jobs set with backup runs, so a prune
-    triggered while a backup is in flight (or vice versa) is recorded as
-    a skipped/overlapping_run row instead of racing against the same repo.
+    triggered while a backup is in flight (or vice versa) is recorded as a
+    skipped/overlapping_run audit row and rejected with 409 instead of
+    racing against the same repo.
     """
     await _get_job_or_404(job_id, session)
     job_uuid = uuid.UUID(job_id)
@@ -442,6 +530,7 @@ async def trigger_prune(
     # between the existence check and the trigger.
     if run_id is None:
         raise HTTPException(status_code=404, detail="Not found")
+    await _raise_409_if_overlapping(run_id, session)
     return {"run_id": run_id}
 
 
@@ -468,6 +557,7 @@ async def trigger_check(
     )
     if run_id is None:
         raise HTTPException(status_code=404, detail="Not found")
+    await _raise_409_if_overlapping(run_id, session)
     return {"run_id": run_id}
 
 
