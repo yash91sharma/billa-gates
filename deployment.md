@@ -124,15 +124,65 @@ schema, then boots `uvicorn` on port 12345. Open the UI at
 
 ---
 
-## 6. Auto build and deploy
+## 6. Cutting a new version (auto build & deploy)
 
-It builds for ARM by default.
+Pushing a `vX.Y.Z` git tag triggers `.github/workflows/docker-publish.yml`,
+which builds the image (ARM64 by default) and pushes it to Docker Hub as
+both `billa-gates:X.Y.Z` and `billa-gates:latest`. Nothing is published by
+pushing to a branch — **only tags trigger a build.**
 
+The version must be bumped in three places that stay in lockstep:
+`frontend/package.json`, `frontend/package-lock.json`, and the git tag.
+Do **not** hand-edit these. Use `npm version`, which updates both files,
+creates the release commit, and creates the matching `vX.Y.Z` tag in one
+step (npm prefixes tags with `v` by default, which is exactly what the
+workflow listens for).
+
+```bash
+cd frontend
+
+# Pick ONE, based on the nature of the change (semver):
+npm version patch    # 1.0.6 -> 1.0.7  (bug fixes)
+npm version minor    # 1.0.6 -> 1.1.0  (new features, backwards-compatible)
+npm version major    # 1.0.6 -> 2.0.0  (breaking changes)
 ```
-git tag vX.Y.Z
 
+That single command:
+
+1. Updates `version` in `frontend/package.json` **and** `frontend/package-lock.json`.
+2. Creates a git commit containing those two changes.
+3. Creates an annotated git tag `vX.Y.Z` pointing at that commit.
+
+Then push the commit **and** the tag. Pushing the tag is what kicks off the
+Docker Hub build:
+
+```bash
+git push               # push the version-bump commit
+git push --tags        # push the new vX.Y.Z tag -> triggers the build
+```
+
+> [!NOTE]
+> `npm version` requires a clean working tree — commit or stash unrelated
+> changes first, or it will refuse to run. Watch the build under the repo's
+> **Actions** tab; when it's green, `billa-gates:latest` (and the pinned
+> `X.Y.Z` tag) are live on Docker Hub. On the host, `docker compose pull &&
+> docker compose up -d` to roll the running container onto the new image.
+
+### Manual fallback
+
+If you ever need to bump without letting npm touch git (e.g. bundling the
+version change into a larger commit), split the two steps:
+
+```bash
+cd frontend
+npm version patch --no-git-tag-version   # edits package.json + package-lock.json only
+# ... commit the files yourself, then tag manually:
+git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
+
+Keep the tag's `X.Y.Z` identical to the `version` field you wrote, otherwise
+the Docker Hub image tag and the app's reported version will disagree.
 
 ---
 
