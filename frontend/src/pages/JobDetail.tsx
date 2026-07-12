@@ -6,7 +6,7 @@ import RunStatusBadge from '../components/RunStatusBadge'
 import TriggeredByIcon from '../components/TriggeredByIcon'
 import * as api from '../lib/api'
 import type { BackupRun } from '../lib/types'
-import { formatBytes } from '../lib/utils'
+import { formatBytes, parseApiError, type ConflictingJob } from '../lib/utils'
 import {
   Dialog,
   DialogContent,
@@ -32,6 +32,7 @@ export default function JobDetail() {
   const [unlockError, setUnlockError] = useState<string | null>(null)
   const [isEditing, setIsEditing] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
+  const [editConflict, setEditConflict] = useState<ConflictingJob | null>(null)
   const [isCheckModalOpen, setIsCheckModalOpen] = useState(false)
   const [checkMode, setCheckMode] = useState<'structural' | 'subset' | 'full'>('structural')
   const [checkSubsetPercent, setCheckSubsetPercent] = useState('5')
@@ -164,8 +165,8 @@ export default function JobDetail() {
       if (status === 409) {
         setCheckError('A run is already in progress for this job.')
       } else {
-        const detail = (err as { data?: { detail?: string } }).data?.detail
-        setCheckError(detail || 'Failed to trigger integrity check.')
+        const { message } = parseApiError(err)
+        setCheckError(message || 'Failed to trigger integrity check.')
       }
     }
   }
@@ -217,6 +218,7 @@ export default function JobDetail() {
         <button
           onClick={() => {
             setEditError(null)
+            setEditConflict(null)
             setIsEditing((v) => !v)
           }}
           aria-pressed={isEditing}
@@ -267,20 +269,26 @@ export default function JobDetail() {
             job={job}
             sourceMounts={sourceMounts ?? []}
             destinationMounts={destinationMounts ?? []}
+            conflictingJob={editConflict ?? undefined}
             onSubmit={async (data) => {
               setEditError(null)
+              setEditConflict(null)
               try {
                 await api.updateJob(job.id, data)
                 // Pull a fresh copy so the header + tabs reflect the change.
                 await queryClient.invalidateQueries({ queryKey: ['job', id] })
                 setIsEditing(false)
               } catch (err: unknown) {
-                const detail = (err as { data?: { detail?: string } }).data?.detail
-                setEditError(detail || 'Failed to save changes.')
+                // The duplicate-job 409 nests an object in detail; parseApiError
+                // flattens it (rendering it raw would crash React).
+                const { message, conflictingJob } = parseApiError(err)
+                setEditError(message || 'Failed to save changes.')
+                setEditConflict(conflictingJob)
               }
             }}
             onCancel={() => {
               setEditError(null)
+              setEditConflict(null)
               setIsEditing(false)
             }}
           />

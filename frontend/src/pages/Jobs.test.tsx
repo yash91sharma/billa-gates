@@ -283,6 +283,37 @@ describe('Jobs', () => {
       expect(screen.getByRole('form')).toBeInTheDocument()
     })
 
+    it('shows the message and conflicting-job link when create fails with a duplicate 409', async () => {
+      // The duplicate-job 409 nests an OBJECT in detail — rendering it
+      // directly as a React child crashes the whole app (blank page).
+      const user = userEvent.setup()
+      vi.mocked(api.createJob).mockRejectedValue(
+        Object.assign(new Error('Conflict'), {
+          status: 409,
+          data: {
+            detail: {
+              message:
+                'A job with the same source label, source subpath, ' +
+                'and destination label already exists',
+              conflicting_job_id: 'job-9',
+              conflicting_job_name: 'Existing Job',
+            },
+          },
+        })
+      )
+      renderWithProviders(<Jobs />)
+      await waitFor(() => screen.getByRole('button', { name: /create.*job|new.*job/i }))
+      await user.click(screen.getByRole('button', { name: /create.*job|new.*job/i }))
+      const form = await screen.findByRole('form')
+      await user.click(within(form).getByRole('button', { name: /save|create|submit/i }))
+      await waitFor(() => {
+        expect(screen.getByText(/already exists/i)).toBeInTheDocument()
+      })
+      const conflictLink = screen.getByRole('link', { name: 'Existing Job' })
+      expect(conflictLink).toHaveAttribute('href', '/jobs/job-9')
+      expect(screen.getByRole('form')).toBeInTheDocument()
+    })
+
     it('populates source and destination dropdowns from the mounts API', async () => {
       const user = userEvent.setup()
       renderWithProviders(<Jobs />)

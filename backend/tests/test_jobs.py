@@ -355,6 +355,68 @@ async def test_update_job_password_immutable_after_success(client, db_session, e
     assert "restic_password" in resp.json()["detail"].lower()
 
 
+async def test_update_job_password_immutable_after_warning_run(client, engine):
+    """A warning run (restic rc=3, partial backup) has already initialized the
+    repo and written a snapshot keyed to the stored password. Allowing a
+    password change here strands the repo on the old password — every later
+    backup fails with rc=12 and the existing snapshots are only readable with
+    a password the user may have discarded."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        run = BackupRun(
+            id=str(uuid.uuid4()),
+            job_id=created["id"],
+            status=RunStatus.warning,
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    update = make_job_payload(restic_password="newpassword")
+    resp = await client.put(f"/api/jobs/{created['id']}", json=update)
+    assert resp.status_code == 422
+    assert "restic_password" in resp.json()["detail"].lower()
+
+
+async def test_update_job_password_immutable_after_run_with_snapshot(client, engine):
+    """Any run that recorded a snapshot_id proves the repo is keyed to the
+    stored password, regardless of the run's final status."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        run = BackupRun(
+            id=str(uuid.uuid4()),
+            job_id=created["id"],
+            status=RunStatus.failed,
+            snapshot_id="abc123def456",
+            triggered_by=TriggeredBy.manual,
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    update = make_job_payload(restic_password="newpassword")
+    resp = await client.put(f"/api/jobs/{created['id']}", json=update)
+    assert resp.status_code == 422
+    assert "restic_password" in resp.json()["detail"].lower()
+
+
 async def test_update_job_password_editable_before_success(client):
     with patch("os.path.isdir", return_value=True):
         created = (await client.post("/api/jobs", json=make_job_payload())).json()
@@ -1198,6 +1260,35 @@ async def test_list_jobs_has_successful_run_true_when_success_exists(client, eng
     resp = await client.get("/api/jobs")
     job = next(j for j in resp.json() if j["id"] == created["id"])
     assert job["has_successful_run"] is True
+
+
+async def test_has_successful_run_true_after_warning_run(client, engine):
+    """has_successful_run drives the password-lock state in the edit form.
+    A warning run wrote a snapshot, so the lock must engage — otherwise the
+    UI invites a password change that breaks every future backup."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        run = BackupRun(
+            id=str(uuid.uuid4()),
+            job_id=created["id"],
+            status=RunStatus.warning,
+            triggered_by=TriggeredBy.scheduler,
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+        )
+        s.add(run)
+        await s.commit()
+
+    resp = await client.get(f"/api/jobs/{created['id']}")
+    assert resp.status_code == 200
+    assert resp.json()["has_successful_run"] is True
 
 
 async def test_has_successful_run_false_when_only_failed_run(client, engine):

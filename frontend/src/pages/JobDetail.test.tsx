@@ -492,6 +492,38 @@ describe('JobDetail', () => {
       expect(screen.getByRole('form')).toBeInTheDocument()
     })
 
+    it('shows the message and conflicting-job link when update fails with a duplicate 409', async () => {
+      // The duplicate-job 409 nests an OBJECT in detail — rendering it
+      // directly as a React child crashes the whole app (blank page).
+      const user = userEvent.setup()
+      vi.mocked(api.updateJob).mockRejectedValue(
+        Object.assign(new Error('Conflict'), {
+          status: 409,
+          data: {
+            detail: {
+              message:
+                'A job with the same source label, source subpath, ' +
+                'and destination label already exists',
+              conflicting_job_id: 'job-9',
+              conflicting_job_name: 'Existing Job',
+            },
+          },
+        })
+      )
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() => screen.getByRole('button', { name: /edit/i }))
+      await user.click(screen.getByRole('button', { name: /edit/i }))
+      const form = await screen.findByRole('form')
+      const submitBtn = Array.from(form.querySelectorAll('button')).find((b) =>
+        /save|create|submit/i.test(b.textContent ?? '')
+      )!
+      await user.click(submitBtn)
+      await waitFor(() => expect(screen.getByText(/already exists/i)).toBeInTheDocument())
+      const conflictLink = screen.getByRole('link', { name: 'Existing Job' })
+      expect(conflictLink).toHaveAttribute('href', '/jobs/job-9')
+      expect(screen.getByRole('form')).toBeInTheDocument()
+    })
+
     it('disables the Edit button while a run is active (cancel first)', async () => {
       // The backend rejects PUT with 409 during a live run; the UI must not
       // offer an edit that can only fail — the run can only be stopped.

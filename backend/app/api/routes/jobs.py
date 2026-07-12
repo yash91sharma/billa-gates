@@ -11,7 +11,7 @@ from typing import Any, List, Sequence
 
 from apscheduler.jobstores.base import JobLookupError
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_session
@@ -106,14 +106,30 @@ async def _raise_409_if_overlapping(run_id: str, session: AsyncSession) -> None:
 
 
 @log_call
-async def _has_successful_run(job_id: str, session: AsyncSession) -> bool:
-    """Return True if the job has at least one run with status=success."""
+async def _password_locked(job_id: str, session: AsyncSession) -> bool:
+    """Return True once the job's restic repo is keyed to the stored password.
+
+    A run that ended success OR warning (restic rc=3 — partial backup, but the
+    snapshot was saved) has initialized the repo; any run that recorded a
+    snapshot_id proves the same regardless of its final status. After that
+    point a password change would strand the repo on the old password: every
+    later backup fails with rc=12 (wrong password) and the existing snapshots
+    are only readable with a password the user may have discarded. Exposed to
+    the UI as `has_successful_run`, which drives the password-lock state on
+    the edit form.
+    """
     result = await session.execute(
         select(BackupRun)
-        .where(BackupRun.job_id == job_id, BackupRun.status == RunStatus.success)
+        .where(
+            BackupRun.job_id == job_id,
+            or_(
+                BackupRun.status.in_([RunStatus.success, RunStatus.warning]),
+                BackupRun.snapshot_id.is_not(None),
+            ),
+        )
         .limit(1)
     )
-    return result.scalar_one_or_none() is not None
+    return result.scalars().first() is not None
 
 
 @log_call
@@ -150,7 +166,7 @@ async def _build_job_response(
     return {
         **{c.key: getattr(job, c.key) for c in job.__table__.columns},
         "restic_password": None,
-        "has_successful_run": await _has_successful_run(job.id, session),
+        "has_successful_run": await _password_locked(job.id, session),
         "next_run_time": _next_run_time(job.id),
         "last_run": await _last_run(job.id, session),
     }
@@ -337,7 +353,8 @@ async def update_job(
     null clears a nullable field. Rejected outright:
     - editing while a run is in progress (409 — cancel the run first),
     - changing destination_label (permanently immutable),
-    - changing restic_password after the job has a successful run,
+    - changing restic_password after a run has written to the repo
+      (success/warning status or a recorded snapshot),
     - explicit null on a non-nullable field,
     - a merged schedule_type/schedule_value pair that is invalid.
     """
@@ -375,11 +392,16 @@ async def update_job(
             detail="destination_label cannot be changed after job creation",
         )
 
-    # Password is immutable once the restic repo has a successful backup.
-    if "restic_password" in update_data and await _has_successful_run(job_id, session):
+    # Password is immutable once any run has written to the restic repo
+    # (success or warning status, or a recorded snapshot) — the repo is keyed
+    # to the stored password from that point on.
+    if "restic_password" in update_data and await _password_locked(job_id, session):
         raise HTTPException(
             status_code=422,
-            detail="restic_password cannot be changed after a successful backup run",
+            detail=(
+                "restic_password cannot be changed after a backup has written "
+                "to the repository"
+            ),
         )
 
     # Validate the merged schedule pair — a partial edit of either half must

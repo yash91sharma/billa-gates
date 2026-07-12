@@ -5,6 +5,7 @@ import JobForm from '../components/JobForm'
 import RunStatusBadge from '../components/RunStatusBadge'
 import * as api from '../lib/api'
 import type { BackupJob } from '../lib/types'
+import { parseApiError, type ConflictingJob } from '../lib/utils'
 
 export default function Jobs() {
   const navigate = useNavigate()
@@ -13,6 +14,7 @@ export default function Jobs() {
   const [runError, setRunError] = useState<string | null>(null)
   const [showCreateForm, setShowCreateForm] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+  const [createConflict, setCreateConflict] = useState<ConflictingJob | null>(null)
 
   const {
     data: jobs,
@@ -207,20 +209,26 @@ export default function Jobs() {
           <JobForm
             sourceMounts={sourceMounts ?? []}
             destinationMounts={destinationMounts ?? []}
+            conflictingJob={createConflict ?? undefined}
             onSubmit={async (data) => {
               setCreateError(null)
+              setCreateConflict(null)
               try {
                 await api.createJob(data)
                 setShowCreateForm(false)
                 refetch()
               } catch (err: unknown) {
-                // Surface 422 detail strings from the BE; fall back to a generic message.
-                const detail = (err as { data?: { detail?: string } }).data?.detail
-                setCreateError(detail || 'Failed to create job.')
+                // Surface backend detail strings; the duplicate-job 409 nests
+                // an object, which parseApiError flattens (rendering it raw
+                // would crash React).
+                const { message, conflictingJob } = parseApiError(err)
+                setCreateError(message || 'Failed to create job.')
+                setCreateConflict(conflictingJob)
               }
             }}
             onCancel={() => {
               setCreateError(null)
+              setCreateConflict(null)
               setShowCreateForm(false)
             }}
           />

@@ -53,7 +53,7 @@ const HELP: Record<string, FieldHelp> = {
   password: {
     label: 'Password',
     description:
-      'Encryption password for this job’s restic repository. Cannot be changed after the first successful backup — use `restic key add/remove` to rotate.',
+      'Encryption password for this job’s restic repository. Cannot be changed after a backup has written to the repository — use `restic key add/remove` to rotate.',
     example: 'a long, unique passphrase',
   },
   enabled: {
@@ -516,8 +516,8 @@ export default function JobForm({
               />
               {passwordLocked ? (
                 <p className="text-muted-foreground text-xs mt-1">
-                  🔒 Password cannot change after the first successful backup. To rotate, use{' '}
-                  <code>restic key</code>.
+                  🔒 Password cannot change after a backup has written to the repository. To rotate,
+                  use <code>restic key</code>.
                 </p>
               ) : (
                 isEdit && (
