@@ -11,7 +11,11 @@ from app.db.models import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False: the default (True) silences every
+    # already-created logger. When migrations run inside the app process
+    # (tests invoke alembic programmatically), that would permanently
+    # disable all app.* loggers created before this point.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

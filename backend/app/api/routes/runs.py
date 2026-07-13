@@ -1,6 +1,5 @@
 """FastAPI routes for BackupRun history and detail."""
 
-import asyncio
 import uuid
 from typing import List
 
@@ -12,6 +11,7 @@ from app.api.deps import get_session
 from app.api.schemas.jobs import RunSummarySchema
 from app.api.schemas.runs import RunDetailSchema
 from app.core.logging import log_call
+from app.core.tasks import create_tracked_task
 from app.db.models import BackupJob, BackupRun, RunStatus
 from app.services import process_registry
 
@@ -102,6 +102,7 @@ async def cancel_run(
     process_registry.mark_canceled(run_uuid)
     # Fire-and-forget the SIGTERM so the API returns immediately. The grace
     # window inside _terminate_then_kill is up to 10s; blocking the request
-    # on that would make the UI feel sluggish.
-    asyncio.create_task(process_registry.terminate(run_uuid))
+    # on that would make the UI feel sluggish. Spawned via the tracked-task
+    # registry — an untracked task can be garbage-collected before it runs.
+    create_tracked_task(process_registry.terminate(run_uuid))
     return Response(status_code=202)

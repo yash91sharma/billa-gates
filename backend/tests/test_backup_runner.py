@@ -3184,3 +3184,85 @@ async def test_run_backup_fails_on_parent_lookup_failure(engine):
 
     # Verify backup was not invoked
     assert backup_called is False
+
+
+# ── background task tracking ──────────────────────────────────────────────────
+# The event loop holds only weak references to tasks; a fire-and-forget
+# pipeline task with no strong reference can be garbage-collected mid-backup,
+# stranding the run row at status=running and locking the job out of every
+# future trigger. The trigger functions must therefore dispatch through
+# app.core.tasks.create_tracked_task, which keeps a strong reference until
+# the task completes.
+
+
+async def _assert_dispatch_is_tracked(pipeline_patch_target, trigger):
+    """Drive a trigger function whose pipeline is parked on an event and
+    assert its task sits in the strong-reference registry until released.
+
+    The pipeline patch must stay active for the whole task lifetime — the
+    background task resolves the pipeline function only after the trigger
+    call has already returned.
+    """
+    from app.core import tasks
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_pipeline(*args, **kwargs):
+        started.set()
+        await release.wait()
+
+    tasks._background_tasks.clear()
+    try:
+        with patch(
+            pipeline_patch_target,
+            new=AsyncMock(side_effect=blocking_pipeline),
+        ):
+            run_id = await trigger()
+            assert run_id is not None
+            await asyncio.wait_for(started.wait(), timeout=2.0)
+
+            assert len(tasks._background_tasks) == 1
+            tracked = next(iter(tasks._background_tasks))
+
+            release.set()
+            await asyncio.wait_for(tracked, timeout=2.0)
+            await asyncio.sleep(0)
+
+        assert len(tasks._background_tasks) == 0
+    finally:
+        release.set()
+        tasks._background_tasks.clear()
+
+
+async def test_trigger_run_pipeline_task_is_tracked(engine):
+    from app.db.models import TriggeredBy
+
+    await _setup_job(engine)
+    await _assert_dispatch_is_tracked(
+        "app.services.backup_runner.run_backup",
+        lambda: trigger_run(JOB_ID, TriggeredBy.manual),
+    )
+    assert JOB_ID not in active_jobs
+
+
+async def test_trigger_prune_pipeline_task_is_tracked(engine):
+    from app.db.models import TriggeredBy
+
+    await _setup_job(engine)
+    await _assert_dispatch_is_tracked(
+        "app.services.backup_runner.run_prune",
+        lambda: trigger_prune(JOB_ID, TriggeredBy.manual),
+    )
+    assert JOB_ID not in active_jobs
+
+
+async def test_trigger_check_pipeline_task_is_tracked(engine):
+    from app.db.models import TriggeredBy
+
+    await _setup_job(engine)
+    await _assert_dispatch_is_tracked(
+        "app.services.backup_runner.run_check",
+        lambda: trigger_check(JOB_ID, TriggeredBy.manual),
+    )
+    assert JOB_ID not in active_jobs

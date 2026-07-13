@@ -705,3 +705,62 @@ async def test_run_check_canceled_sends_warning_notification(engine):
     assert any("canceled" in t.lower() for t in titles), (
         f"No canceled notification fired. Titles: {titles}"
     )
+
+
+async def test_cancel_endpoint_terminate_task_is_tracked(client, engine):
+    """The fire-and-forget SIGTERM task must be spawned through
+    app.core.tasks.create_tracked_task — an untracked task holds only a weak
+    reference in the event loop and can be garbage-collected before it ever
+    sends the signal, turning the user's Stop click into a silent no-op."""
+    from app.core import tasks
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+    from app.services import process_registry
+
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.post(
+            "/api/jobs",
+            json={
+                "name": "Tracked Cancel Job",
+                "source_label": "docs",
+                "destination_label": "main",
+                "restic_password": "pw",
+                "schedule_type": "interval",
+                "schedule_value": "6h",
+            },
+        )
+    job_id = resp.json()["id"]
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = str(uuid.uuid4())
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=job_id,
+                status=RunStatus.running,
+                started_at=datetime.now(timezone.utc),
+                triggered_by=TriggeredBy.manual,
+            )
+        )
+        await s.commit()
+
+    process_registry._processes.clear()
+    process_registry._canceled.clear()
+    proc = _make_proc(returncode=-15)
+    process_registry.register(uuid.UUID(run_id), proc)
+
+    with patch(
+        "app.api.routes.runs.create_tracked_task",
+        side_effect=tasks.create_tracked_task,
+    ) as spawn:
+        resp = await client.post(f"/api/runs/{run_id}/cancel")
+
+    assert resp.status_code == 202
+    spawn.assert_called_once()
+    # Allow the tracked terminate() task to settle.
+    for _ in range(5):
+        await asyncio.sleep(0)
+    proc.terminate.assert_called_once()
+
+    process_registry._processes.clear()
+    process_registry._canceled.clear()

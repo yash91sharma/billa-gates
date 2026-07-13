@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core import fs
 from app.core.logging import get_logger, log_call
+from app.core.tasks import create_tracked_task
 from app.db.database import engine
 from app.db.models import (
     AppSettings,
@@ -162,7 +163,7 @@ async def trigger_run(
                 f"triggered_by={triggered_by.value} status=dispatched"
             )
 
-    asyncio.create_task(_run_with_cleanup(job_id, uuid.UUID(run_id_str)))
+    create_tracked_task(_run_with_cleanup(job_id, uuid.UUID(run_id_str)))
     return run_id_str
 
 
@@ -263,7 +264,7 @@ async def trigger_prune(
                 f"triggered_by={triggered_by.value} status=dispatched"
             )
 
-    asyncio.create_task(_prune_with_cleanup(job_id, uuid.UUID(run_id_str)))
+    create_tracked_task(_prune_with_cleanup(job_id, uuid.UUID(run_id_str)))
     return run_id_str
 
 
@@ -535,7 +536,7 @@ async def trigger_check(
                 f"triggered_by={triggered_by.value} status=dispatched"
             )
 
-    asyncio.create_task(
+    create_tracked_task(
         _check_with_cleanup(
             job_id,
             uuid.UUID(run_id_str),
