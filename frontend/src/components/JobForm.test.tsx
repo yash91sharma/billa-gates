@@ -153,6 +153,37 @@ describe('JobForm', () => {
       expect(onSubmit).not.toHaveBeenCalled()
     })
 
+    it('rejects a subpath of ".." (path traversal to the sources root)', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      await user.type(screen.getByLabelText(/subfolder|subpath/i), '..')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(screen.getByText(/subpath.*must not contain|cannot contain/i)).toBeInTheDocument()
+      expect(onSubmit).not.toHaveBeenCalled()
+    })
+
+    it('rejects a subpath of "." (resolves to the mount itself)', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      await user.type(screen.getByLabelText(/subfolder|subpath/i), '.')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(screen.getByText(/subpath.*must not contain|cannot contain/i)).toBeInTheDocument()
+      expect(onSubmit).not.toHaveBeenCalled()
+    })
+
+    it('accepts a normal subpath with dots, hyphens, and spaces', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      await user.type(screen.getByLabelText(/subfolder|subpath/i), 'photos 2024.v2-final')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ source_subpath: 'photos 2024.v2-final' })
+      )
+    })
+
     it('sends the password under the restic_password key the backend expects', async () => {
       const onSubmit = vi.fn()
       const user = userEvent.setup()

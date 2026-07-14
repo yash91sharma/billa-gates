@@ -10,7 +10,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.api.schemas.base import UTCDateTime
 from app.db.models import CheckMode, CompressionMode, ScheduleType
 
-_LABEL_RE = re.compile(r"^[^/]+$")
+# Labels and source_subpath are single path components concatenated into
+# /sources/<label>[/<subpath>] and /destinations/<label>/<job_id>. The
+# whitelist requires a leading word character (\w — unicode letters, digits,
+# underscore) so '.', '..', and hidden '.name' directories are rejected, then
+# allows word characters, spaces, inner dots, and hyphens. '/' is excluded
+# entirely, so a value can never traverse outside its mount root.
+_PATH_COMPONENT_RE = re.compile(r"^[\w][\w .-]*$")
 _INTERVAL_RE = re.compile(r"^([1-9][0-9]*)(h|d|m)$")
 
 # Minimum cron interval: 1 hour (3600 seconds).
@@ -21,9 +27,19 @@ _MIN_INTERVAL_MINUTES = 5
 
 
 def _validate_label(value: str, field_name: str) -> str:
-    """Reject labels that contain slashes or equal '..'."""
-    if "/" in value or value == "..":
-        raise ValueError(f"{field_name} must not contain '/' or be '..'")
+    """Validate a mount label or subpath as one safe path component.
+
+    Rejects the path-traversal vectors ('/', '.', '..') outright: a
+    source_subpath of '..' would resolve /sources/<label>/.. to /sources and
+    silently back up every mounted source. The remaining whitelist keeps any
+    reasonable directory name working (unicode letters and digits included).
+    """
+    if not _PATH_COMPONENT_RE.fullmatch(value):
+        raise ValueError(
+            f"{field_name} must start with a letter, digit, or underscore and "
+            f"may contain only letters, digits, underscores, spaces, dots, "
+            f"and hyphens ('/', '.', and '..' are not allowed)"
+        )
     return value
 
 
@@ -127,9 +143,7 @@ class JobCreate(BaseModel):
     @field_validator("source_subpath")
     @classmethod
     def validate_source_subpath(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None and "/" in v:
-            raise ValueError("source_subpath must not contain '/'")
-        return v
+        return v if v is None else _validate_label(v, "source_subpath")
 
     @model_validator(mode="after")
     def validate_schedule(self) -> "JobCreate":
@@ -204,9 +218,7 @@ class JobUpdate(BaseModel):
     @field_validator("source_subpath")
     @classmethod
     def validate_source_subpath(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None and "/" in v:
-            raise ValueError("source_subpath must not contain '/'")
-        return v
+        return v if v is None else _validate_label(v, "source_subpath")
 
 
 class RunSummarySchema(BaseModel):

@@ -14,6 +14,12 @@ function parseLines(text: string): string[] | null {
   return items.length === 0 ? null : items
 }
 
+// Mirrors the backend whitelist (app/api/schemas/jobs.py::_validate_label).
+// A subpath is a single path component under the source mount: '/' would
+// nest deeper, and '.' / '..' would resolve to the mount itself or escape to
+// the sources root — the backend rejects all of these with a 422.
+const SUBPATH_RE = /^[\p{L}\p{N}_][\p{L}\p{N}_ .-]*$/u
+
 // Split a comma-separated input into a string array, or null when empty.
 function parseCsv(text: string): string[] | null {
   const items = text
@@ -319,8 +325,11 @@ export default function JobForm({
     e.preventDefault()
     setSubmitError(null)
 
-    if (sourceSubpath && sourceSubpath.includes('/')) {
-      setSubmitError('source_subpath must not contain "/"')
+    if (sourceSubpath && !SUBPATH_RE.test(sourceSubpath)) {
+      setSubmitError(
+        'source_subpath must not contain "/", "." or ".." — use a single folder name ' +
+          '(letters, digits, underscores, spaces, dots, and hyphens)'
+      )
       return
     }
 

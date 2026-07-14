@@ -226,6 +226,20 @@ async def test_rename_destination_invalid_new_label(client, tmp_path):
     assert resp.status_code == 422
 
 
+async def test_rename_destination_new_label_dot_or_dotdot_rejected(client, tmp_path):
+    """new_label feeds destination_label, which is concatenated into the repo
+    path — '.' and '..' would resolve outside /destinations/<label>."""
+    await _create_job(client, "docs", "main")
+    for bad in (".", ".."):
+        resp = await client.post(
+            "/api/mounts/destinations/rename",
+            json={"old_label": "main", "new_label": bad},
+        )
+        assert resp.status_code == 422, f"new_label={bad!r} was not rejected"
+        # Must be the schema validator, not the "not mounted" route check.
+        assert "new_label" in resp.json()["detail"]
+
+
 async def test_rename_destination_active_run_returns_409(client, tmp_path):
     from app.services import backup_runner
 

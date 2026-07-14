@@ -4,6 +4,8 @@ from typing import Any, Dict, List
 
 from pydantic import BaseModel, field_validator, model_validator
 
+from app.api.schemas.jobs import _validate_label
+
 
 class RenameDestinationRequest(BaseModel):
     """Payload for POST /api/mounts/destinations/rename."""
@@ -14,9 +16,9 @@ class RenameDestinationRequest(BaseModel):
     @field_validator("new_label")
     @classmethod
     def validate_new_label(cls, v: str) -> str:
-        if "/" in v or v == "..":
-            raise ValueError("new_label must not contain '/' or be '..'")
-        return v
+        # new_label becomes destination_label on every affected job, which is
+        # concatenated into the repo path — same traversal rules as job labels.
+        return _validate_label(v, "new_label")
 
     @model_validator(mode="after")
     def labels_must_differ(self) -> "RenameDestinationRequest":

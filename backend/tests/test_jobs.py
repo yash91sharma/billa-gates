@@ -74,6 +74,73 @@ async def test_create_job_invalid_source_subpath_with_slash(client):
     assert resp.status_code == 422
 
 
+# ── path traversal hardening ─────────────────────────────────────────────────
+# Labels and source_subpath become single path components under /sources and
+# /destinations. "." and ".." are the only traversal vectors left once "/" is
+# rejected: subpath ".." resolves /sources/<label>/.. to /sources, silently
+# backing up every mounted source instead of the intended one.
+
+
+async def test_create_job_invalid_source_subpath_dotdot(client):
+    # The detail assertion pins the 422 on schema validation — the mounts
+    # check also 422s when /sources is absent (as in tests), which would
+    # otherwise let this test pass without any subpath validation at all.
+    payload = make_job_payload(source_subpath="..")
+    resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+    assert "source_subpath" in resp.json()["detail"]
+
+
+async def test_create_job_invalid_source_subpath_dot(client):
+    payload = make_job_payload(source_subpath=".")
+    resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+    assert "source_subpath" in resp.json()["detail"]
+
+
+async def test_create_job_invalid_source_label_dot(client):
+    payload = make_job_payload(source_label=".")
+    resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+    assert "source_label" in resp.json()["detail"]
+
+
+async def test_create_job_invalid_destination_label_dot(client):
+    payload = make_job_payload(destination_label=".")
+    resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+    assert "destination_label" in resp.json()["detail"]
+
+
+async def test_create_job_invalid_source_label_leading_dot(client):
+    """Leading-dot names are rejected by the charset whitelist — they are
+    either traversal attempts or hidden directories that should not be
+    selectable as backup roots."""
+    payload = make_job_payload(source_label=".hidden")
+    resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+    assert "source_label" in resp.json()["detail"]
+
+
+async def test_create_job_label_allows_dots_hyphens_underscores_spaces(client):
+    """The whitelist must keep every reasonable mount-directory name working:
+    unicode letters/digits, underscores, inner dots, hyphens, and spaces."""
+    payload = make_job_payload(
+        source_label="my-docs_2.0", destination_label="main disk"
+    )
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 201
+
+
+async def test_update_job_invalid_source_subpath_dotdot(client):
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+    resp = await client.put(f"/api/jobs/{created['id']}", json={"source_subpath": ".."})
+    assert resp.status_code == 422
+    assert "source_subpath" in resp.json()["detail"]
+
+
 async def test_create_job_interval_too_short(client):
     payload = make_job_payload(schedule_type="interval", schedule_value="4m")
     resp = await client.post("/api/jobs", json=payload)
