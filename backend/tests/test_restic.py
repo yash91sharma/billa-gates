@@ -534,6 +534,22 @@ async def test_backup_password_never_in_stdout():
     assert PASSWORD not in stdout
 
 
+async def test_backup_password_never_in_stderr():
+    """stderr is persisted verbatim into BackupRun.error_output on failure, so
+    it needs the same password strip as stdout."""
+    err = f"Fatal: something mentioning {PASSWORD} failed"
+    proc = _make_process(1, stderr=err)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        code, stdout, stderr, summary = await restic_backup(
+            REPO,
+            PASSWORD,
+            "/sources/documents",
+            timeout_seconds=3600,
+            job_id=TEST_JOB_ID,
+        )
+    assert PASSWORD not in stderr
+
+
 # ── restic_latest_snapshot_id ────────────────────────────────────────────────
 
 

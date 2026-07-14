@@ -322,8 +322,10 @@ async def restic_backup(
     stdout_str: str = stdout.decode()
     stderr_str: str = stderr.decode()
 
-    # Strip password from stdout
+    # Strip password from both streams — stderr is persisted verbatim into
+    # BackupRun.error_output on failure, so it needs the same treatment.
     stdout_str = stdout_str.replace(password, "")
+    stderr_str = stderr_str.replace(password, "")
 
     # Parse JSON summary from last line. rc=3 is restic's "partial backup
     # completed; snapshot was created" code — the summary line is present and

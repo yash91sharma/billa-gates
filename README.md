@@ -53,6 +53,8 @@ Then open <http://localhost:12345>.
 
 ## Quirks
 
+- **Interval schedules reset on container restart**:
+  Interval schedules (`6h`, `1d`, `30m`) count from application startup, not from the last backup. Restarting the container resets the countdown, so a container that restarts more often than the interval (auto-updaters, nightly host reboots) will keep pushing the next run into the future and the job may never fire. If your container restarts frequently, use a cron schedule instead — cron fires at fixed wall-clock times and is unaffected by restarts.
 - **Mount Check Safeguards (`.billa_gates_check`)**:
   To protect against silent data loss when backing up network shares (like SMB/NFS mounts that can drop and appear empty) or external USB drives that might disconnect, Billa-Gates requires a sentinel file named `.billa_gates_check` to be present at the root of **every** mounted source folder (e.g. `/sources/documents/.billa_gates_check`) and **every** destination folder (e.g. `/destinations/main/.billa_gates_check`). If either file is missing, the backup or integrity check will fail immediately rather than running on an empty path or unmounted target.
 

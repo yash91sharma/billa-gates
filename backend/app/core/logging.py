@@ -29,14 +29,19 @@ from typing import (
     overload,
 )
 
+from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 F = TypeVar("F", bound=Callable[..., object])
 
-# Fields whose values are replaced with "***" in any logged mapping.
-SENSITIVE_FIELDS: Set[str] = {"restic_password", "ntfy_token"}
+# Names whose values are replaced with "***" wherever they appear in logged
+# data: dict keys, Pydantic model fields, keyword-argument names, and
+# positional-parameter names (the restic wrappers take the repo password as a
+# positional `password` argument; send_notification takes the ntfy token as
+# `token`).
+SENSITIVE_FIELDS: Set[str] = {"restic_password", "ntfy_token", "password", "token"}
 
 # Maximum repr length for logged return values; protects logs from being
 # flooded by large restic stdout blobs and similar.
@@ -87,7 +92,13 @@ def sanitize(data: object) -> object: ...
 
 
 def sanitize(data: object) -> object:
-    """Recursively redact sensitive keys from dicts; leave other types unchanged."""
+    """Recursively redact sensitive keys from dicts and Pydantic models;
+    leave other types unchanged."""
+    if isinstance(data, BaseModel):
+        # A model's repr prints every field (restic_password included), so it
+        # must never reach a log line as-is. Dump to a dict and recurse —
+        # the dict branch below applies the key redaction.
+        return sanitize(data.model_dump())
     if isinstance(data, dict):
         dict_data: Dict[str, object] = cast(Dict[str, object], data)
         sanitized_items: List[Tuple[str, object]] = [
@@ -113,19 +124,58 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
+def _sensitive_positions(fn: Callable[..., object]) -> Set[int]:
+    """Positional indices of parameters whose *names* are sensitive.
+
+    ``sanitize`` redacts by dict key, which covers kwargs — but the restic
+    wrappers receive the repo password positionally, where no key exists to
+    match on. Resolved once at decoration time from the function signature.
+    Returns an empty set when the signature cannot be inspected (builtins,
+    C extensions) so redaction degrades gracefully instead of breaking the
+    decorator.
+    """
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return set()
+    return {
+        i
+        for i, p in enumerate(params)
+        if p.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        and p.name in SENSITIVE_FIELDS
+    }
+
+
+def _redact_positional(
+    args: Tuple[object, ...], sensitive_positions: Set[int]
+) -> Tuple[object, ...]:
+    """Replace sensitive positional argument values with "***"."""
+    if not sensitive_positions:
+        return args
+    return tuple(
+        "***" if i in sensitive_positions else value for i, value in enumerate(args)
+    )
+
+
 def log_call(fn: F) -> F:
     """Decorator that logs entry, exit, and exceptions for any function.
 
     Works for both sync and async functions.  Sanitizes all logged args/kwargs
-    so that sensitive field values are never written to logs.
+    so that sensitive field values are never written to logs — by dict key /
+    model field / kwarg name, and by positional-parameter name (e.g. the
+    ``password`` argument of every restic wrapper).
     """
     logger: logging.Logger = get_logger(fn.__module__)
+    sensitive_positions: Set[int] = _sensitive_positions(fn)
 
     if not inspect.iscoroutinefunction(fn):
 
         @functools.wraps(fn)
         def sync_wrapper(*args: object, **kwargs: object) -> object:
-            sanitized_args: object = sanitize(args)
+            sanitized_args: object = sanitize(
+                _redact_positional(args, sensitive_positions)
+            )
             sanitized_kwargs: object = sanitize(kwargs)
             logger.debug(
                 "%s called args=%s kwargs=%s",
@@ -148,7 +198,7 @@ def log_call(fn: F) -> F:
 
     @functools.wraps(fn)
     async def async_wrapper(*args: object, **kwargs: object) -> object:
-        sanitized_args: object = sanitize(args)
+        sanitized_args: object = sanitize(_redact_positional(args, sensitive_positions))
         sanitized_kwargs: object = sanitize(kwargs)
         logger.debug(
             "%s called args=%s kwargs=%s", fn.__name__, sanitized_args, sanitized_kwargs

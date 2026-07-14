@@ -197,6 +197,145 @@ async def test_two_sequential_requests_have_isolated_request_ids(caplog):
     assert rids[1] in logged_rids
 
 
+# ── @log_call / sanitize secret redaction ────────────────────────────────────
+#
+# The restic wrappers receive the repo password as a *positional* argument
+# (e.g. restic_cat_config(repo_path, password)), and route handlers receive
+# Pydantic bodies whose repr includes restic_password / ntfy_token. Both must
+# be redacted before @log_call writes its DEBUG line — a backup tool leaking
+# the repo password into logs discloses the key that decrypts every backup.
+
+
+SECRET = "SUPER_SECRET_PW_zx9"
+
+
+def test_log_call_redacts_positional_password_argument(caplog):
+    from app.core.logging import log_call
+
+    @log_call
+    def fake_restic_call(repo_path: str, password: str, timeout_seconds: int = 60):
+        return (0, "", "")
+
+    setup_logging()
+    with caplog.at_level(logging.DEBUG):
+        fake_restic_call("/destinations/main/abc", SECRET)
+
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert SECRET not in joined
+    assert "***" in joined
+
+
+def test_log_call_redacts_password_keyword_argument(caplog):
+    from app.core.logging import log_call
+
+    @log_call
+    def fake_restic_call(repo_path: str, password: str):
+        return (0, "", "")
+
+    setup_logging()
+    with caplog.at_level(logging.DEBUG):
+        fake_restic_call("/destinations/main/abc", password=SECRET)
+
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert SECRET not in joined
+
+
+def test_log_call_redacts_token_parameter(caplog):
+    """send_notification-style functions take the ntfy token as `token`."""
+    from app.core.logging import log_call
+
+    @log_call
+    def fake_notify(server_url: str, topic: str, token: str | None = None):
+        return None
+
+    setup_logging()
+    with caplog.at_level(logging.DEBUG):
+        fake_notify("https://ntfy.sh", "topic", token=SECRET)
+        fake_notify("https://ntfy.sh", "topic", SECRET)
+
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert SECRET not in joined
+
+
+@pytest.mark.asyncio
+async def test_log_call_redacts_positional_password_on_async_functions(caplog):
+    from app.core.logging import log_call
+
+    @log_call
+    async def fake_async_restic_call(repo_path: str, password: str):
+        return (0, "", "")
+
+    setup_logging()
+    with caplog.at_level(logging.DEBUG):
+        await fake_async_restic_call("/destinations/main/abc", SECRET)
+
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert SECRET not in joined
+
+
+def test_sanitize_redacts_pydantic_model_fields():
+    from app.api.schemas.jobs import JobCreate
+    from app.core.logging import sanitize
+
+    body = JobCreate(
+        name="docs",
+        source_label="documents",
+        destination_label="main",
+        restic_password=SECRET,
+        schedule_type="interval",
+        schedule_value="6h",
+    )
+    result = sanitize(body)
+    assert isinstance(result, dict)
+    assert result["restic_password"] == "***"
+    assert result["name"] == "docs"
+    assert SECRET not in repr(result)
+
+
+def test_log_call_redacts_pydantic_body_argument(caplog):
+    """Route handlers are @log_call-decorated and receive the request body as
+    a Pydantic model — its repr must never reach the log with secrets intact."""
+    from app.api.schemas.jobs import JobCreate
+    from app.core.logging import log_call
+
+    @log_call
+    def fake_route(body: JobCreate):
+        return None
+
+    setup_logging()
+    with caplog.at_level(logging.DEBUG):
+        fake_route(
+            JobCreate(
+                name="docs",
+                source_label="documents",
+                destination_label="main",
+                restic_password=SECRET,
+                schedule_type="interval",
+                schedule_value="6h",
+            )
+        )
+
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert SECRET not in joined
+
+
+def test_log_call_still_works_on_functions_without_signature_metadata(caplog):
+    """Redaction must degrade gracefully for callables whose signature cannot
+    be inspected (builtins wrapped in partial, C extensions, *args-only)."""
+    from app.core.logging import log_call
+
+    @log_call
+    def variadic(*args, **kwargs):
+        return len(args)
+
+    setup_logging()
+    with caplog.at_level(logging.DEBUG):
+        assert variadic("a", "b") == 2
+
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert "variadic called" in joined
+
+
 # ── @log_call return value truncation ────────────────────────────────────────
 
 
