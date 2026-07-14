@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, cast
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core import fs
@@ -758,6 +758,34 @@ def _format_backup_error(rc: int, json_errors: List[str], stderr: str) -> str:
     return "\n".join(parts)
 
 
+@log_call
+async def _job_has_repo_history(
+    factory: async_sessionmaker[AsyncSession], job_id: str
+) -> bool:
+    """True once any run has written to this job's restic repository.
+
+    Same condition as the API layer's password lock
+    (app/api/routes/jobs.py::_password_locked): a run that finished
+    success or warning (restic rc=3 still saves a snapshot), or any run
+    that recorded a snapshot_id, proves the repo existed and held data.
+    Used to distinguish a genuine first run (rc=10 → init) from a repo
+    that has gone missing (rc=10 → fail loudly, never re-init).
+    """
+    async with factory() as s:
+        result = await s.execute(
+            select(BackupRun)
+            .where(
+                BackupRun.job_id == job_id,
+                or_(
+                    BackupRun.status.in_([RunStatus.success, RunStatus.warning]),
+                    BackupRun.snapshot_id.is_not(None),
+                ),
+            )
+            .limit(1)
+        )
+        return result.scalars().first() is not None
+
+
 async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
     """12-step backup lifecycle orchestration.
 
@@ -1082,6 +1110,26 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
             return
 
         if rc == RESTIC_RC_REPO_NOT_FOUND:
+            # rc=10 is only a legitimate first-run signal when the job has
+            # never written to its repo. With prior history, a missing repo
+            # means the destination was swapped, wiped, or renamed without
+            # moving the data — the sentinel mount check cannot catch this
+            # because the mount itself is healthy. Re-initializing here
+            # would silently start an empty repo while the user believes
+            # their snapshot history is intact.
+            if await _job_has_repo_history(factory, str(job_id)):
+                await _fail_init_check(
+                    f"Repository not found at '{repo_path}' (restic exit "
+                    f"code 10), but this job has previous backups — an "
+                    f"existing repository should be present. Refusing to "
+                    f"initialize a new, empty repository over the job's "
+                    f"history. If the backup disk was replaced or the "
+                    f"destination folder was renamed or moved, move the "
+                    f"existing repository directory to this path before "
+                    f"running again.\n\nrestic stderr: {stderr}",
+                    log_tag="repo_missing_with_history",
+                )
+                return
             logger.info(
                 f"job_id={job_id} run_id={current_run_id} step=init_check "
                 f"repo_not_found initializing"

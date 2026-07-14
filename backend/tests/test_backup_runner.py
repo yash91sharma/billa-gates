@@ -3266,3 +3266,198 @@ async def test_trigger_check_pipeline_task_is_tracked(engine):
         lambda: trigger_check(JOB_ID, TriggeredBy.manual),
     )
     assert JOB_ID not in active_jobs
+
+
+# ── Step 4: repo-not-found guard against silent re-initialization ────────────
+# rc=10 ("repository does not exist") is only a legitimate first-run signal
+# when the job has never written to its repo. Once the job has history (a
+# success/warning run, or any run that recorded a snapshot_id), a missing
+# repo means the destination was swapped, wiped, or renamed without moving
+# the data — re-initializing would silently start an empty repo while the
+# user believes their history is intact. The runner must fail loudly instead.
+
+
+async def _add_finished_run(engine, status, snapshot_id=None):
+    """Insert a finished prior run row for JOB_ID."""
+    from app.db.models import BackupRun, TriggeredBy
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=str(uuid.uuid4()),
+                job_id=str(JOB_ID),
+                status=status,
+                triggered_by=TriggeredBy.manual,
+                started_at=now,
+                finished_at=now,
+                snapshot_id=snapshot_id,
+            )
+        )
+        await s.commit()
+
+
+async def _run_repo_missing_pipeline(engine, run_id):
+    """Drive run_backup with cat_config→rc=10 and spies on init/backup.
+
+    Returns (init_called, backup_called) flags."""
+    init_called = {"v": False}
+    backup_called = {"v": False}
+
+    async def fake_init(*args, **kwargs):
+        init_called["v"] = True
+        return (0, "created repo", "")
+
+    async def fake_backup(*args, **kwargs):
+        backup_called["v"] = True
+        return (0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY)
+
+    with (
+        patch(
+            "app.services.restic.restic_cat_config",
+            return_value=(10, "", "Fatal: unable to open config file"),
+        ),
+        patch("app.services.restic.restic_init", side_effect=fake_init),
+        patch("app.services.restic.restic_backup", side_effect=fake_backup),
+        patch("app.services.restic.restic_unlock", return_value=(0, "", "")),
+        patch("app.services.restic.restic_forget", return_value=(0, "", "")),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    return init_called["v"], backup_called["v"]
+
+
+async def _make_running_row(engine):
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+    return run_id
+
+
+async def test_step4_repo_missing_with_success_history_refuses_init(engine):
+    """A job with a prior successful run must NOT re-init a missing repo:
+    the run fails with an explanatory message and no restic write happens."""
+    from app.db.models import RunStatus
+
+    await _setup_job(engine)
+    await _add_finished_run(engine, RunStatus.success, snapshot_id="a" * 64)
+    run_id = await _make_running_row(engine)
+
+    init_called, backup_called = await _run_repo_missing_pipeline(engine, run_id)
+
+    assert init_called is False
+    assert backup_called is False
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert run.prune_status == PruneStatus.skipped
+    assert run.check_status == CheckStatus.skipped
+    assert run.error_output is not None
+    assert "not found" in run.error_output.lower()
+    assert "refus" in run.error_output.lower()  # "refusing to initialize"
+    # The message must point at the expected repo path so the operator can act.
+    assert f"/destinations/main/{JOB_ID}" in run.error_output
+
+
+async def test_step4_repo_missing_with_warning_history_refuses_init(engine):
+    """A prior warning run (rc=3 — snapshot still saved) also counts as
+    repo history; re-init must be refused."""
+    from app.db.models import RunStatus
+
+    await _setup_job(engine)
+    await _add_finished_run(engine, RunStatus.warning)
+    run_id = await _make_running_row(engine)
+
+    init_called, backup_called = await _run_repo_missing_pipeline(engine, run_id)
+
+    assert init_called is False
+    assert backup_called is False
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+
+
+async def test_step4_repo_missing_with_snapshot_history_refuses_init(engine):
+    """A prior failed run that still recorded a snapshot_id proves the repo
+    was written to; re-init must be refused."""
+    from app.db.models import RunStatus
+
+    await _setup_job(engine)
+    await _add_finished_run(engine, RunStatus.failed, snapshot_id="b" * 64)
+    run_id = await _make_running_row(engine)
+
+    init_called, backup_called = await _run_repo_missing_pipeline(engine, run_id)
+
+    assert init_called is False
+    assert backup_called is False
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+
+
+async def test_step4_repo_missing_with_only_failed_history_still_inits(engine):
+    """Prior failed runs with no snapshot never wrote to the repo — rc=10 is
+    a genuine first run and init must proceed (existing behavior kept)."""
+    from app.db.models import RunStatus
+
+    await _setup_job(engine)
+    await _add_finished_run(engine, RunStatus.failed)
+    run_id = await _make_running_row(engine)
+
+    init_called, backup_called = await _run_repo_missing_pipeline(engine, run_id)
+
+    assert init_called is True
+    assert backup_called is True
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.success
+
+
+async def test_step4_repo_missing_with_history_sends_failure_notification(engine):
+    """The refused re-init must notify the operator when notify_on_failure
+    is enabled — this is exactly the 'my backups silently stopped being
+    real' scenario notifications exist for."""
+    from app.db.models import AppSettings, RunStatus
+
+    await _setup_job(engine)
+    await _add_finished_run(engine, RunStatus.success, snapshot_id="c" * 64)
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        settings = await s.get(AppSettings, 1)
+        assert settings is not None
+        settings.ntfy_topic = "alerts"
+        await s.commit()
+
+    run_id = await _make_running_row(engine)
+
+    notify_called = {"v": False}
+
+    async def fake_notify(url, topic, title, message, **kwargs):
+        if "failed" in title.lower() and topic == "alerts":
+            notify_called["v"] = True
+
+    with (
+        patch(
+            "app.services.restic.restic_cat_config",
+            return_value=(10, "", "Fatal: unable to open config file"),
+        ),
+        patch("app.services.restic.restic_init", return_value=(0, "", "")),
+        patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert notify_called["v"] is True
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert "refus" in (run.error_output or "").lower()
