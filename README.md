@@ -41,7 +41,7 @@ docker run -d \
   -e TZ=America/New_York \
   -v billa-gates-data:/app/data \
   -v /path/to/back/up:/sources/documents:ro \
-  -v /path/to/restic/repo:/destinations/main \
+  -v /path/to/backup/drive:/destinations/main \
   yash91sharma/billa-gates:latest
 ```
 

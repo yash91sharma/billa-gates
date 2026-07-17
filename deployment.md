@@ -19,8 +19,6 @@ docker build --build-arg RESTIC_ARCH=amd64 -t billa-gates:latest .
 
 `RESTIC_VERSION` defaults to the version pinned in the `Dockerfile`.
 
-Expected final image size: **~196 MB**.
-
 ---
 
 ## 2. Create the host data directory

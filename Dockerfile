@@ -3,7 +3,7 @@
 # Production image for billa-gates.
 #
 # Four stages; only artifacts from stages 1–3 land in the final image
-# (no node, no pip, no build tools). Expected final image: ~165–190 MB.
+# (no node, no pip, no build tools).
 #
 # Build:
 #   docker build --build-arg RESTIC_ARCH=arm64 -t billa-gates .
