@@ -70,12 +70,10 @@ def _clear_snapshot_cache():
 # ── args ──────────────────────────────────────────────────────────────────────
 
 
-async def test_list_snapshots_passes_tag_no_lock_and_json_flags():
-    """Every call must include `--json`, `--no-lock`, and `--tag job:<id>`.
-    --no-lock matters because the listing is read-only and must not be blocked
-    by a concurrent backup or a stale lock file (gaps.md C4-Alt). --tag scopes
-    the result to this job so unrelated snapshots from other jobs in the same
-    repo never appear in the response."""
+async def test_list_snapshots_passes_no_lock_and_json_flags():
+    """Every call must include `--json` and `--no-lock`. --no-lock matters
+    because the listing is read-only and must not be blocked by a concurrent
+    backup or a stale lock file (gaps.md C4-Alt)."""
     proc = _make_process(0, stdout=_RESTIC_SNAPSHOTS_JSON)
     captured: dict = {}
 
@@ -84,16 +82,31 @@ async def test_list_snapshots_passes_tag_no_lock_and_json_flags():
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+        await list_snapshots(REPO, PASSWORD, use_cache=False)
 
     args_list = list(captured["args"])
     assert "snapshots" in args_list
     assert "--json" in args_list
     assert "--no-lock" in args_list
-    tag_indexes = [i for i, a in enumerate(args_list) if a == "--tag"]
-    assert any(args_list[i + 1] == f"job:{JOB_ID}" for i in tag_indexes), (
-        f"Expected --tag job:{JOB_ID} in args, got {args_list}"
-    )
+
+
+async def test_list_snapshots_applies_no_tag_filter():
+    """The repo belongs to one job, so the listing must not filter by tag.
+
+    Filtering would hide every snapshot taken before the current job row
+    existed — which is exactly the history a recreated job is meant to adopt.
+    """
+    proc = _make_process(0, stdout=_RESTIC_SNAPSHOTS_JSON)
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = args
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await list_snapshots(REPO, PASSWORD, use_cache=False)
+
+    assert "--tag" not in list(captured["args"])
 
 
 async def test_list_snapshots_passes_env_vars():
@@ -105,7 +118,7 @@ async def test_list_snapshots_passes_env_vars():
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+        await list_snapshots(REPO, PASSWORD, use_cache=False)
 
     env = captured["kwargs"].get("env", {})
     assert env.get("RESTIC_REPOSITORY") == REPO
@@ -122,7 +135,7 @@ async def test_list_snapshots_returns_normalized_dicts():
     schema do not leak into the API contract."""
     proc = _make_process(0, stdout=_RESTIC_SNAPSHOTS_JSON)
     with patch("asyncio.create_subprocess_exec", return_value=proc):
-        result = await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+        result = await list_snapshots(REPO, PASSWORD, use_cache=False)
 
     assert len(result) == 2
     first = result[0]
@@ -144,7 +157,7 @@ async def test_list_snapshots_handles_empty_array():
     an error."""
     proc = _make_process(0, stdout="[]")
     with patch("asyncio.create_subprocess_exec", return_value=proc):
-        result = await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+        result = await list_snapshots(REPO, PASSWORD, use_cache=False)
     assert result == []
 
 
@@ -163,7 +176,7 @@ async def test_list_snapshots_handles_missing_optional_fields():
     )
     proc = _make_process(0, stdout=minimal)
     with patch("asyncio.create_subprocess_exec", return_value=proc):
-        result = await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+        result = await list_snapshots(REPO, PASSWORD, use_cache=False)
     assert len(result) == 1
     assert result[0]["tags"] is None
     assert result[0]["size_bytes"] is None
@@ -180,7 +193,7 @@ async def test_list_snapshots_raises_on_nonzero_rc():
     proc = _make_process(1, stderr="Fatal: unable to open repo")
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         with pytest.raises(SnapshotListingError):
-            await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+            await list_snapshots(REPO, PASSWORD, use_cache=False)
 
 
 async def test_list_snapshots_raises_on_malformed_json():
@@ -190,7 +203,7 @@ async def test_list_snapshots_raises_on_malformed_json():
     proc = _make_process(0, stdout="not-json-at-all")
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         with pytest.raises(SnapshotListingError):
-            await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+            await list_snapshots(REPO, PASSWORD, use_cache=False)
 
 
 async def test_list_snapshots_times_out():
@@ -212,9 +225,7 @@ async def test_list_snapshots_times_out():
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         with patch("asyncio.wait_for", side_effect=fake_wait_for):
             with pytest.raises(SnapshotListingError) as exc_info:
-                await list_snapshots(
-                    REPO, PASSWORD, job_id=JOB_ID, timeout_seconds=1, use_cache=False
-                )
+                await list_snapshots(REPO, PASSWORD, timeout_seconds=1, use_cache=False)
 
     assert "timed out" in str(exc_info.value).lower()
     proc.terminate.assert_called_once()
@@ -235,8 +246,8 @@ async def test_list_snapshots_cache_hit_within_ttl_skips_restic():
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        first = await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
-        second = await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
+        first = await list_snapshots(REPO, PASSWORD, ttl_seconds=30)
+        second = await list_snapshots(REPO, PASSWORD, ttl_seconds=30)
 
     assert call_count["n"] == 1, "second call within TTL must use cache"
     assert first == second
@@ -262,9 +273,9 @@ async def test_list_snapshots_cache_miss_after_ttl_expires():
         patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
         patch.object(snapshot_listing, "_monotonic", fake_monotonic),
     ):
-        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
+        await list_snapshots(REPO, PASSWORD, ttl_seconds=30)
         fake_now["t"] += 31  # 1s past TTL
-        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
+        await list_snapshots(REPO, PASSWORD, ttl_seconds=30)
 
     assert call_count["n"] == 2, "cache must miss after TTL expires"
 
@@ -302,8 +313,8 @@ async def test_list_snapshots_cache_keyed_by_repo_path():
         return _make_process(0, stdout=out)
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        res_a = await list_snapshots("/destinations/A", PASSWORD, job_id=JOB_ID)
-        res_b = await list_snapshots("/destinations/B", PASSWORD, job_id=JOB_ID)
+        res_a = await list_snapshots("/destinations/A", PASSWORD)
+        res_b = await list_snapshots("/destinations/B", PASSWORD)
 
     assert res_a[0]["snapshot_id"] == "a" * 64
     assert res_b[0]["snapshot_id"] == "b" * 64
@@ -323,9 +334,9 @@ async def test_clear_cache_forces_next_call_to_restic():
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
+        await list_snapshots(REPO, PASSWORD, ttl_seconds=30)
         _clear_cache()
-        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
+        await list_snapshots(REPO, PASSWORD, ttl_seconds=30)
 
     assert call_count["n"] == 2
 
@@ -342,8 +353,8 @@ async def test_list_snapshots_use_cache_false_bypasses_cache():
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
-        await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, use_cache=False)
+        await list_snapshots(REPO, PASSWORD, use_cache=False)
+        await list_snapshots(REPO, PASSWORD, use_cache=False)
 
     assert call_count["n"] == 2
 
@@ -362,9 +373,9 @@ async def test_failed_calls_are_not_cached():
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         with pytest.raises(SnapshotListingError):
-            await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
+            await list_snapshots(REPO, PASSWORD, ttl_seconds=30)
         # Immediate retry — must hit restic again, not return cached failure.
-        result = await list_snapshots(REPO, PASSWORD, job_id=JOB_ID, ttl_seconds=30)
+        result = await list_snapshots(REPO, PASSWORD, ttl_seconds=30)
 
     assert call_count["n"] == 2
     assert len(result) == 2

@@ -47,7 +47,6 @@ const makeJob = (overrides: Partial<BackupJob> = {}): BackupJob => ({
   updated_at: '2024-01-01T00:00:00Z',
   next_run_time: '2024-01-15T16:00:00Z',
   last_run: null,
-  has_successful_run: false,
   ...overrides,
 })
 
@@ -215,20 +214,50 @@ describe('Jobs', () => {
       renderWithProviders(<Jobs />)
       await waitFor(() => screen.getByText('Test Job'))
       await user.click(screen.getByRole('button', { name: /delete/i }))
-      await waitFor(() =>
-        expect(screen.getByText(/confirm|are you sure|cannot be undone/i)).toBeInTheDocument()
-      )
+      await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument())
+      expect(screen.getByText(/are you sure/i)).toBeInTheDocument()
     })
 
-    it('calls deleteJob after confirming deletion', async () => {
+    it('calls deleteJob keeping the repository by default', async () => {
       const user = userEvent.setup()
       vi.mocked(api.listJobs).mockResolvedValue([makeJob({ id: 'job-1', name: 'Test Job' })])
       renderWithProviders(<Jobs />)
       await waitFor(() => screen.getByText('Test Job'))
       await user.click(screen.getByRole('button', { name: /delete/i }))
-      await waitFor(() => screen.getByText(/confirm|are you sure/i))
-      await user.click(screen.getByRole('button', { name: /confirm|yes.*delete|delete.*job/i }))
-      expect(vi.mocked(api.deleteJob)).toHaveBeenCalledWith('job-1')
+      await waitFor(() => screen.getByText(/are you sure/i))
+      await user.click(screen.getByRole('button', { name: /yes.*delete/i }))
+      expect(vi.mocked(api.deleteJob)).toHaveBeenCalledWith('job-1', false)
+    })
+
+    it('calls deleteJob with delete_repository when the checkbox is ticked', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.listJobs).mockResolvedValue([makeJob({ id: 'job-1', name: 'Test Job' })])
+      renderWithProviders(<Jobs />)
+      await waitFor(() => screen.getByText('Test Job'))
+      await user.click(screen.getByRole('button', { name: /delete/i }))
+      await waitFor(() => screen.getByText(/are you sure/i))
+      await user.click(screen.getByRole('checkbox', { name: /also permanently delete/i }))
+      await user.click(screen.getByRole('button', { name: /yes.*delete/i }))
+      expect(vi.mocked(api.deleteJob)).toHaveBeenCalledWith('job-1', true)
+    })
+
+    it('resets the delete-repository checkbox between jobs', async () => {
+      // A value carried over from a previous dialog would destroy a
+      // repository the user never agreed to delete.
+      const user = userEvent.setup()
+      vi.mocked(api.listJobs).mockResolvedValue([
+        makeJob({ id: 'job-1', name: 'First' }),
+        makeJob({ id: 'job-2', name: 'Second' }),
+      ])
+      renderWithProviders(<Jobs />)
+      await waitFor(() => screen.getByText('First'))
+
+      await user.click(screen.getAllByRole('button', { name: /^delete$/i })[0])
+      await user.click(screen.getByRole('checkbox', { name: /also permanently delete/i }))
+      await user.click(screen.getByRole('button', { name: /cancel/i }))
+
+      await user.click(screen.getAllByRole('button', { name: /^delete$/i })[1])
+      expect(screen.getByRole('checkbox', { name: /also permanently delete/i })).not.toBeChecked()
     })
 
     it('does not call deleteJob when cancel is clicked', async () => {
@@ -250,7 +279,21 @@ describe('Jobs', () => {
       renderWithProviders(<Jobs />)
       await waitFor(() => screen.getByText('Important Backup'))
       await user.click(screen.getByRole('button', { name: /delete/i }))
-      await waitFor(() => expect(screen.getByText(/Important Backup/)).toBeInTheDocument())
+      // The name appears both in the prose and in the repository path.
+      const dialog = await screen.findByRole('dialog')
+      expect(within(dialog).getAllByText(/Important Backup/).length).toBeGreaterThan(0)
+    })
+
+    it('shows the repository path that will be kept or deleted', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.listJobs).mockResolvedValue([
+        makeJob({ id: 'job-1', name: 'photos', destination_label: 'main' }),
+      ])
+      renderWithProviders(<Jobs />)
+      await waitFor(() => screen.getByText('photos'))
+      await user.click(screen.getByRole('button', { name: /delete/i }))
+      const dialog = await screen.findByRole('dialog')
+      expect(within(dialog).getByText('/destinations/main/photos')).toBeInTheDocument()
     })
   })
 
@@ -276,6 +319,7 @@ describe('Jobs', () => {
       await user.click(screen.getByRole('button', { name: /create.*job|new.*job/i }))
       const form = await screen.findByRole('form')
       // Submit the form (the page also has a "Create Job" button — scope to the form).
+      await user.type(within(form).getByLabelText(/name/i), 'Test Job')
       await user.click(within(form).getByRole('button', { name: /save|create|submit/i }))
       await waitFor(() => {
         expect(screen.getByText(/restic_password.*required/i)).toBeInTheDocument()
@@ -305,6 +349,7 @@ describe('Jobs', () => {
       await waitFor(() => screen.getByRole('button', { name: /create.*job|new.*job/i }))
       await user.click(screen.getByRole('button', { name: /create.*job|new.*job/i }))
       const form = await screen.findByRole('form')
+      await user.type(within(form).getByLabelText(/name/i), 'Test Job')
       await user.click(within(form).getByRole('button', { name: /save|create|submit/i }))
       await waitFor(() => {
         expect(screen.getByText(/already exists/i)).toBeInTheDocument()

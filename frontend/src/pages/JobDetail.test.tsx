@@ -47,7 +47,6 @@ const makeJob = (overrides: Partial<BackupJob> = {}): BackupJob => ({
   updated_at: '2024-01-01T00:00:00Z',
   next_run_time: '2024-01-15T16:00:00Z',
   last_run: null,
-  has_successful_run: false,
   ...overrides,
 })
 
@@ -325,11 +324,16 @@ describe('JobDetail', () => {
       )
     })
 
-    it('shows the correct repository path containing the destination label and job ID', async () => {
+    it('shows the repository path built from the destination label and job name', async () => {
+      // The path is keyed on the job's name, not its id — that is what makes
+      // it reconstructible by hand after the database is gone.
       renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
       await waitFor(() => screen.getByText(/restic restore|restic snapshots/i))
       const snippetEl = screen.getByText(/restic restore|restic snapshots/i).closest('pre')
-      expect(snippetEl?.textContent).toContain('export RESTIC_REPOSITORY=/destinations/main/job-1')
+      expect(snippetEl?.textContent).toContain(
+        'export RESTIC_REPOSITORY=/destinations/main/My Documents'
+      )
+      expect(snippetEl?.textContent).not.toContain('job-1')
     })
 
     it('never shows the real restic password in the restore snippet', async () => {
@@ -451,10 +455,10 @@ describe('JobDetail', () => {
       await waitFor(() => screen.getByRole('button', { name: /edit/i }))
       await user.click(screen.getByRole('button', { name: /edit/i }))
       const form = await screen.findByRole('form')
-      // Change the name then submit.
-      const nameInput = screen.getByLabelText(/name/i) as HTMLInputElement
-      await user.clear(nameInput)
-      await user.type(nameInput, 'Renamed Job')
+      // Edit a mutable field — the name is locked because it addresses the
+      // repository directory (see 'locks the name field in edit mode').
+      const tagsInput = screen.getByLabelText(/tags/i) as HTMLInputElement
+      await user.type(tagsInput, 'weekly')
       // Use the form-scoped submit button (header has its own Edit button).
       const submitBtn = Array.from(form.querySelectorAll('button')).find((b) =>
         /save|create|submit/i.test(b.textContent ?? '')
@@ -463,7 +467,7 @@ describe('JobDetail', () => {
       await waitFor(() =>
         expect(vi.mocked(api.updateJob)).toHaveBeenCalledWith(
           'job-1',
-          expect.objectContaining({ name: 'Renamed Job' })
+          expect.objectContaining({ name: 'My Documents', tags: ['weekly'] })
         )
       )
       // Form closes on success.

@@ -60,6 +60,29 @@ def _mock_restic_latest_snapshot_id(request):
 
 
 @pytest.fixture(autouse=True)
+def _mock_ensure_repository(request):
+    """Stub repo provisioning so POST /api/jobs never shells out to restic.
+
+    Job creation now initializes the repository (see
+    app/services/repository.py::ensure_repository), so without this every
+    create test would run a real `restic cat config`/`restic init` against
+    /destinations. Tests that assert on provisioning patch it themselves;
+    repository's own unit tests opt out.
+    """
+    if "test_repository" in request.module.__name__:
+        yield
+        return
+
+    from app.services.repository import RepoOutcome
+
+    with patch(
+        "app.services.repository.ensure_repository",
+        return_value=(RepoOutcome.initialized, ""),
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_backup_runner_concurrency_state():
     """Reset module-level concurrency state between tests.
 

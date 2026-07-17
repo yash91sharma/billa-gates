@@ -73,16 +73,21 @@ async def list_snapshots(
     repo_path: str,
     password: str,
     *,
-    job_id: str,
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
     ttl_seconds: int = _DEFAULT_TTL_SECONDS,
     use_cache: bool = True,
 ) -> List[Dict[str, Any]]:
-    """List snapshots in `repo_path` scoped to this job via the `job:<id>` tag.
+    """List every snapshot in `repo_path`.
 
-    Calls `restic snapshots --json --tag job:<id> --no-lock`. `--no-lock` is
-    safe for snapshot listing (read-only against the index) and avoids being
-    blocked by a concurrent backup or a stale lock file.
+    Calls `restic snapshots --json --no-lock`. `--no-lock` is safe for
+    snapshot listing (read-only against the index) and avoids being blocked
+    by a concurrent backup or a stale lock file.
+
+    No tag filter: each job owns its repository outright
+    (/destinations/<label>/<name>), so the repo *is* the scope. This is what
+    lets a job recreated over an existing repository see the history it
+    inherited — filtering by a per-job identifier would hide every snapshot
+    written before the job row existed.
 
     Successful results are cached for `ttl_seconds` keyed by repo_path so that
     UI refresh storms only trigger one restic call per cache window. Failed
@@ -112,8 +117,6 @@ async def list_snapshots(
         proc = await asyncio.create_subprocess_exec(
             "restic",
             "snapshots",
-            "--tag",
-            f"job:{job_id}",
             "--json",
             "--no-lock",
             env=env,
@@ -158,20 +161,8 @@ async def list_snapshots(
     return result
 
 
-def build_repo_path(destination_label: str, job_id: str) -> str:
-    """Construct the restic repo path the rest of the app uses.
-
-    Centralized so the snapshot route and the backup runner agree on the
-    layout. Mirrors `backup_runner.run_backup`'s computation; if that ever
-    moves to per-job config (multiple repos per destination, etc.), update
-    here too.
-    """
-    return f"/destinations/{destination_label}/{job_id}"
-
-
 __all__ = [
     "SnapshotListingError",
     "list_snapshots",
-    "build_repo_path",
     "_clear_cache",
 ]

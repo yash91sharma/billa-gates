@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, cast
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core import fs
@@ -24,7 +24,7 @@ from app.db.models import (
     RunStatus,
     TriggeredBy,
 )
-from app.services import process_registry, restic, snapshot_listing
+from app.services import process_registry, repository, restic, snapshot_listing
 from app.services.notifications import send_notification
 
 logger = get_logger(__name__)
@@ -76,10 +76,12 @@ def check_destination_mount_file_exists(destination_label: str) -> bool:
 
 # Restic exit codes (stable contract since 0.17). Branching on these is the
 # only reliable way to classify a failure — stderr message wording is not a
-# contract and has changed between restic releases (gaps.md H5).
-RESTIC_RC_REPO_NOT_FOUND: int = 10
-RESTIC_RC_LOCK_FAILED: int = 11
-RESTIC_RC_WRONG_PASSWORD: int = 12
+# contract and has changed between restic releases (gaps.md H5). Defined in
+# `repository`, which also provisions repos on those same codes; re-exported
+# here so the pipeline reads naturally and existing patches keep working.
+RESTIC_RC_REPO_NOT_FOUND: int = repository.RESTIC_RC_REPO_NOT_FOUND
+RESTIC_RC_LOCK_FAILED: int = repository.RESTIC_RC_LOCK_FAILED
+RESTIC_RC_WRONG_PASSWORD: int = repository.RESTIC_RC_WRONG_PASSWORD
 
 
 async def trigger_run(
@@ -365,7 +367,7 @@ async def run_prune(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         # the 1-hr-fallback safety net via _terminate_then_kill inside the
         # restic wrapper.
         prune_timeout: int = (job.timeout_hours or default_timeout) * 3600
-        repo_path: str = f"/destinations/{job.destination_label}/{str(job_id)}"
+        repo_path: str = repository.build_repo_path(job.destination_label, job.name)
 
         # A cancel that lands before the subprocess spawns must stop the
         # (possibly hours-long) prune from starting at all.
@@ -584,7 +586,7 @@ async def run_check(
 
         hours = timeout_hours or job.check_timeout_hours or default_timeout
         check_timeout: int = hours * 3600
-        repo_path: str = f"/destinations/{job.destination_label}/{str(job_id)}"
+        repo_path: str = repository.build_repo_path(job.destination_label, job.name)
 
         # A cancel that lands before the subprocess spawns must stop the
         # check (and its start notification) from firing at all.
@@ -758,34 +760,6 @@ def _format_backup_error(rc: int, json_errors: List[str], stderr: str) -> str:
     return "\n".join(parts)
 
 
-@log_call
-async def _job_has_repo_history(
-    factory: async_sessionmaker[AsyncSession], job_id: str
-) -> bool:
-    """True once any run has written to this job's restic repository.
-
-    Same condition as the API layer's password lock
-    (app/api/routes/jobs.py::_password_locked): a run that finished
-    success or warning (restic rc=3 still saves a snapshot), or any run
-    that recorded a snapshot_id, proves the repo existed and held data.
-    Used to distinguish a genuine first run (rc=10 → init) from a repo
-    that has gone missing (rc=10 → fail loudly, never re-init).
-    """
-    async with factory() as s:
-        result = await s.execute(
-            select(BackupRun)
-            .where(
-                BackupRun.job_id == job_id,
-                or_(
-                    BackupRun.status.in_([RunStatus.success, RunStatus.warning]),
-                    BackupRun.snapshot_id.is_not(None),
-                ),
-            )
-            .limit(1)
-        )
-        return result.scalars().first() is not None
-
-
 async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
     """12-step backup lifecycle orchestration.
 
@@ -953,7 +927,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         job_dest_label: str = job.destination_label
         job_source_label: str = job.source_label
         job_source_subpath: str | None = job.source_subpath
-        repo_path: str = f"/destinations/{job_dest_label}/{str(job_id)}"
+        repo_path: str = repository.build_repo_path(job_dest_label, job.name)
         source_path: str = f"/sources/{job_source_label}"
         if job_source_subpath:
             source_path = f"{source_path}/{job_source_subpath}"
@@ -1110,45 +1084,24 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
             return
 
         if rc == RESTIC_RC_REPO_NOT_FOUND:
-            # rc=10 is only a legitimate first-run signal when the job has
-            # never written to its repo. With prior history, a missing repo
-            # means the destination was swapped, wiped, or renamed without
-            # moving the data — the sentinel mount check cannot catch this
-            # because the mount itself is healthy. Re-initializing here
-            # would silently start an empty repo while the user believes
-            # their snapshot history is intact.
-            if await _job_has_repo_history(factory, str(job_id)):
-                await _fail_init_check(
-                    f"Repository not found at '{repo_path}' (restic exit "
-                    f"code 10), but this job has previous backups — an "
-                    f"existing repository should be present. Refusing to "
-                    f"initialize a new, empty repository over the job's "
-                    f"history. If the backup disk was replaced or the "
-                    f"destination folder was renamed or moved, move the "
-                    f"existing repository directory to this path before "
-                    f"running again.\n\nrestic stderr: {stderr}",
-                    log_tag="repo_missing_with_history",
-                )
-                return
-            logger.info(
-                f"job_id={job_id} run_id={current_run_id} step=init_check "
-                f"repo_not_found initializing"
+            # A run never initializes a repository — that happens once, when
+            # the job is created (app/services/repository.py::ensure_repository).
+            # So rc=10 here is always a fault: the destination was swapped,
+            # wiped, or renamed without moving the data. The sentinel mount
+            # check cannot catch this because the mount itself is healthy.
+            # Initializing would silently start an empty repo while the user
+            # believes their snapshot history is intact.
+            await _fail_init_check(
+                f"Repository not found at '{repo_path}' (restic exit code 10). "
+                f"It is created when the job is created, so it should be "
+                f"present. Refusing to initialize a new, empty repository over "
+                f"the job's history. If the backup disk was replaced or the "
+                f"destination folder was renamed or moved, move the existing "
+                f"repository directory to this path before running "
+                f"again.\n\nrestic stderr: {stderr}",
+                log_tag="repo_missing",
             )
-            rc, _, init_stderr = await restic.restic_init(
-                repo_path, job_password, metadata_timeout, run_id=current_run_id
-            )
-            if await _was_canceled():
-                return
-            if rc != 0:
-                await _fail_init_check(
-                    f"Failed to initialize repository: {init_stderr}",
-                    log_tag="init_failed",
-                )
-                return
-            logger.info(
-                f"job_id={job_id} run_id={current_run_id} step=init_check "
-                f"repo_initialized"
-            )
+            return
         elif rc != 0:
             # Generic failure: network blip, permission glitch, older restic
             # version returning rc=1 for something we'd otherwise classify.
@@ -1209,7 +1162,6 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 repo_path,
                 job_password,
                 timeout_seconds=metadata_timeout,
-                job_id=str(job_id),
                 run_id=current_run_id,
             )
             logger.info(
@@ -1264,7 +1216,6 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     job_password,
                     source_path,
                     timeout_seconds,
-                    job_id=str(job_id),
                     parent_snapshot_id=parent_snapshot_id,
                     run_id=current_run_id,
                     **backup_kwargs,
@@ -1300,7 +1251,6 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                         job_password,
                         source_path,
                         timeout_seconds,
-                        job_id=str(job_id),
                         parent_snapshot_id=parent_snapshot_id,
                         run_id=current_run_id,
                         **backup_kwargs,
@@ -1442,7 +1392,6 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     repo_path,
                     job_password,
                     timeout_seconds,
-                    job_id=str(job_id),
                     run_id=current_run_id,
                     **retention_kwargs,
                 )

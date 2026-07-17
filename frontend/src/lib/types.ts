@@ -59,7 +59,6 @@ export interface BackupJob {
   updated_at: string
   next_run_time: string | null
   last_run: RunSummary | null
-  has_successful_run: boolean
 }
 
 export interface BackupRun {

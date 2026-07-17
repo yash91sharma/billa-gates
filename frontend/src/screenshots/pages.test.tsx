@@ -76,7 +76,6 @@ const job: BackupJob = {
     duration_seconds: 120,
     triggered_by: 'scheduler',
   },
-  has_successful_run: true,
 }
 
 const run: BackupRun = {

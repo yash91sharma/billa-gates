@@ -132,7 +132,6 @@ async def test_full_backup_lifecycle_success(client: AsyncClient) -> None:
         # restic_password must never leak in responses (security invariant).
         assert job["restic_password"] is None
         # Computed fields present.
-        assert job["has_successful_run"] is False
         assert job["last_run"] is None
 
         # 2. Trigger manual run ─────────────────────────────────────────────
@@ -177,11 +176,10 @@ async def test_full_backup_lifecycle_success(client: AsyncClient) -> None:
         run_detail = await client.get(f"/api/runs/{run_id}")
         assert run_detail.json()["snapshot_id"] == _SNAPSHOT_ID
 
-        # 6. Job reports has_successful_run=True after the run ──────────────
+        # 6. Job reports its last run after the run ─────────────────────────
         job_resp = await client.get(f"/api/jobs/{job_id}")
         assert job_resp.status_code == 200
         job_after = job_resp.json()
-        assert job_after["has_successful_run"] is True
         assert job_after["last_run"] is not None
         assert job_after["last_run"]["status"] == "success"
 
@@ -250,9 +248,9 @@ async def test_full_backup_lifecycle_failure(client: AsyncClient) -> None:
         assert snaps_resp.status_code == 200
         assert snaps_resp.json() == []
 
-        # Job's has_successful_run stays False after a failed run.
+        # The job's last run reflects the failure.
         job_resp = await client.get(f"/api/jobs/{job_id}")
-        assert job_resp.json()["has_successful_run"] is False
+        assert job_resp.json()["last_run"]["status"] == "failed"
 
     backup_runner.active_jobs.discard(uuid.UUID(job_id))
 

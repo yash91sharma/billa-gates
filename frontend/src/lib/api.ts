@@ -35,8 +35,9 @@ export const updateJob = (id: string, data: unknown) =>
 // DELETE returns 204 with no body, so it can't go through request<T>()'s
 // json parse — but non-ok responses (409 = run in progress) must still reject
 // with the same { status, data } shape so callers can surface them.
-export const deleteJob = async (id: string): Promise<void> => {
-  const resp = await fetch(`${BASE}/jobs/${id}`, { method: 'DELETE' })
+export const deleteJob = async (id: string, deleteRepository = false): Promise<void> => {
+  const query = deleteRepository ? '?delete_repository=true' : ''
+  const resp = await fetch(`${BASE}/jobs/${id}${query}`, { method: 'DELETE' })
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ detail: resp.statusText }))
     throw Object.assign(new Error(err.detail ?? resp.statusText), {

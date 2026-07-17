@@ -18,6 +18,10 @@ function parseLines(text: string): string[] | null {
 // A subpath is a single path component under the source mount: '/' would
 // nest deeper, and '.' / '..' would resolve to the mount itself or escape to
 // the sources root — the backend rejects all of these with a 422.
+//
+// The job name is validated against the same pattern: it names the repository
+// directory at /destinations/<destination>/<name>, so it is a path component
+// too, not free text.
 const SUBPATH_RE = /^[\p{L}\p{N}_][\p{L}\p{N}_ .-]*$/u
 
 // Split a comma-separated input into a string array, or null when empty.
@@ -34,8 +38,9 @@ function parseCsv(text: string): string[] | null {
 const HELP: Record<string, FieldHelp> = {
   name: {
     label: 'Name',
-    description: 'Friendly name shown in the dashboard, notifications, and logs.',
-    example: 'Documents — Daily',
+    description:
+      'Names this job everywhere, and names its repository folder on the destination drive (/destinations/<destination>/<name>). Letters, numbers, spaces, dots and hyphens only. Cannot be changed later — pick a name you can remember, because recreating a job with the same name and destination is how you reconnect to an existing backup history.',
+    example: 'Documents Daily',
   },
   source: {
     label: 'Source',
@@ -257,8 +262,10 @@ export default function JobForm({
   sourceMounts = [],
   destinationMounts = [],
 }: JobFormProps) {
+  // The repository is created (and encrypted) when the job is created, so
+  // name, destination and password address it and are all locked once the job
+  // exists — there is no "before the first run" window any more.
   const isEdit = !!job
-  const passwordLocked = isEdit && !!job.has_successful_run
 
   // Basic fields
   const [name, setName] = useState(job?.name ?? '')
@@ -324,6 +331,16 @@ export default function JobForm({
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setSubmitError(null)
+
+    // Presence is enforced natively via `required`; this guards the separate
+    // property that the name is a usable single path component.
+    if (name && !SUBPATH_RE.test(name)) {
+      setSubmitError(
+        'name must not contain "/", "." or ".." — it names the repository folder on the ' +
+          'destination drive (letters, digits, underscores, spaces, dots, and hyphens)'
+      )
+      return
+    }
 
     if (sourceSubpath && !SUBPATH_RE.test(sourceSubpath)) {
       setSubmitError(
@@ -410,9 +427,31 @@ export default function JobForm({
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
+                disabled={isEdit}
+                required
                 aria-describedby={helpId('job-name')}
-                className={inputCls}
+                className={`${inputCls} disabled:opacity-60`}
               />
+              {isEdit ? (
+                <p className="text-muted-foreground text-xs mt-1">
+                  🔒 The name cannot be changed — it names this job's repository folder at{' '}
+                  <code>
+                    /destinations/{destinationLabel}/{name}
+                  </code>
+                  . Create a new job to use a different name.
+                </p>
+              ) : (
+                destinationLabel &&
+                name && (
+                  <p className="text-muted-foreground text-xs mt-1">
+                    The repository will be created at{' '}
+                    <code>
+                      /destinations/{destinationLabel}/{name}
+                    </code>
+                    .
+                  </p>
+                )
+              )}
             </div>
 
             <div>
@@ -519,21 +558,15 @@ export default function JobForm({
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                disabled={passwordLocked}
+                disabled={isEdit}
                 aria-describedby={helpId('job-password')}
                 className={inputCls}
               />
-              {passwordLocked ? (
+              {isEdit && (
                 <p className="text-muted-foreground text-xs mt-1">
-                  🔒 Password cannot change after a backup has written to the repository. To rotate,
-                  use <code>restic key</code>.
+                  🔒 The repository is encrypted with this password, so it cannot be changed. To
+                  rotate it, use <code>restic key</code>.
                 </p>
-              ) : (
-                isEdit && (
-                  <p className="text-muted-foreground text-xs mt-1">
-                    No backups run yet — you can still change this password.
-                  </p>
-                )
               )}
             </div>
 

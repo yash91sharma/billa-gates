@@ -76,7 +76,6 @@ const makeJob = (overrides: Partial<BackupJob> = {}): BackupJob => ({
   updated_at: '2024-01-01T00:00:00Z',
   next_run_time: '2024-01-15T16:00:00Z',
   last_run: null,
-  has_successful_run: false,
   ...overrides,
 })
 

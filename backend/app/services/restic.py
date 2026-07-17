@@ -161,23 +161,23 @@ async def restic_latest_snapshot_id(
     repo_path: str,
     password: str,
     *,
-    job_id: str,
     timeout_seconds: int = 60,
     run_id: Optional[_uuid.UUID] = None,
 ) -> Optional[str]:
-    """Return the id of the most recent snapshot tagged for this job, or None
-    if no prior snapshot exists / the lookup fails. Used to pass --parent to
+    """Return the id of the most recent snapshot in the repo, or None if no
+    prior snapshot exists / the lookup fails. Used to pass --parent to
     `restic backup` so a host or path change doesn't force a full-tree rescan
     (gaps.md C5). Read-only — uses --no-lock so it never blocks on a write
     lock held by a concurrent backup or by a stale lock file.
+
+    The repo belongs to exactly one job, so the newest snapshot in it is by
+    definition this job's parent — no tag filter needed.
     """
     env = _get_restic_env(repo_path, password)
     try:
         proc = await asyncio.create_subprocess_exec(
             "restic",
             "snapshots",
-            "--tag",
-            f"job:{job_id}",
             "--latest",
             "1",
             "--json",
@@ -229,7 +229,6 @@ async def restic_backup(
     source_path: str,
     timeout_seconds: int,
     *,
-    job_id: str,
     parent_snapshot_id: Optional[str] = None,
     run_id: Optional[_uuid.UUID] = None,
     **kwargs: Any,
@@ -240,17 +239,17 @@ async def restic_backup(
     # --host is pinned to a fixed string so retention isn't silently split
     # per container ID (each rebuild gets a new hostname, and `restic forget`
     # groups by host+paths by default).
-    # --tag job:<job_id> pins every snapshot to a stable identifier so
-    # `restic forget --tag job:<id>` can apply retention across path changes
-    # (renaming source_subpath would otherwise orphan the old-path snapshots
-    # in a separate retention group — see gaps.md C3).
+    #
+    # Snapshots carry no per-job identity tag: the repo at
+    # /destinations/<label>/<name> belongs to exactly one job, so the repo is
+    # already the scope. Retention across path changes (gaps.md C3) is handled
+    # by `restic forget --group-by ''`, which collapses host and paths into a
+    # single group. Any --tag values below are the user's own, from job.tags.
     args: List[str] = [
         "restic",
         "backup",
         "--host",
         "billa-gates",
-        "--tag",
-        f"job:{job_id}",
     ]
 
     # Explicit --parent lets restic skip the full-tree rescan even when host
@@ -352,7 +351,6 @@ async def restic_forget(
     password: str,
     timeout_seconds: int,
     *,
-    job_id: str,
     run_id: Optional[_uuid.UUID] = None,
     **retention_flags: Any,
 ) -> Tuple[int, str, str]:
@@ -365,15 +363,18 @@ async def restic_forget(
     """
     env = _get_restic_env(repo_path, password)
 
-    # Scope retention by --tag job:<job_id> with --group-by '' (single group)
-    # so retention applies across any historical path or host change. The
-    # previous --group-by paths kept old-path snapshots forever whenever a
+    # --group-by '' puts every snapshot in the repo into one retention group,
+    # so the policy applies across any historical path or host change. The
+    # original --group-by paths kept old-path snapshots forever whenever a
     # job's source_subpath changed (gaps.md C3).
+    #
+    # Deliberately unfiltered: the repo holds exactly one job's snapshots.
+    # Scoping by a per-job tag would strand every snapshot taken before the
+    # current job row existed — they would never be pruned, and the repo would
+    # grow without bound after a job is recreated.
     args: List[str] = [
         "restic",
         "forget",
-        "--tag",
-        f"job:{job_id}",
         "--group-by",
         "",
     ]

@@ -43,7 +43,6 @@ const baseJob: BackupJob = {
   updated_at: '2024-01-01T00:00:00Z',
   next_run_time: null,
   last_run: null,
-  has_successful_run: false,
 }
 
 describe('JobForm', () => {
@@ -120,6 +119,7 @@ describe('JobForm', () => {
       )
       await user.selectOptions(screen.getByLabelText(/source/i), 'meh2')
       await user.selectOptions(screen.getByLabelText(/destination/i), 'main')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(
         expect.objectContaining({ source_label: 'meh2', destination_label: 'main' })
@@ -131,6 +131,7 @@ describe('JobForm', () => {
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
       await user.type(screen.getByLabelText(/subfolder|subpath/i), 'photos')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ source_subpath: 'photos' }))
     })
@@ -139,6 +140,7 @@ describe('JobForm', () => {
       const onSubmit = vi.fn()
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ source_subpath: null }))
     })
@@ -148,6 +150,7 @@ describe('JobForm', () => {
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
       await user.type(screen.getByLabelText(/subfolder|subpath/i), 'a/b')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(screen.getByText(/subpath.*must not contain|cannot contain/i)).toBeInTheDocument()
       expect(onSubmit).not.toHaveBeenCalled()
@@ -158,6 +161,7 @@ describe('JobForm', () => {
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
       await user.type(screen.getByLabelText(/subfolder|subpath/i), '..')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(screen.getByText(/subpath.*must not contain|cannot contain/i)).toBeInTheDocument()
       expect(onSubmit).not.toHaveBeenCalled()
@@ -168,6 +172,7 @@ describe('JobForm', () => {
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
       await user.type(screen.getByLabelText(/subfolder|subpath/i), '.')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(screen.getByText(/subpath.*must not contain|cannot contain/i)).toBeInTheDocument()
       expect(onSubmit).not.toHaveBeenCalled()
@@ -178,6 +183,7 @@ describe('JobForm', () => {
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
       await user.type(screen.getByLabelText(/subfolder|subpath/i), 'photos 2024.v2-final')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(
         expect.objectContaining({ source_subpath: 'photos 2024.v2-final' })
@@ -189,6 +195,7 @@ describe('JobForm', () => {
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
       await user.type(screen.getByLabelText(/password/i), 'hunter2')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       const payload = onSubmit.mock.calls[0][0] as Record<string, unknown>
       expect(payload.restic_password).toBe('hunter2')
@@ -204,40 +211,55 @@ describe('JobForm', () => {
       const onSubmit = vi.fn()
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} />)
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalled()
     })
   })
 
-  describe('edit mode — password lock', () => {
-    it('shows editable password field when has_successful_run=false', () => {
-      render(<JobForm job={{ ...baseJob, has_successful_run: false }} onSubmit={vi.fn()} />)
-      const pwField = screen.getByLabelText(/password/i)
-      expect(pwField).not.toBeDisabled()
+  describe('edit mode — identity locks', () => {
+    // The repository is created and encrypted at job-create time, so name,
+    // destination and password all address it and lock as soon as the job
+    // exists. There is no "before the first run" window.
+
+    it('locks the password field in edit mode', () => {
+      render(<JobForm job={baseJob} onSubmit={vi.fn()} />)
+      expect(screen.getByLabelText(/password/i)).toBeDisabled()
     })
 
-    it('shows note about changeability when has_successful_run=false', () => {
-      render(<JobForm job={{ ...baseJob, has_successful_run: false }} onSubmit={vi.fn()} />)
-      expect(screen.getByText(/no backups.*run yet|still change/i)).toBeInTheDocument()
+    it('locks the name field in edit mode', () => {
+      render(<JobForm job={baseJob} onSubmit={vi.fn()} />)
+      expect(screen.getByLabelText(/name/i)).toBeDisabled()
     })
 
-    it('shows locked password field when has_successful_run=true', () => {
-      render(<JobForm job={{ ...baseJob, has_successful_run: true }} onSubmit={vi.fn()} />)
-      const pwField = screen.getByLabelText(/password/i)
-      expect(pwField).toBeDisabled()
+    it('leaves the password field editable when creating', () => {
+      render(<JobForm onSubmit={vi.fn()} />)
+      expect(screen.getByLabelText(/password/i)).not.toBeDisabled()
     })
 
-    it('shows lock icon when password is locked', () => {
-      render(<JobForm job={{ ...baseJob, has_successful_run: true }} onSubmit={vi.fn()} />)
-      // The inline helper paragraph beneath the field carries the lock icon.
-      expect(screen.getByText(/🔒/)).toBeInTheDocument()
+    it('leaves the name field editable when creating', () => {
+      render(<JobForm onSubmit={vi.fn()} />)
+      expect(screen.getByLabelText(/name/i)).not.toBeDisabled()
     })
 
-    it('shows tooltip about restic key rotation when locked', () => {
-      render(<JobForm job={{ ...baseJob, has_successful_run: true }} onSubmit={vi.fn()} />)
-      // restic key may be mentioned in both the inline lock notice and the
-      // field's help description — confirm at least one mention exists.
+    it('shows a lock icon for the locked fields', () => {
+      render(<JobForm job={baseJob} onSubmit={vi.fn()} />)
+      expect(screen.getAllByText(/🔒/).length).toBeGreaterThan(0)
+    })
+
+    it('explains restic key rotation when the password is locked', () => {
+      render(<JobForm job={baseJob} onSubmit={vi.fn()} />)
       expect(screen.getAllByText(/restic key/i).length).toBeGreaterThan(0)
+    })
+
+    it('shows the repository path the name maps to', () => {
+      render(
+        <JobForm
+          job={{ ...baseJob, name: 'photos', destination_label: 'main' }}
+          onSubmit={vi.fn()}
+        />
+      )
+      expect(screen.getAllByText('/destinations/main/photos').length).toBeGreaterThan(0)
     })
   })
 
@@ -320,6 +342,7 @@ describe('JobForm', () => {
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
       const textarea = screen.getByLabelText(/exclude patterns/i)
       await user.type(textarea, '*.tmp{enter}node_modules/')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(
         expect.objectContaining({ exclude_patterns: ['*.tmp', 'node_modules/'] })
@@ -330,6 +353,7 @@ describe('JobForm', () => {
       const onSubmit = vi.fn()
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ exclude_patterns: null }))
     })
@@ -341,6 +365,7 @@ describe('JobForm', () => {
       const cb = screen.getByLabelText(/exclude caches/i) as HTMLInputElement
       expect(cb.checked).toBe(false)
       await user.click(cb)
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ exclude_caches: true }))
     })
@@ -350,6 +375,7 @@ describe('JobForm', () => {
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
       await user.type(screen.getByLabelText(/^tags/i), 'daily, important')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(
         expect.objectContaining({ tags: ['daily', 'important'] })
@@ -361,6 +387,7 @@ describe('JobForm', () => {
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
       await user.selectOptions(screen.getByLabelText(/^compression/i), 'max')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ compression: 'max' }))
     })
@@ -370,6 +397,7 @@ describe('JobForm', () => {
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
       await user.type(screen.getByLabelText(/^timeout \(hours\)/i), '12')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ timeout_hours: 12 }))
     })
@@ -424,6 +452,7 @@ describe('JobForm', () => {
       const cb = screen.getByLabelText(/scheduled integrity check/i) as HTMLInputElement
       expect(cb.checked).toBe(false)
       await user.click(cb)
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ check_enabled: true }))
     })
@@ -434,6 +463,7 @@ describe('JobForm', () => {
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
       const select = screen.getByLabelText(/check mode/i)
       expect(select.tagName).toBe('SELECT')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(
         expect.objectContaining({ check_mode: null, check_subset_percent: null })
@@ -453,6 +483,7 @@ describe('JobForm', () => {
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
       await user.type(screen.getByLabelText(/check timeout/i), '6')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ check_timeout_hours: 6 }))
     })
@@ -669,6 +700,7 @@ describe('JobForm', () => {
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
       await user.type(screen.getByLabelText(/exclude if present/i), '.nobackup{enter}.skipme')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(
         expect.objectContaining({ exclude_if_present: ['.nobackup', '.skipme'] })
@@ -679,6 +711,7 @@ describe('JobForm', () => {
       const onSubmit = vi.fn()
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ exclude_if_present: null }))
     })
@@ -690,6 +723,7 @@ describe('JobForm', () => {
       const cb = screen.getByLabelText(/one file system/i) as HTMLInputElement
       expect(cb.checked).toBe(false)
       await user.click(cb)
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ one_file_system: true }))
     })
@@ -701,6 +735,7 @@ describe('JobForm', () => {
       const cb = screen.getByLabelText(/no scan/i) as HTMLInputElement
       expect(cb.checked).toBe(false)
       await user.click(cb)
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ no_scan: true }))
     })
@@ -710,6 +745,7 @@ describe('JobForm', () => {
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
       await user.type(screen.getByLabelText(/pack size/i), '512')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ pack_size: 512 }))
     })
@@ -719,6 +755,7 @@ describe('JobForm', () => {
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
       await user.type(screen.getByLabelText(/read concurrency/i), '4')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ read_concurrency: 4 }))
     })

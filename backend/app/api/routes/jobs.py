@@ -11,7 +11,7 @@ from typing import Any, List, Sequence
 
 from apscheduler.jobstores.base import JobLookupError
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_session
@@ -35,7 +35,7 @@ from app.db.models import (
     RunStatus,
     TriggeredBy,
 )
-from app.services import backup_runner, restic, snapshot_listing
+from app.services import backup_runner, repository, restic, snapshot_listing
 
 logger = get_logger(__name__)
 
@@ -106,33 +106,6 @@ async def _raise_409_if_overlapping(run_id: str, session: AsyncSession) -> None:
 
 
 @log_call
-async def _password_locked(job_id: str, session: AsyncSession) -> bool:
-    """Return True once the job's restic repo is keyed to the stored password.
-
-    A run that ended success OR warning (restic rc=3 — partial backup, but the
-    snapshot was saved) has initialized the repo; any run that recorded a
-    snapshot_id proves the same regardless of its final status. After that
-    point a password change would strand the repo on the old password: every
-    later backup fails with rc=12 (wrong password) and the existing snapshots
-    are only readable with a password the user may have discarded. Exposed to
-    the UI as `has_successful_run`, which drives the password-lock state on
-    the edit form.
-    """
-    result = await session.execute(
-        select(BackupRun)
-        .where(
-            BackupRun.job_id == job_id,
-            or_(
-                BackupRun.status.in_([RunStatus.success, RunStatus.warning]),
-                BackupRun.snapshot_id.is_not(None),
-            ),
-        )
-        .limit(1)
-    )
-    return result.scalars().first() is not None
-
-
-@log_call
 async def _last_run(job_id: str, session: AsyncSession) -> RunSummarySchema | None:
     """Return the most recent BackupRun for the job, or None."""
     result = await session.execute(
@@ -166,7 +139,6 @@ async def _build_job_response(
     return {
         **{c.key: getattr(job, c.key) for c in job.__table__.columns},
         "restic_password": None,
-        "has_successful_run": await _password_locked(job.id, session),
         "next_run_time": _next_run_time(job.id),
         "last_run": await _last_run(job.id, session),
     }
@@ -234,6 +206,84 @@ async def _check_duplicate(
 
 
 @log_call
+async def _check_duplicate_name(
+    name: str,
+    destination_label: str,
+    session: AsyncSession,
+) -> None:
+    """Raise 409 if another job already owns this repository directory.
+
+    (destination_label, name) is the repo's on-disk address, so a collision
+    would mean two jobs writing into one repository. The DB has a matching
+    UniqueConstraint, but the comparison here is deliberately
+    case-INsensitive: SQLite would happily store both 'Photos' and 'photos'
+    while a case-insensitive destination filesystem (SMB, default APFS) maps
+    them onto the same directory.
+    """
+    result = await session.execute(
+        select(BackupJob).where(
+            func.lower(BackupJob.name) == name.lower(),
+            BackupJob.destination_label == destination_label,
+        )
+    )
+    existing = result.scalars().first()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    f"A job named '{existing.name}' already uses the repository "
+                    f"at {repository.build_repo_path(destination_label, existing.name)}"
+                ),
+                "conflicting_job_id": existing.id,
+                "conflicting_job_name": existing.name,
+            },
+        )
+
+
+@log_call
+async def _provision_repository(
+    name: str, destination_label: str, password: str
+) -> None:
+    """Initialize or adopt the job's repository, or raise 422 explaining why not.
+
+    Surfacing a bad password here is the whole point of provisioning at create
+    time: the alternative is a job that looks fine until its first scheduled
+    run fails at 3am.
+    """
+    repo_path = repository.build_repo_path(destination_label, name)
+    outcome, detail = await repository.ensure_repository(repo_path, password)
+
+    if outcome is repository.RepoOutcome.adopted:
+        logger.info(
+            "job create adopting existing repo repo=%s name=%s", repo_path, name
+        )
+        return
+    if outcome is repository.RepoOutcome.initialized:
+        logger.info("job create initialized repo repo=%s name=%s", repo_path, name)
+        return
+
+    messages = {
+        repository.RepoOutcome.wrong_password: (
+            f"A repository already exists at '{repo_path}' but the password "
+            f"does not match it. Use the password that repository was created "
+            f"with, or choose a different job name."
+        ),
+        repository.RepoOutcome.init_failed: (
+            f"Failed to initialize a repository at '{repo_path}'."
+        ),
+        repository.RepoOutcome.unreachable: (
+            f"Could not reach the repository at '{repo_path}'. The destination "
+            f"may be disconnected or unresponsive."
+        ),
+    }
+    message = messages[outcome]
+    if detail:
+        message = f"{message}\n\nrestic: {detail}"
+    raise HTTPException(status_code=422, detail=message)
+
+
+@log_call
 def _register_in_scheduler(job: BackupJob) -> None:
     """Register or replace the job in APScheduler (only when scheduler is running)."""
     sched: Any = scheduler_module.scheduler
@@ -291,17 +341,27 @@ async def list_jobs(
 async def create_job(
     body: JobCreate, session: AsyncSession = Depends(get_session)
 ) -> dict[str, object]:
-    """Create a new BackupJob.
+    """Create a new BackupJob and provision its restic repository.
 
     Validates that both source and destination mounts exist, that no job with
-    the same (source_label, destination_label) pair already exists, and that
-    the schedule/check configuration is internally consistent (done by the
-    JobCreate schema).
+    the same (source_label, destination_label) pair already exists, that no
+    other job owns the same repository directory, and that the schedule/check
+    configuration is internally consistent (done by the JobCreate schema).
+
+    The repository at /destinations/<destination_label>/<name> is initialized
+    here — or adopted if one already exists and the password matches, which is
+    how a job is reconnected to its history after the database is lost.
+    Provisioning happens before the row is inserted so a failure leaves no job
+    behind, and it is the reason name/destination_label/restic_password are
+    immutable afterwards: together they address the repo.
     """
     await _validate_mounts(body.source_label, body.destination_label)
     await _check_duplicate(
         body.source_label, body.source_subpath, body.destination_label, session
     )
+    await _check_duplicate_name(body.name, body.destination_label, session)
+
+    await _provision_repository(body.name, body.destination_label, body.restic_password)
 
     job = BackupJob(**body.model_dump())
     session.add(job)
@@ -382,25 +442,39 @@ async def update_job(
                 detail=f"{field} cannot be null",
             )
 
-    # Destination label is permanently immutable.
-    if (
-        "destination_label" in update_data
-        and update_data["destination_label"] != job.destination_label
+    # name, destination_label and restic_password together address the restic
+    # repository, which is initialized at job creation. Changing any of them
+    # would point the job at a different (or non-existent) repo, or strand the
+    # existing one on a password nobody holds. All three are therefore
+    # permanently immutable. Re-sending an identical value is a no-op, so the
+    # edit form can keep round-tripping every field.
+    if "destination_label" in update_data and (
+        update_data["destination_label"] != job.destination_label
     ):
         raise HTTPException(
             status_code=422,
             detail="destination_label cannot be changed after job creation",
         )
 
-    # Password is immutable once any run has written to the restic repo
-    # (success or warning status, or a recorded snapshot) — the repo is keyed
-    # to the stored password from that point on.
-    if "restic_password" in update_data and await _password_locked(job_id, session):
+    if "name" in update_data and update_data["name"] != job.name:
         raise HTTPException(
             status_code=422,
             detail=(
-                "restic_password cannot be changed after a backup has written "
-                "to the repository"
+                "name cannot be changed after job creation — it names the "
+                "repository directory on disk. Create a new job to use a "
+                "different name."
+            ),
+        )
+
+    if (
+        "restic_password" in update_data
+        and update_data["restic_password"] != job.restic_password
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "restic_password cannot be changed after job creation — the "
+                "repository is encrypted with it"
             ),
         )
 
@@ -472,11 +546,24 @@ async def update_job(
 
 @router.delete("/{job_id}", status_code=204)
 @log_call
-async def delete_job(job_id: str, session: AsyncSession = Depends(get_session)) -> None:
-    """Delete a BackupJob (and its runs/snapshots via CASCADE).
+async def delete_job(
+    job_id: str,
+    delete_repository: bool = False,
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Delete a BackupJob (and its runs via CASCADE).
 
     Returns 409 if a backup run is currently in progress for this job.
-    The restic repository on disk is NOT deleted.
+
+    The restic repository on disk is kept by default: it holds the snapshots,
+    and because it is addressed by name, a new job with the same name and
+    destination adopts it — that is the recovery path. Pass
+    `delete_repository=true` to destroy it and all its snapshots instead;
+    that is the only way to free the name when the repository's password has
+    been lost.
+
+    The repository is removed *before* the row, so a refused or failed removal
+    leaves job and repo consistent rather than orphaning one.
     """
     job = await _get_job_or_404(job_id, session)
 
@@ -486,12 +573,30 @@ async def delete_job(job_id: str, session: AsyncSession = Depends(get_session)) 
             detail="A backup run is in progress for this job",
         )
 
+    if delete_repository:
+        repo_path = repository.build_repo_path(job.destination_label, job.name)
+        try:
+            removed = await repository.remove_repository(repo_path)
+        except repository.RepositoryError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        logger.info(
+            "job delete removed repo repo=%s job_id=%s existed=%s",
+            repo_path,
+            job_id,
+            removed,
+        )
+
     _remove_from_scheduler(job_id)
     # Per design doc §7: drop the per-job lock so deleted jobs don't leak.
     backup_runner.job_locks.pop(uuid.UUID(job_id), None)
     await session.delete(job)
     await session.commit()
-    logger.info("job deleted job_id=%s name=%s", job_id, job.name)
+    logger.info(
+        "job deleted job_id=%s name=%s repo_deleted=%s",
+        job_id,
+        job.name,
+        delete_repository,
+    )
 
 
 # ── POST /api/jobs/{id}/run ───────────────────────────────────────────────────
@@ -639,7 +744,7 @@ async def unlock_job(
 
     settings = await session.get(AppSettings, 1)
     timeout = settings.metadata_timeout_seconds if settings else 600
-    repo_path = f"{_DESTINATIONS_ROOT}/{job.destination_label}/{job.id}"
+    repo_path = repository.build_repo_path(job.destination_label, job.name)
     _rc, stdout, stderr = await restic.restic_unlock(
         repo_path=repo_path, password=job.restic_password, timeout_seconds=timeout
     )
@@ -687,10 +792,10 @@ async def list_job_snapshots(
     job = await _get_job_or_404(job_id, session)
     settings = await session.get(AppSettings, 1)
     timeout = settings.metadata_timeout_seconds if settings else 600
-    repo_path = snapshot_listing.build_repo_path(job.destination_label, job.id)
+    repo_path = repository.build_repo_path(job.destination_label, job.name)
     try:
         raw = await snapshot_listing.list_snapshots(
-            repo_path, job.restic_password, job_id=job.id, timeout_seconds=timeout
+            repo_path, job.restic_password, timeout_seconds=timeout
         )
     except snapshot_listing.SnapshotListingError as exc:
         # If the repo doesn't exist yet (genuine first run before any backup),

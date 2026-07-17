@@ -147,9 +147,15 @@ async def test_step4_repo_exists_proceeds(engine):
     assert run.status == RunStatus.success
 
 
-async def test_step4_repo_not_found_inits_repo(engine):
-    """restic ≥0.17 returns exit code 10 when the repository does not exist;
-    the runner must call restic_init in response (gaps.md H5)."""
+async def test_step4_repo_not_found_fails_and_never_inits(engine):
+    """restic ≥0.17 returns exit code 10 when the repository does not exist.
+
+    A run must never initialize: that happens once, at job creation
+    (repository.ensure_repository). So rc=10 during a run always means the
+    repo went missing — the destination was swapped, wiped, or renamed —
+    and initializing would start an empty repo while the user believes their
+    history is intact.
+    """
     await _setup_job(engine)
     run_id = str(uuid.uuid4())
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -166,18 +172,14 @@ async def test_step4_repo_not_found_inits_repo(engine):
         s.add(run)
         await s.commit()
 
-    init_called = {"v": False}
-
-    async def fake_init(*args, **kwargs):
-        init_called["v"] = True
-        return (0, "created repo", "")
+    init = AsyncMock()
 
     with (
         patch(
             "app.services.restic.restic_cat_config",
             return_value=(10, "", "Fatal: unable to open config file"),
         ),
-        patch("app.services.restic.restic_init", side_effect=fake_init),
+        patch("app.services.restic.restic_init", new=init),
         patch(
             "app.services.restic.restic_backup",
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
@@ -187,7 +189,12 @@ async def test_step4_repo_not_found_inits_repo(engine):
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
-    assert init_called["v"] is True
+    init.assert_not_awaited()
+
+    async with factory() as s:
+        run_row = await s.get(BackupRun, run_id)
+        assert run_row.status == RunStatus.failed
+        assert "Repository not found" in run_row.error_output
 
 
 async def test_step4_wrong_password_marks_failed(engine):
@@ -235,42 +242,6 @@ async def test_step4_wrong_password_marks_failed(engine):
     # An rc=12 must never trigger init — the repo is fine, the password is wrong.
     # Initing on top of a real repo would be both pointless and confusing.
     assert init_called["v"] is False
-
-
-async def test_step4_init_failure_marks_failed(engine):
-    """rc=10 → init; if init then fails, the run record must surface the init
-    failure's stderr so the operator can see what went wrong."""
-    await _setup_job(engine)
-    run_id = str(uuid.uuid4())
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    from app.db.models import BackupRun, RunStatus, TriggeredBy
-
-    async with factory() as s:
-        run = BackupRun(
-            id=run_id,
-            job_id=str(JOB_ID),
-            status=RunStatus.running,
-            triggered_by=TriggeredBy.manual,
-            started_at=datetime.now(timezone.utc),
-        )
-        s.add(run)
-        await s.commit()
-
-    with (
-        patch(
-            "app.services.restic.restic_cat_config",
-            return_value=(10, "", "Fatal: unable to open config file"),
-        ),
-        patch(
-            "app.services.restic.restic_init", return_value=(1, "", "permission denied")
-        ),
-    ):
-        await run_backup(JOB_ID, uuid.UUID(run_id))
-
-    run = await _get_run(engine, run_id)
-    assert run.status == RunStatus.failed
-    assert run.error_output is not None
-    assert "permission denied" in run.error_output
 
 
 async def test_step4_init_failure_sends_notification(engine):
@@ -1639,7 +1610,8 @@ async def test_run_check_invokes_restic_check_and_marks_success(engine):
         await run_check(JOB_ID, uuid.UUID(run_id), "structural", None, None)
 
     assert check_called["v"] is True
-    assert f"/destinations/main/{JOB_ID}" in check_called["args"][0]
+    # Repo path is keyed on the job name, not its UUID.
+    assert "/destinations/main/Test Job" in check_called["args"][0]
     assert check_called["args"][1] == "structural"
     assert check_called["args"][2] is None
 
@@ -2602,7 +2574,8 @@ async def test_run_prune_invokes_restic_prune_and_marks_success(engine):
     assert prune_called["v"] is True
     # Repo path follows the same /destinations/{label}/{job_id} convention as
     # backup runs so the same restic repo is targeted.
-    assert f"/destinations/main/{JOB_ID}" in prune_called["args"][0]
+    # Repo path is keyed on the job name, not its UUID.
+    assert "/destinations/main/Test Job" in prune_called["args"][0]
 
     run = await _get_run(engine, run_id)
     assert run.kind == RunKind.prune
@@ -3369,46 +3342,18 @@ async def test_step4_repo_missing_with_success_history_refuses_init(engine):
     assert "not found" in run.error_output.lower()
     assert "refus" in run.error_output.lower()  # "refusing to initialize"
     # The message must point at the expected repo path so the operator can act.
-    assert f"/destinations/main/{JOB_ID}" in run.error_output
+    assert "/destinations/main/Test Job" in run.error_output
 
 
-async def test_step4_repo_missing_with_warning_history_refuses_init(engine):
-    """A prior warning run (rc=3 — snapshot still saved) also counts as
-    repo history; re-init must be refused."""
-    from app.db.models import RunStatus
+async def test_step4_repo_missing_without_any_history_also_refuses_init(engine):
+    """Run history is no longer an input to this decision.
 
-    await _setup_job(engine)
-    await _add_finished_run(engine, RunStatus.warning)
-    run_id = await _make_running_row(engine)
-
-    init_called, backup_called = await _run_repo_missing_pipeline(engine, run_id)
-
-    assert init_called is False
-    assert backup_called is False
-    run = await _get_run(engine, run_id)
-    assert run.status == RunStatus.failed
-
-
-async def test_step4_repo_missing_with_snapshot_history_refuses_init(engine):
-    """A prior failed run that still recorded a snapshot_id proves the repo
-    was written to; re-init must be refused."""
-    from app.db.models import RunStatus
-
-    await _setup_job(engine)
-    await _add_finished_run(engine, RunStatus.failed, snapshot_id="b" * 64)
-    run_id = await _make_running_row(engine)
-
-    init_called, backup_called = await _run_repo_missing_pipeline(engine, run_id)
-
-    assert init_called is False
-    assert backup_called is False
-    run = await _get_run(engine, run_id)
-    assert run.status == RunStatus.failed
-
-
-async def test_step4_repo_missing_with_only_failed_history_still_inits(engine):
-    """Prior failed runs with no snapshot never wrote to the repo — rc=10 is
-    a genuine first run and init must proceed (existing behavior kept)."""
+    A repo is created once, when the job is created, so rc=10 means it went
+    missing no matter what the run history looks like. This replaces the old
+    "prior failed runs mean this is a genuine first run, so init" branch —
+    that branch was what allowed an empty repo to be silently created over a
+    destination that had merely gone walkabout.
+    """
     from app.db.models import RunStatus
 
     await _setup_job(engine)
@@ -3417,10 +3362,25 @@ async def test_step4_repo_missing_with_only_failed_history_still_inits(engine):
 
     init_called, backup_called = await _run_repo_missing_pipeline(engine, run_id)
 
-    assert init_called is True
-    assert backup_called is True
+    assert init_called is False
+    assert backup_called is False
     run = await _get_run(engine, run_id)
-    assert run.status == RunStatus.success
+    assert run.status == RunStatus.failed
+
+
+async def test_step4_repo_missing_with_no_runs_at_all_refuses_init(engine):
+    """Not even a brand-new job may init from a run."""
+    from app.db.models import RunStatus
+
+    await _setup_job(engine)
+    run_id = await _make_running_row(engine)
+
+    init_called, backup_called = await _run_repo_missing_pipeline(engine, run_id)
+
+    assert init_called is False
+    assert backup_called is False
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
 
 
 async def test_step4_repo_missing_with_history_sends_failure_notification(engine):

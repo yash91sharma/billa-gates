@@ -10,6 +10,7 @@ import { parseApiError, type ConflictingJob } from '../lib/utils'
 export default function Jobs() {
   const navigate = useNavigate()
   const [jobToDelete, setJobToDelete] = useState<BackupJob | null>(null)
+  const [deleteRepository, setDeleteRepository] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [runError, setRunError] = useState<string | null>(null)
   const [showCreateForm, setShowCreateForm] = useState(false)
@@ -74,21 +75,33 @@ export default function Jobs() {
     }
   }
 
+  // Always reset the destructive checkbox when opening the dialog — a value
+  // carried over from a previous job would delete a repository unasked.
+  function openDeleteDialog(job: BackupJob) {
+    setDeleteRepository(false)
+    setJobToDelete(job)
+  }
+
   async function handleConfirmDelete() {
     if (!jobToDelete) return
     setDeleteError(null)
     try {
-      await api.deleteJob(jobToDelete.id)
+      await api.deleteJob(jobToDelete.id, deleteRepository)
       setJobToDelete(null)
+      setDeleteRepository(false)
       refetch()
     } catch (err: unknown) {
       const status = (err as { status?: number }).status
+      const detail = (err as { data?: { detail?: string } }).data?.detail
       setDeleteError(
         status === 409
           ? 'Cannot delete: a run is in progress for this job.'
-          : 'Error: failed to delete job.'
+          : status === 422 && detail
+            ? `Error: ${detail}`
+            : 'Error: failed to delete job.'
       )
       setJobToDelete(null)
+      setDeleteRepository(false)
     }
   }
 
@@ -163,7 +176,7 @@ export default function Jobs() {
                   </button>
                   <button
                     className="text-sm text-destructive hover:underline"
-                    onClick={() => setJobToDelete(job)}
+                    onClick={() => openDeleteDialog(job)}
                   >
                     Delete
                   </button>
@@ -179,17 +192,37 @@ export default function Jobs() {
           role="dialog"
           className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
         >
-          <div className="bg-white rounded p-6 max-w-sm w-full">
+          <div className="bg-white rounded p-6 max-w-md w-full">
             <p className="mb-4">
               Are you sure you want to delete &ldquo;{jobToDelete.name}&rdquo;? This cannot be
               undone.
             </p>
+            <p className="text-muted-foreground text-sm mb-4">
+              The backup repository is kept by default, so a new job named &ldquo;
+              {jobToDelete.name}&rdquo; on <code>{jobToDelete.destination_label}</code> will
+              continue its history.
+            </p>
+            <label className="flex items-start gap-2 mb-4 text-sm">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={deleteRepository}
+                onChange={(e) => setDeleteRepository(e.target.checked)}
+              />
+              <span>
+                Also permanently delete the repository and all its snapshots at{' '}
+                <code>
+                  /destinations/{jobToDelete.destination_label}/{jobToDelete.name}
+                </code>
+                . <span className="text-destructive">This cannot be undone.</span>
+              </span>
+            </label>
             <div className="flex gap-2 justify-end">
               <button
                 className="px-4 py-2 bg-destructive text-destructive-foreground hover:bg-destructive/90 rounded-sm"
                 onClick={handleConfirmDelete}
               >
-                Yes, Delete
+                {deleteRepository ? 'Yes, Delete Job and Repository' : 'Yes, Delete'}
               </button>
               <button className="px-4 py-2 border rounded" onClick={() => setJobToDelete(null)}>
                 Cancel

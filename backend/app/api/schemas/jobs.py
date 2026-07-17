@@ -10,12 +10,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.api.schemas.base import UTCDateTime
 from app.db.models import CheckMode, CompressionMode, ScheduleType
 
-# Labels and source_subpath are single path components concatenated into
-# /sources/<label>[/<subpath>] and /destinations/<label>/<job_id>. The
+# name, the labels, and source_subpath are single path components concatenated
+# into /sources/<label>[/<subpath>] and /destinations/<label>/<name>. The
 # whitelist requires a leading word character (\w — unicode letters, digits,
 # underscore) so '.', '..', and hidden '.name' directories are rejected, then
 # allows word characters, spaces, inner dots, and hyphens. '/' is excluded
 # entirely, so a value can never traverse outside its mount root.
+#
+# `name` is included because it names the job's repository directory — it is
+# not a free-text label. That also rules out punctuation like the em-dash in
+# 'Documents — Daily'.
 _PATH_COMPONENT_RE = re.compile(r"^[\w][\w .-]*$")
 _INTERVAL_RE = re.compile(r"^([1-9][0-9]*)(h|d|m)$")
 
@@ -130,6 +134,11 @@ class JobCreate(BaseModel):
     check_subset_percent: Optional[int] = Field(None, ge=1, le=100)
     check_timeout_hours: Optional[int] = None
 
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        return _validate_label(v, "name")
+
     @field_validator("source_label")
     @classmethod
     def validate_source_label(cls, v: str) -> str:
@@ -205,6 +214,11 @@ class JobUpdate(BaseModel):
     check_subset_percent: Optional[int] = Field(None, ge=1, le=100)
     check_timeout_hours: Optional[int] = None
 
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: Optional[str]) -> Optional[str]:
+        return v if v is None else _validate_label(v, "name")
+
     @field_validator("source_label")
     @classmethod
     def validate_source_label(cls, v: Optional[str]) -> Optional[str]:
@@ -271,8 +285,8 @@ class JobResponse(BaseModel):
     """Full job record returned by all job endpoints.
 
     restic_password is always None — it is never exposed via the API.
-    has_successful_run, next_run_time, and last_run are computed at
-    request time and injected by the route helpers.
+    next_run_time and last_run are computed at request time and injected by
+    the route helpers.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -320,7 +334,6 @@ class JobResponse(BaseModel):
     updated_at: UTCDateTime
 
     # Computed fields injected by the route layer.
-    has_successful_run: bool = False
     next_run_time: Optional[UTCDateTime] = None
     last_run: Optional[RunSummarySchema] = None
 

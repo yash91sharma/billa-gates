@@ -31,6 +31,12 @@ def upgrade() -> None:
         sa.Column("default_job_timeout_hours", sa.Integer(), nullable=False),
         sa.Column("keep_last_runs", sa.Integer(), nullable=False),
         sa.Column("auto_unlock", sa.Boolean(), nullable=False),
+        sa.Column(
+            "metadata_timeout_seconds",
+            sa.Integer(),
+            nullable=False,
+            server_default="600",
+        ),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_table(
@@ -85,6 +91,11 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
+        # (destination_label, name) is the repo's on-disk address; see
+        # BackupJob.__table_args__.
+        sa.UniqueConstraint(
+            "destination_label", "name", name="uq_backup_jobs_destination_name"
+        ),
     )
     op.create_table(
         "backup_runs",

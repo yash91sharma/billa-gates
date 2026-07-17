@@ -48,8 +48,14 @@ docker run -d \
 Then open <http://localhost:12345>.
 
 - **Sources** are mounted read-only under `/sources/{label}` and become selectable in the UI.
-- **Destinations** (restic repositories) are mounted under `/destinations/{label}`.
+- **Destinations** are backup drives mounted under `/destinations/{label}`. Each job gets its own restic repository on that drive at `/destinations/{label}/{job name}`, created when you create the job.
 - Application state (SQLite DB + restic cache) lives in `/app/data` — keep it on a volume.
+
+## Recovering a job after losing the database
+
+A job's repository is named after the job itself — `/destinations/{destination}/{job name}` — so it never depends on the database to be found again. If `/app/data` is lost, or you delete a job by mistake, create a new job with the **same name, same destination, and same password**: it adopts the existing repository and carries on, with all previous snapshots intact and retention still applying to them.
+
+Because of that, three fields are fixed once a job is created — `name`, `destination`, and `password` — since together they are the address of the repository. Deleting a job leaves its repository on disk by default; tick **Also permanently delete the repository** in the delete dialog if you really want the snapshots gone.
 
 ## Quirks
 

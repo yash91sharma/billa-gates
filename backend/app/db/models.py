@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -98,6 +99,17 @@ class CompressionMode(str, Enum):
 
 class BackupJob(Base):
     __tablename__ = "backup_jobs"
+
+    # (destination_label, name) is the repository's on-disk address
+    # (/destinations/<destination_label>/<name>), so two jobs sharing it would
+    # silently write into one repo. The API layer additionally rejects
+    # case-only collisions, which this constraint cannot see but a
+    # case-insensitive filesystem (SMB, default APFS) would.
+    __table_args__ = (
+        UniqueConstraint(
+            "destination_label", "name", name="uq_backup_jobs_destination_name"
+        ),
+    )
 
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())

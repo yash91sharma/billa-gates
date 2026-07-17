@@ -15,8 +15,6 @@ Each test walks a distinct critical user journey:
   destination must coexist (design doc §6).
 """
 
-import uuid
-from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from httpx import AsyncClient
@@ -57,11 +55,12 @@ async def test_job_full_crud_and_enable_disable_cycle(client: AsyncClient) -> No
         assert get_resp.status_code == 200
         assert get_resp.json()["name"] == "Original"
 
-        # Update name
-        update_payload = make_job_payload(name="Renamed")
+        # Update a mutable field (name/destination/password are immutable —
+        # they address the repository; see test_job_name_immutable_*).
+        update_payload = make_job_payload(name="Original", schedule_value="12h")
         update_resp = await client.put(f"/api/jobs/{job_id}", json=update_payload)
         assert update_resp.status_code == 200
-        assert update_resp.json()["name"] == "Renamed"
+        assert update_resp.json()["schedule_value"] == "12h"
 
         # Disable
         mock_sched.remove_job.reset_mock()
@@ -108,17 +107,16 @@ async def test_destination_label_immutable_after_creation(client: AsyncClient) -
         assert "destination" in update_resp.text.lower()
 
 
-async def test_restic_password_immutable_after_first_successful_run(
+async def test_restic_password_immutable_from_creation(
     client: AsyncClient,
-    engine,
 ) -> None:
-    """Per design doc §5 + §6: restic_password is immutable once the repo has
-    a successful run (changing the field can't change the on-disk repo's
-    password — that requires `restic key add/remove`)."""
-    from sqlalchemy.ext.asyncio import async_sessionmaker
+    """restic_password is immutable as soon as the job exists.
 
-    from app.db.models import BackupRun, RunStatus, TriggeredBy
-
+    The repository is initialized (and encrypted with this password) during
+    POST /api/jobs, so there is no window in which the field can be changed
+    safely — changing it could never change the on-disk repo's password, that
+    requires `restic key add/remove`.
+    """
     with patch("os.path.isdir", return_value=True):
         create_resp = await client.post(
             "/api/jobs",
@@ -127,32 +125,26 @@ async def test_restic_password_immutable_after_first_successful_run(
         assert create_resp.status_code == 201
         job_id: str = create_resp.json()["id"]
 
-        # Updating password before any successful run is allowed.
-        ok_payload = make_job_payload(restic_password="changed-while-no-runs")
-        ok_resp = await client.put(f"/api/jobs/{job_id}", json=ok_payload)
-        assert ok_resp.status_code == 200
-
-        # Insert a successful run directly into the DB to simulate one
-        # having completed (avoids spinning up backup_runner just for this).
-        factory = async_sessionmaker(engine, expire_on_commit=False)
-        async with factory() as s:
-            s.add(
-                BackupRun(
-                    id=str(uuid.uuid4()),
-                    job_id=job_id,
-                    status=RunStatus.success,
-                    triggered_by=TriggeredBy.manual,
-                    started_at=datetime.now(timezone.utc),
-                    finished_at=datetime.now(timezone.utc),
-                )
-            )
-            await s.commit()
-
-        # Now updating password is rejected.
         locked_payload = make_job_payload(restic_password="should-fail")
         locked_resp = await client.put(f"/api/jobs/{job_id}", json=locked_payload)
         assert locked_resp.status_code == 422
         assert "password" in locked_resp.text.lower()
+
+
+async def test_job_name_immutable_from_creation(client: AsyncClient) -> None:
+    """name addresses the repository directory, so it locks at creation."""
+    with patch("os.path.isdir", return_value=True):
+        create_resp = await client.post(
+            "/api/jobs", json=make_job_payload(name="photos")
+        )
+        assert create_resp.status_code == 201
+        job_id: str = create_resp.json()["id"]
+
+        resp = await client.put(
+            f"/api/jobs/{job_id}", json=make_job_payload(name="pictures")
+        )
+        assert resp.status_code == 422
+        assert "name" in resp.text.lower()
 
 
 async def test_two_jobs_with_same_labels_different_subpaths_coexist(

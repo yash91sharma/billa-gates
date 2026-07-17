@@ -16,13 +16,10 @@ from app.services.restic import (
     restic_version,
 )
 
-REPO = "/destinations/main/abc123"
+REPO = "/destinations/main/photos"
 PASSWORD = "s3cr3t"
-# Constant job_id for tests whose assertions don't depend on the value but
-# whose call into restic_backup/restic_forget now requires one.
-# Notes: `restic_forget_prune` was renamed to `restic_forget` once `--prune` was
+# Note: `restic_forget_prune` was renamed to `restic_forget` once `--prune` was
 # decoupled from forget (gaps.md H1) — prune now runs on its own schedule.
-TEST_JOB_ID = "00000000-0000-4000-8000-000000000000"
 
 
 def _make_process(returncode: int, stdout: str = "", stderr: str = "") -> AsyncMock:
@@ -280,7 +277,6 @@ async def test_backup_success_returns_zero_and_summary():
             PASSWORD,
             "/sources/documents",
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
         )
     assert code == 0
     assert summary is not None
@@ -295,7 +291,6 @@ async def test_backup_failure_nonzero():
             PASSWORD,
             "/sources/documents",
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
         )
     assert code != 0
     assert summary is None
@@ -313,7 +308,6 @@ async def test_backup_rc3_returns_summary_partial_backup():
             PASSWORD,
             "/sources/documents",
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
         )
     assert code == 3
     assert summary is not None
@@ -345,7 +339,6 @@ async def test_backup_timeout_kills_process():
                 PASSWORD,
                 "/sources/documents",
                 timeout_seconds=1,
-                job_id=TEST_JOB_ID,
             )
     assert code != 0
     assert "timed out" in stderr.lower()
@@ -365,7 +358,6 @@ async def test_backup_source_path_with_subpath():
             PASSWORD,
             "/sources/documents/photos",
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
         )
 
     assert "/sources/documents/photos" in captured["args"]
@@ -386,7 +378,6 @@ async def test_backup_exclude_patterns_flag():
             "/sources/documents",
             timeout_seconds=3600,
             exclude_patterns=["node_modules/", "*.tmp"],
-            job_id=TEST_JOB_ID,
         )
 
     cmd = " ".join(str(a) for a in captured["args"])
@@ -409,7 +400,6 @@ async def test_backup_exclude_caches_flag():
             "/sources/documents",
             timeout_seconds=3600,
             exclude_caches=True,
-            job_id=TEST_JOB_ID,
         )
 
     assert "--exclude-caches" in captured["args"]
@@ -430,18 +420,20 @@ async def test_backup_tags_flag():
             "/sources/documents",
             timeout_seconds=3600,
             tags=["weekly", "documents"],
-            job_id=TEST_JOB_ID,
         )
 
     cmd_list = list(captured["args"])
     assert "--tag" in cmd_list
 
 
-async def test_backup_includes_job_tag():
-    """Every backup must carry --tag job:<job_id> so retention can be scoped
-    by tag rather than by (host, paths). Without this tag, changing a job's
-    source_subpath puts new snapshots in a different `restic forget --group-by
-    paths` group and old-path snapshots are kept forever (gaps.md C3)."""
+async def test_backup_writes_no_job_identity_tag():
+    """Snapshots carry no per-job identity tag.
+
+    The repo at /destinations/<label>/<name> belongs to exactly one job, so
+    the repo is already the scope; retention across path changes (gaps.md C3)
+    is handled by `restic forget --group-by ''`. A job-id tag would also make
+    every snapshot invisible to a job recreated over the same repo.
+    """
     proc = _make_process(0, stdout=BACKUP_SUMMARY)
     captured = {}
 
@@ -449,27 +441,22 @@ async def test_backup_includes_job_tag():
         captured["args"] = args
         return proc
 
-    job_id = "11111111-2222-3333-4444-555555555555"
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         await restic_backup(
             REPO,
             PASSWORD,
             "/sources/documents",
             timeout_seconds=3600,
-            job_id=job_id,
         )
 
     args_list = list(captured["args"])
-    # The job tag must appear as a `--tag` flag followed by `job:<id>`.
-    indexes = [i for i, a in enumerate(args_list) if a == "--tag"]
-    assert any(args_list[i + 1] == f"job:{job_id}" for i in indexes), (
-        f"Expected --tag job:{job_id} in args, got {args_list}"
-    )
+    assert "--tag" not in args_list
+    assert not any(str(a).startswith("job:") for a in args_list)
 
 
-async def test_backup_job_tag_coexists_with_user_tags():
-    """User-supplied tags (job.tags) and the system-managed job tag must both
-    end up on the snapshot — restic accepts multiple --tag flags."""
+async def test_backup_still_passes_user_tags():
+    """job.tags is a user-facing feature and is unaffected by the removal of
+    the internal identity tag."""
     proc = _make_process(0, stdout=BACKUP_SUMMARY)
     captured = {}
 
@@ -477,21 +464,18 @@ async def test_backup_job_tag_coexists_with_user_tags():
         captured["args"] = args
         return proc
 
-    job_id = "11111111-2222-3333-4444-555555555555"
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         await restic_backup(
             REPO,
             PASSWORD,
             "/sources/documents",
             timeout_seconds=3600,
-            job_id=job_id,
-            tags=["weekly"],
+            tags=["weekly", "offsite"],
         )
 
     args_list = list(captured["args"])
     tag_values = [args_list[i + 1] for i, a in enumerate(args_list) if a == "--tag"]
-    assert f"job:{job_id}" in tag_values
-    assert "weekly" in tag_values
+    assert tag_values == ["weekly", "offsite"]
 
 
 async def test_backup_does_not_pass_verbose():
@@ -512,7 +496,6 @@ async def test_backup_does_not_pass_verbose():
             PASSWORD,
             "/sources/documents",
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
         )
 
     args_list = list(captured["args"])
@@ -529,7 +512,6 @@ async def test_backup_password_never_in_stdout():
             PASSWORD,
             "/sources/documents",
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
         )
     assert PASSWORD not in stdout
 
@@ -545,7 +527,6 @@ async def test_backup_password_never_in_stderr():
             PASSWORD,
             "/sources/documents",
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
         )
     assert PASSWORD not in stderr
 
@@ -562,7 +543,7 @@ async def test_latest_snapshot_id_returns_id_when_present():
     out = json.dumps([{"id": snap_id, "time": "2026-05-01T00:00:00Z"}])
     proc = _make_process(0, stdout=out)
     with patch("asyncio.create_subprocess_exec", return_value=proc):
-        result = await restic_latest_snapshot_id(REPO, PASSWORD, job_id=TEST_JOB_ID)
+        result = await restic_latest_snapshot_id(REPO, PASSWORD)
     assert result == snap_id
 
 
@@ -574,7 +555,7 @@ async def test_latest_snapshot_id_returns_none_on_empty_list():
 
     proc = _make_process(0, stdout="[]")
     with patch("asyncio.create_subprocess_exec", return_value=proc):
-        result = await restic_latest_snapshot_id(REPO, PASSWORD, job_id=TEST_JOB_ID)
+        result = await restic_latest_snapshot_id(REPO, PASSWORD)
     assert result is None
 
 
@@ -586,7 +567,7 @@ async def test_latest_snapshot_id_raises_on_nonzero_rc():
     proc = _make_process(1, stderr="Fatal: unable to open repo")
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         with pytest.raises(ResticError) as exc_info:
-            await restic_latest_snapshot_id(REPO, PASSWORD, job_id=TEST_JOB_ID)
+            await restic_latest_snapshot_id(REPO, PASSWORD)
     assert "snapshots command failed with exit code 1" in str(exc_info.value)
 
 
@@ -598,14 +579,13 @@ async def test_latest_snapshot_id_raises_on_malformed_json():
     proc = _make_process(0, stdout="not-json-at-all")
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         with pytest.raises(ResticError) as exc_info:
-            await restic_latest_snapshot_id(REPO, PASSWORD, job_id=TEST_JOB_ID)
+            await restic_latest_snapshot_id(REPO, PASSWORD)
     assert "malformed JSON" in str(exc_info.value)
 
 
-async def test_latest_snapshot_id_uses_tag_and_latest_flags():
-    """Must scope by --tag job:<id> and --latest 1 so the lookup is O(1) and
-    only ever returns this job's snapshots (not snapshots belonging to other
-    jobs sharing the destination)."""
+async def test_latest_snapshot_id_uses_latest_flag_without_tag():
+    """--latest 1 keeps the lookup O(1). No --tag: the repo holds exactly one
+    job's snapshots, so the newest one is by definition this job's parent."""
     from app.services.restic import restic_latest_snapshot_id
 
     proc = _make_process(0, stdout="[]")
@@ -616,16 +596,11 @@ async def test_latest_snapshot_id_uses_tag_and_latest_flags():
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        await restic_latest_snapshot_id(REPO, PASSWORD, job_id=TEST_JOB_ID)
+        await restic_latest_snapshot_id(REPO, PASSWORD)
 
     args_list = list(captured["args"])
     assert "--json" in args_list
-    # --tag job:<id>
-    tag_indexes = [i for i, a in enumerate(args_list) if a == "--tag"]
-    assert any(args_list[i + 1] == f"job:{TEST_JOB_ID}" for i in tag_indexes), (
-        f"Expected --tag job:{TEST_JOB_ID} in args, got {args_list}"
-    )
-    # --latest 1
+    assert "--tag" not in args_list
     assert "--latest" in args_list
     latest_idx = args_list.index("--latest")
     assert args_list[latest_idx + 1] == "1"
@@ -653,7 +628,6 @@ async def test_backup_passes_parent_when_provided():
             PASSWORD,
             "/sources/documents",
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
             parent_snapshot_id=parent_id,
         )
 
@@ -679,7 +653,6 @@ async def test_backup_omits_parent_when_none():
             PASSWORD,
             "/sources/documents",
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
             parent_snapshot_id=None,
         )
 
@@ -702,7 +675,6 @@ async def test_forget_prune_with_keep_last():
             REPO,
             PASSWORD,
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
             retain_keep_last=7,
         )
 
@@ -724,7 +696,6 @@ async def test_forget_prune_with_multiple_retention():
             REPO,
             PASSWORD,
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
             retain_keep_daily=7,
             retain_keep_weekly=4,
         )
@@ -750,7 +721,6 @@ async def test_forget_does_not_include_prune_flag():
             REPO,
             PASSWORD,
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
             retain_keep_last=5,
         )
 
@@ -777,7 +747,6 @@ async def test_forget_prune_timeout():
                 REPO,
                 PASSWORD,
                 timeout_seconds=1,
-                job_id=TEST_JOB_ID,
                 retain_keep_last=5,
             )
     assert code != 0
@@ -954,7 +923,6 @@ async def test_backup_includes_pinned_host_flag():
             PASSWORD,
             "/sources/documents",
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
         )
 
     args_list = list(captured["args"])
@@ -963,11 +931,16 @@ async def test_backup_includes_pinned_host_flag():
     assert args_list[host_idx + 1] == "billa-gates"
 
 
-async def test_forget_prune_scopes_by_job_tag_with_empty_group_by():
-    """`restic forget` must scope retention by --tag job:<job_id> with
-    --group-by '' (single group across all paths). The old --group-by paths
-    silently kept old-path snapshots forever whenever a job's source_subpath
-    changed (gaps.md C3)."""
+async def test_forget_uses_empty_group_by_and_no_tag_filter():
+    """`restic forget` must use --group-by '' (a single group across all paths
+    and hosts). The old --group-by paths silently kept old-path snapshots
+    forever whenever a job's source_subpath changed (gaps.md C3); --group-by ''
+    is what fixes that, and it does so without any tag filter.
+
+    It must NOT filter by tag: retention has to reach every snapshot in the
+    repo, including ones written before the current job row existed. A job-id
+    filter would leave those unprunable and the repo would grow without bound.
+    """
     proc = _make_process(0)
     captured = {}
 
@@ -975,26 +948,20 @@ async def test_forget_prune_scopes_by_job_tag_with_empty_group_by():
         captured["args"] = args
         return proc
 
-    job_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         await restic_forget(
             REPO,
             PASSWORD,
             timeout_seconds=3600,
-            job_id=job_id,
             retain_keep_last=5,
         )
 
     args_list = list(captured["args"])
-    # --group-by must be present and be the empty string (one logical group).
     assert "--group-by" in args_list
     gb_idx = args_list.index("--group-by")
     assert args_list[gb_idx + 1] == ""
-    # --tag must scope to this job_id.
-    tag_indexes = [i for i, a in enumerate(args_list) if a == "--tag"]
-    assert any(args_list[i + 1] == f"job:{job_id}" for i in tag_indexes), (
-        f"Expected --tag job:{job_id} in forget args, got {args_list}"
-    )
+    assert "--tag" not in args_list
+    assert not any(str(a).startswith("job:") for a in args_list)
 
 
 async def test_backup_json_flag_included():
@@ -1011,7 +978,6 @@ async def test_backup_json_flag_included():
             PASSWORD,
             "/sources/documents",
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
         )
 
     assert "--json" in captured["args"]
@@ -1032,7 +998,6 @@ async def test_backup_one_file_system_flag():
             "/sources/documents",
             timeout_seconds=3600,
             one_file_system=True,
-            job_id=TEST_JOB_ID,
         )
 
     assert "--one-file-system" in captured["args"]
@@ -1053,7 +1018,6 @@ async def test_backup_one_file_system_flag_absent_when_false():
             "/sources/documents",
             timeout_seconds=3600,
             one_file_system=False,
-            job_id=TEST_JOB_ID,
         )
 
     assert "--one-file-system" not in captured["args"]
@@ -1074,7 +1038,6 @@ async def test_backup_no_scan_flag():
             "/sources/documents",
             timeout_seconds=3600,
             no_scan=True,
-            job_id=TEST_JOB_ID,
         )
 
     assert "--no-scan" in captured["args"]
@@ -1095,7 +1058,6 @@ async def test_backup_pack_size_flag():
             "/sources/documents",
             timeout_seconds=3600,
             pack_size=128,
-            job_id=TEST_JOB_ID,
         )
 
     args_str = " ".join(str(a) for a in captured["args"])
@@ -1118,7 +1080,6 @@ async def test_backup_read_concurrency_flag():
             "/sources/documents",
             timeout_seconds=3600,
             read_concurrency=4,
-            job_id=TEST_JOB_ID,
         )
 
     args_str = " ".join(str(a) for a in captured["args"])
@@ -1141,7 +1102,6 @@ async def test_backup_compression_flag():
             "/sources/documents",
             timeout_seconds=3600,
             compression="max",
-            job_id=TEST_JOB_ID,
         )
 
     args_str = " ".join(str(a) for a in captured["args"])
@@ -1164,7 +1124,6 @@ async def test_backup_exclude_if_present_flag():
             "/sources/documents",
             timeout_seconds=3600,
             exclude_if_present=[".nobackup", ".ignore"],
-            job_id=TEST_JOB_ID,
         )
 
     args_str = " ".join(str(a) for a in captured["args"])
@@ -1188,7 +1147,6 @@ async def test_forget_prune_keep_within_flag():
             REPO,
             PASSWORD,
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
             retain_keep_within="7d",
         )
 
@@ -1210,7 +1168,6 @@ async def test_forget_prune_keep_hourly_flag():
             REPO,
             PASSWORD,
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
             retain_keep_hourly=24,
         )
 
@@ -1232,7 +1189,6 @@ async def test_forget_prune_keep_monthly_and_yearly_flags():
             REPO,
             PASSWORD,
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
             retain_keep_monthly=6,
             retain_keep_yearly=2,
         )
@@ -1257,7 +1213,6 @@ async def test_forget_prune_keep_within_hourly_flag():
             REPO,
             PASSWORD,
             timeout_seconds=3600,
-            job_id=TEST_JOB_ID,
             retain_keep_within_hourly="2d",
         )
 
@@ -1353,7 +1308,6 @@ async def test_backup_timeout_terminates_before_kill():
                 PASSWORD,
                 "/sources/documents",
                 timeout_seconds=1,
-                job_id=TEST_JOB_ID,
             )
 
     assert code != 0
@@ -1380,7 +1334,6 @@ async def test_forget_prune_timeout_terminates_before_kill():
                 REPO,
                 PASSWORD,
                 timeout_seconds=1,
-                job_id=TEST_JOB_ID,
                 retain_keep_last=5,
             )
 

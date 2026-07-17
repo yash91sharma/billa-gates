@@ -210,14 +210,19 @@ async def test_create_job_duplicate_source_destination(client):
 
 async def test_create_job_same_labels_different_subpaths_allowed(client):
     """Per design doc §6: duplicate key is (source_label, source_subpath,
-    destination_label). Different subpaths → different jobs."""
+    destination_label). Different subpaths → different jobs.
+
+    Distinct names because (destination_label, name) is the repo address.
+    """
     with patch("os.path.isdir", return_value=True):
         resp1 = await client.post(
-            "/api/jobs", json=make_job_payload(source_subpath="photos")
+            "/api/jobs",
+            json=make_job_payload(source_subpath="photos", name="Photos backup"),
         )
         assert resp1.status_code == 201
         resp2 = await client.post(
-            "/api/jobs", json=make_job_payload(source_subpath="videos")
+            "/api/jobs",
+            json=make_job_payload(source_subpath="videos", name="Videos backup"),
         )
     assert resp2.status_code == 201
 
@@ -340,13 +345,13 @@ async def test_list_jobs_excludes_output_fields(client):
     assert "error_output" not in job
 
 
-async def test_list_jobs_includes_has_successful_run(client):
+async def test_list_jobs_omits_has_successful_run(client):
+    """The field drove the password lock, which is now unconditional."""
     with patch("os.path.isdir", return_value=True):
         await client.post("/api/jobs", json=make_job_payload())
     resp = await client.get("/api/jobs")
     job = resp.json()[0]
-    assert "has_successful_run" in job
-    assert job["has_successful_run"] is False
+    assert "has_successful_run" not in job
 
 
 # ── GET /api/jobs/{id} ────────────────────────────────────────────────────────
@@ -376,14 +381,27 @@ async def test_get_job_password_excluded(client):
 # ── PUT /api/jobs/{id} ────────────────────────────────────────────────────────
 
 
-async def test_update_job_name(client):
+async def test_update_job_name_immutable(client):
+    """name is the repo directory, so it is locked from creation onward."""
     with patch("os.path.isdir", return_value=True):
         created = (await client.post("/api/jobs", json=make_job_payload())).json()
     update = make_job_payload(name="Updated Name")
     with patch("os.path.isdir", return_value=True):
         resp = await client.put(f"/api/jobs/{created['id']}", json=update)
+    assert resp.status_code == 422
+    assert "name" in resp.json()["detail"].lower()
+
+
+async def test_update_job_unchanged_name_is_allowed(client):
+    """Re-sending the same name is a no-op, not a rename — the edit form
+    round-trips every field, so this must not 422."""
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+    update = make_job_payload(name="Test Backup", schedule_value="12h")
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.put(f"/api/jobs/{created['id']}", json=update)
     assert resp.status_code == 200
-    assert resp.json()["name"] == "Updated Name"
+    assert resp.json()["schedule_value"] == "12h"
 
 
 async def test_update_job_destination_label_immutable(client):
@@ -484,13 +502,16 @@ async def test_update_job_password_immutable_after_run_with_snapshot(client, eng
     assert "restic_password" in resp.json()["detail"].lower()
 
 
-async def test_update_job_password_editable_before_success(client):
+async def test_update_job_password_resent_unchanged_is_allowed(client):
+    """The password is immutable, but re-sending the stored value is a no-op
+    rather than a rename attempt — see test_update_job_password_immutable_*."""
     with patch("os.path.isdir", return_value=True):
         created = (await client.post("/api/jobs", json=make_job_payload())).json()
-    update = make_job_payload(restic_password="newpassword")
+    update = make_job_payload(restic_password="secret123", schedule_value="8h")
     with patch("os.path.isdir", return_value=True):
         resp = await client.put(f"/api/jobs/{created['id']}", json=update)
     assert resp.status_code == 200
+    assert resp.json()["schedule_value"] == "8h"
 
 
 async def test_update_job_password_absent_leaves_unchanged(client):
@@ -627,16 +648,18 @@ async def test_update_job_partial_payload_keeps_omitted_fields(client):
         ).json()
 
     with patch("os.path.isdir", return_value=True):
-        resp = await client.put(f"/api/jobs/{created['id']}", json={"name": "Renamed"})
+        resp = await client.put(
+            f"/api/jobs/{created['id']}", json={"schedule_value": "12h"}
+        )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["name"] == "Renamed"
+    assert data["schedule_value"] == "12h"
+    assert data["name"] == "Test Backup"
     assert data["source_subpath"] == "photos"
     assert data["retain_keep_last"] == 5
     assert data["tags"] == ["daily"]
     assert data["timeout_hours"] == 12
     assert data["exclude_caches"] is True
-    assert data["schedule_value"] == "6h"
 
 
 async def test_update_job_without_check_fields_keeps_check_config(client):
@@ -658,7 +681,7 @@ async def test_update_job_without_check_fields_keeps_check_config(client):
     assert created["check_enabled"] is True
 
     # A full form-like payload that omits every check_* key.
-    update = make_job_payload(name="Edited")
+    update = make_job_payload(schedule_value="8h")
     update.pop("restic_password")
     with patch("os.path.isdir", return_value=True):
         resp = await client.put(f"/api/jobs/{created['id']}", json=update)
@@ -1274,118 +1297,6 @@ async def test_get_job_snapshots_genuine_failure_returns_503(client):
     assert resp.status_code == 503
 
 
-# ── has_successful_run field ──────────────────────────────────────────────────
-
-
-async def test_get_job_has_successful_run_true_after_success(client, engine):
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    from app.db.models import BackupRun, RunStatus, TriggeredBy
-
-    with patch("os.path.isdir", return_value=True):
-        created = (await client.post("/api/jobs", json=make_job_payload())).json()
-
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as s:
-        run = BackupRun(
-            id=str(uuid.uuid4()),
-            job_id=created["id"],
-            status=RunStatus.success,
-            triggered_by=TriggeredBy.scheduler,
-            started_at=datetime.now(timezone.utc),
-            finished_at=datetime.now(timezone.utc),
-        )
-        s.add(run)
-        await s.commit()
-
-    resp = await client.get(f"/api/jobs/{created['id']}")
-    assert resp.status_code == 200
-    assert resp.json()["has_successful_run"] is True
-
-
-async def test_list_jobs_has_successful_run_true_when_success_exists(client, engine):
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    from app.db.models import BackupRun, RunStatus, TriggeredBy
-
-    with patch("os.path.isdir", return_value=True):
-        created = (await client.post("/api/jobs", json=make_job_payload())).json()
-
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as s:
-        run = BackupRun(
-            id=str(uuid.uuid4()),
-            job_id=created["id"],
-            status=RunStatus.success,
-            triggered_by=TriggeredBy.scheduler,
-            started_at=datetime.now(timezone.utc),
-            finished_at=datetime.now(timezone.utc),
-        )
-        s.add(run)
-        await s.commit()
-
-    resp = await client.get("/api/jobs")
-    job = next(j for j in resp.json() if j["id"] == created["id"])
-    assert job["has_successful_run"] is True
-
-
-async def test_has_successful_run_true_after_warning_run(client, engine):
-    """has_successful_run drives the password-lock state in the edit form.
-    A warning run wrote a snapshot, so the lock must engage — otherwise the
-    UI invites a password change that breaks every future backup."""
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    from app.db.models import BackupRun, RunStatus, TriggeredBy
-
-    with patch("os.path.isdir", return_value=True):
-        created = (await client.post("/api/jobs", json=make_job_payload())).json()
-
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as s:
-        run = BackupRun(
-            id=str(uuid.uuid4()),
-            job_id=created["id"],
-            status=RunStatus.warning,
-            triggered_by=TriggeredBy.scheduler,
-            started_at=datetime.now(timezone.utc),
-            finished_at=datetime.now(timezone.utc),
-        )
-        s.add(run)
-        await s.commit()
-
-    resp = await client.get(f"/api/jobs/{created['id']}")
-    assert resp.status_code == 200
-    assert resp.json()["has_successful_run"] is True
-
-
-async def test_has_successful_run_false_when_only_failed_run(client, engine):
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    from app.db.models import BackupRun, RunStatus, TriggeredBy
-
-    with patch("os.path.isdir", return_value=True):
-        created = (await client.post("/api/jobs", json=make_job_payload())).json()
-
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as s:
-        run = BackupRun(
-            id=str(uuid.uuid4()),
-            job_id=created["id"],
-            status=RunStatus.failed,
-            triggered_by=TriggeredBy.scheduler,
-            started_at=datetime.now(timezone.utc),
-            finished_at=datetime.now(timezone.utc),
-        )
-        s.add(run)
-        await s.commit()
-
-    resp = await client.get(f"/api/jobs/{created['id']}")
-    assert resp.json()["has_successful_run"] is False
-
-
-# ── Scheduler registration on create/enable/disable ───────────────────────────
-
-
 async def test_create_enabled_job_registers_in_scheduler(client):
     add_calls = []
     with patch("os.path.isdir", return_value=True):
@@ -1533,7 +1444,9 @@ async def test_update_job_source_label_conflict_with_existing_job(client):
             ),
         )
 
-    update = make_job_payload(source_label="photos", destination_label="main")
+    update = make_job_payload(
+        name="Job 1", source_label="photos", destination_label="main"
+    )
     resp = await client.put(f"/api/jobs/{job1['id']}", json=update)
     assert resp.status_code == 409
 
@@ -1609,3 +1522,296 @@ async def test_create_job_hung_mount_probe_returns_422_promptly(client):
     assert resp.status_code == 422
     assert "not mounted" in resp.json()["detail"].lower()
     assert elapsed < 0.9, "route must answer at the probe timeout"
+
+
+# ── Repository identity: name as the repo directory ──────────────────────────
+
+
+async def test_job_snapshots_route_calls_list_snapshots_with_a_real_signature(client):
+    """Guard against the route drifting from list_snapshots' signature.
+
+    Every other test in this file mocks list_snapshots with a permissive
+    MagicMock, which happily swallows removed kwargs — a stale `job_id=` here
+    only blew up against the real service. autospec binds the call to the real
+    signature so that can't pass silently again.
+    """
+    with patch("os.path.isdir", return_value=True):
+        created = (
+            await client.post("/api/jobs", json=make_job_payload(name="photos"))
+        ).json()
+
+    with patch(
+        "app.services.snapshot_listing.list_snapshots", autospec=True, return_value=[]
+    ) as listed:
+        resp = await client.get(f"/api/jobs/{created['id']}/snapshots")
+
+    assert resp.status_code == 200
+    listed.assert_awaited_once()
+    # Positional: the name-keyed repo path and the job's password.
+    assert listed.await_args.args[0] == "/destinations/main/photos"
+    assert "job_id" not in listed.await_args.kwargs
+
+
+async def test_create_job_rejects_name_with_slash(client):
+    """name becomes a directory component — '/' must never reach the path."""
+    payload = make_job_payload(name="a/b")
+    resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+
+
+async def test_create_job_rejects_name_dotdot(client):
+    payload = make_job_payload(name="..")
+    resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+
+
+async def test_create_job_rejects_name_dot(client):
+    payload = make_job_payload(name=".")
+    resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+
+
+async def test_create_job_rejects_name_traversal(client):
+    payload = make_job_payload(name="../../etc")
+    resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+
+
+async def test_create_job_rejects_hidden_name(client):
+    payload = make_job_payload(name=".hidden")
+    resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+
+
+async def test_create_job_rejects_name_with_em_dash(client):
+    """The old help-text example 'Documents — Daily' is no longer valid."""
+    payload = make_job_payload(name="Documents — Daily")
+    resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+
+
+async def test_create_job_allows_plain_name_with_spaces_and_hyphens(client):
+    payload = make_job_payload(name="Photos 2026 - archive")
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 201
+
+
+# ── Uniqueness of (destination_label, name) ──────────────────────────────────
+
+
+async def test_create_job_duplicate_name_on_same_destination_rejected(client):
+    with patch("os.path.isdir", return_value=True):
+        first = await client.post("/api/jobs", json=make_job_payload(name="photos"))
+        assert first.status_code == 201
+        resp = await client.post(
+            "/api/jobs",
+            json=make_job_payload(name="photos", source_label="other"),
+        )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["conflicting_job_id"] == first.json()["id"]
+
+
+async def test_create_job_same_name_on_different_destination_allowed(client):
+    """Backing one dataset up to two drives under one name is the point of
+    scoping uniqueness per destination."""
+    with patch("os.path.isdir", return_value=True):
+        first = await client.post("/api/jobs", json=make_job_payload(name="photos"))
+        assert first.status_code == 201
+        resp = await client.post(
+            "/api/jobs",
+            json=make_job_payload(name="photos", destination_label="offsite"),
+        )
+    assert resp.status_code == 201
+
+
+async def test_create_job_duplicate_name_case_insensitive_rejected(client):
+    """SMB and default APFS are case-insensitive: 'Photos' and 'photos' would
+    be two rows sharing one directory."""
+    with patch("os.path.isdir", return_value=True):
+        await client.post("/api/jobs", json=make_job_payload(name="photos"))
+        resp = await client.post(
+            "/api/jobs",
+            json=make_job_payload(name="PHOTOS", source_label="other"),
+        )
+    assert resp.status_code == 409
+
+
+# ── Identity fields are immutable from creation ──────────────────────────────
+
+
+async def test_update_job_password_immutable_from_creation(client):
+    """The repo is initialized with the password at create time, so changing
+    it later would strand the repo — no run history required."""
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+    resp = await client.put(
+        f"/api/jobs/{created['id']}",
+        json=make_job_payload(restic_password="a-different-password"),
+    )
+    assert resp.status_code == 422
+    assert "password" in resp.json()["detail"].lower()
+
+
+async def test_job_response_has_no_has_successful_run_field(client):
+    """The field only ever drove the password lock, which is now unconditional."""
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.post("/api/jobs", json=make_job_payload())
+    assert "has_successful_run" not in resp.json()
+
+
+# ── Repository provisioning at create time ───────────────────────────────────
+
+
+async def test_create_job_initializes_repository_at_name_keyed_path(client):
+    from app.services.repository import RepoOutcome
+
+    with (
+        patch("os.path.isdir", return_value=True),
+        patch(
+            "app.services.repository.ensure_repository",
+            return_value=(RepoOutcome.initialized, ""),
+        ) as ensure,
+    ):
+        resp = await client.post("/api/jobs", json=make_job_payload(name="photos"))
+
+    assert resp.status_code == 201
+    ensure.assert_awaited_once()
+    assert ensure.await_args.args[0] == "/destinations/main/photos"
+    assert ensure.await_args.args[1] == "secret123"
+
+
+async def test_create_job_adopts_existing_repository(client):
+    """The recovery CUJ: recreating a job over an existing repo succeeds."""
+    from app.services.repository import RepoOutcome
+
+    with (
+        patch("os.path.isdir", return_value=True),
+        patch(
+            "app.services.repository.ensure_repository",
+            return_value=(RepoOutcome.adopted, ""),
+        ),
+    ):
+        resp = await client.post("/api/jobs", json=make_job_payload(name="photos"))
+    assert resp.status_code == 201
+
+
+async def test_create_job_rejects_wrong_password_for_existing_repository(client):
+    from app.services.repository import RepoOutcome
+
+    with (
+        patch("os.path.isdir", return_value=True),
+        patch(
+            "app.services.repository.ensure_repository",
+            return_value=(RepoOutcome.wrong_password, "wrong password"),
+        ),
+    ):
+        resp = await client.post("/api/jobs", json=make_job_payload(name="photos"))
+
+    assert resp.status_code == 422
+    assert "password" in resp.json()["detail"].lower()
+
+    listed = await client.get("/api/jobs")
+    assert listed.json() == [], "no job row may survive a failed provision"
+
+
+async def test_create_job_rejects_when_init_fails(client):
+    from app.services.repository import RepoOutcome
+
+    with (
+        patch("os.path.isdir", return_value=True),
+        patch(
+            "app.services.repository.ensure_repository",
+            return_value=(RepoOutcome.init_failed, "permission denied"),
+        ),
+    ):
+        resp = await client.post("/api/jobs", json=make_job_payload())
+
+    assert resp.status_code == 422
+    listed = await client.get("/api/jobs")
+    assert listed.json() == []
+
+
+async def test_create_job_rejects_when_repository_unreachable(client):
+    from app.services.repository import RepoOutcome
+
+    with (
+        patch("os.path.isdir", return_value=True),
+        patch(
+            "app.services.repository.ensure_repository",
+            return_value=(RepoOutcome.unreachable, "timed out"),
+        ),
+    ):
+        resp = await client.post("/api/jobs", json=make_job_payload())
+
+    assert resp.status_code == 422
+    listed = await client.get("/api/jobs")
+    assert listed.json() == []
+
+
+async def test_create_job_does_not_provision_on_duplicate(client):
+    """A 409 must not touch the disk."""
+    from app.services.repository import RepoOutcome
+
+    with patch("os.path.isdir", return_value=True):
+        await client.post("/api/jobs", json=make_job_payload(name="photos"))
+
+        with patch(
+            "app.services.repository.ensure_repository",
+            return_value=(RepoOutcome.initialized, ""),
+        ) as ensure:
+            resp = await client.post(
+                "/api/jobs",
+                json=make_job_payload(name="photos", source_label="other"),
+            )
+
+    assert resp.status_code == 409
+    ensure.assert_not_awaited()
+
+
+# ── DELETE and the repository ────────────────────────────────────────────────
+
+
+async def test_delete_job_keeps_repository_by_default(client):
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    with patch("app.services.repository.remove_repository") as remove:
+        resp = await client.delete(f"/api/jobs/{created['id']}")
+
+    assert resp.status_code == 204
+    remove.assert_not_awaited()
+
+
+async def test_delete_job_removes_repository_when_requested(client):
+    with patch("os.path.isdir", return_value=True):
+        created = (
+            await client.post("/api/jobs", json=make_job_payload(name="photos"))
+        ).json()
+
+    with patch(
+        "app.services.repository.remove_repository", return_value=True
+    ) as remove:
+        resp = await client.delete(f"/api/jobs/{created['id']}?delete_repository=true")
+
+    assert resp.status_code == 204
+    remove.assert_awaited_once_with("/destinations/main/photos")
+
+
+async def test_delete_job_keeps_job_when_repository_removal_fails(client):
+    """A refused rmtree must leave job and repo consistent, not half-deleted."""
+    from app.services.repository import RepositoryError
+
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    with patch(
+        "app.services.repository.remove_repository",
+        side_effect=RepositoryError("refusing to delete"),
+    ):
+        resp = await client.delete(f"/api/jobs/{created['id']}?delete_repository=true")
+
+    assert resp.status_code == 422
+    still_there = await client.get(f"/api/jobs/{created['id']}")
+    assert still_there.status_code == 200

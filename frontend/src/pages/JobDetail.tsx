@@ -416,7 +416,7 @@ export default function JobDetail() {
         <h2 className="text-lg font-semibold mb-2">Restore</h2>
         <pre className="bg-muted rounded-sm p-3 text-xs overflow-auto">
           {`# Restore with restic
-export RESTIC_REPOSITORY=/destinations/${job.destination_label}/${job.id}
+export RESTIC_REPOSITORY=/destinations/${job.destination_label}/${job.name}
 export RESTIC_PASSWORD=your-password-here
 restic snapshots
 restic restore latest --target ./restored`}
