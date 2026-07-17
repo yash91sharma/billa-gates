@@ -785,9 +785,13 @@ async def list_job_snapshots(
 ) -> List[SnapshotResponse]:
     """Query restic live for this job's snapshots, newest first.
 
-    Restic is the source of truth (gaps.md C4-Alt); the response is built
-    by calling `restic snapshots --tag job:<id> --no-lock --json` and is
-    cached briefly per repo path to absorb dashboard refresh storms.
+    Restic is the source of truth (gaps.md C4-Alt). The response is built by
+    calling `restic snapshots --json --no-lock` — deliberately unfiltered: the
+    repository at /destinations/<label>/<name> belongs to exactly one job, so
+    the repo *is* the scope. Filtering by a per-job tag would hide every
+    snapshot taken before the current job row existed (e.g. after a DB-loss
+    recovery). Results are cached briefly per repo path to absorb dashboard
+    refresh storms.
     """
     job = await _get_job_or_404(job_id, session)
     settings = await session.get(AppSettings, 1)
