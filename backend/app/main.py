@@ -86,6 +86,34 @@ if _STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
+# ── Service worker (root scope) ──────────────────────────────────────────────
+
+
+@app.get("/sw.js", include_in_schema=False)
+async def service_worker() -> Response:
+    """Serve the PWA service worker from the site root.
+
+    The bundle emits `sw.js` under the `/static/` prefix, but a service worker
+    only controls pages within (or below) the path it is served from. The SPA
+    lives at the root (`/`, `/jobs`, …), so the worker must be served from `/`
+    to obtain root scope. `Service-Worker-Allowed: /` is sent defensively so
+    the browser accepts the root scope regardless of the request path.
+
+    Registered before the catch-all so it is not shadowed by the SPA route.
+    """
+    sw = _STATIC_DIR / "sw.js"
+    if sw.exists():
+        return FileResponse(
+            str(sw),
+            media_type="application/javascript",
+            headers={
+                "Service-Worker-Allowed": "/",
+                "Cache-Control": "no-cache",
+            },
+        )
+    return Response(status_code=404)
+
+
 # ── Catch-all SPA route (must be registered last) ────────────────────────────
 
 
