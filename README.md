@@ -4,7 +4,7 @@
 
 # Billa-Gates
 
-A self-hosted web UI for scheduled [restic](https://restic.net/) backups — create
+A web app for scheduled [restic](https://restic.net/) backups — create
 backup jobs, run them on a schedule, apply retention, verify integrity, and get
 notified.
 
@@ -30,26 +30,65 @@ and issue if you find a bug.
 | -------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------- |
 | ![Jobs](frontend/screenshots/pages/Jobs.png) | ![Job detail](frontend/screenshots/pages/JobDetail.png) | ![Settings](frontend/screenshots/pages/Settings.png) |
 
-## Quick start
+## Note
 
-Published images are **arm64 only**. Please feel free to build your own `amd64` image if you need, instructions are in the [deployment.md](deployment.md) file.
+Published images are **arm64 only**. If you need `amd64`, build your own image — instructions are in [deployment.md](deployment.md).
+
+## Deploy
 
 ```bash
-docker run -d \
-  --name billa-gates \
-  -p 12345:12345 \
-  -e TZ=America/New_York \
-  -v billa-gates-data:/app/data \
-  -v /path/to/back/up:/sources/documents:ro \
-  -v /path/to/backup/drive:/destinations/main \
-  yash91sharma/billa-gates:latest
+mkdir billa-gates && cd billa-gates
+mkdir data   # holds the SQLite DB, restic cache etc.
 ```
 
-Then open <http://localhost:12345>.
+```yaml
+services:
+  billa-gates:
+    image: yash91sharma/billa-gates:latest
+    container_name: billa-gates
+    ports:
+      - '12345:12345'
+    environment:
+      - TZ=America/Los_Angeles
+    volumes:
+      # ── Sources (read-only) ── one line per folder you want to back up.
+      # The label after /sources/ is what shows up in the UI dropdown.
+      - /path/to/back/up:/sources/documents:ro
+      # - /path/to/photos:/sources/photos:ro
+
+      # ── Destinations (read-write) ── your backup drives.
+      # Each job creates its own restic repo at /destinations/{label}/{job name}.
+      - /path/to/backup/drive:/destinations/main
+
+      # ── App state (SQLite DB + restic cache) ── do not change the /app/data side.
+      - ./data:/app/data
+    restart: unless-stopped
+```
+
+## Sentinel files
+
+Billa-Gates refuses to run against a folder that is missing a sentinel file named `.billa_gates_check` at its root. Create one in **every source and destination folder** (on the host, using the real paths from your `volumes` block):
+
+```bash
+touch /path/to/back/up/.billa_gates_check       # each source
+touch /path/to/backup/drive/.billa_gates_check  # each destination
+```
+
+> [!IMPORTANT]
+> Do this **before** starting the container.
+
+Then open <http://localhost:12345> and create your first job.
 
 - **Sources** are mounted read-only under `/sources/{label}` and become selectable in the UI.
 - **Destinations** are backup drives mounted under `/destinations/{label}`. Each job gets its own restic repository on that drive at `/destinations/{label}/{job name}`, created when you create the job.
 - Application state (SQLite DB + restic cache) lives in `/app/data` — keep it on a volume.
+
+### A note on the `.billa_gates_check` sentinel files
+
+Network shares (SMB/NFS) and external USB drives can silently drop and reappear as **empty** directories. A backup run could record an empty snapshot — and retention could then prune real history. To prevent this, every source and destination folder must contain an empty `.billa_gates_check` file at its root. Billa-Gates checks for it before every backup and integrity run: if the file is missing, the run **fails** instead of operating on an unmounted or empty target.
+
+- Create the file once, on the underlying drive/share — not on a temporary mountpoint.
+- If a run fails with a missing-sentinel error, it usually means the mount actually dropped. Check the mount before recreating the file.
 
 ## Recovering a job after losing the database
 
@@ -60,9 +99,10 @@ Because of that, three fields are fixed once a job is created — `name`, `desti
 ## Quirks
 
 - **Interval schedules reset on container restart**:
-  Interval schedules (`6h`, `1d`, `30m`) count from application startup, not from the last backup. Restarting the container resets the countdown, so a container that restarts more often than the interval (auto-updaters, nightly host reboots) will keep pushing the next run into the future and the job may never fire. If your container restarts frequently, use a cron schedule instead — cron fires at fixed wall-clock times and is unaffected by restarts.
-- **Mount Check Safeguards (`.billa_gates_check`)**:
-  To protect against silent data loss when backing up network shares (like SMB/NFS mounts that can drop and appear empty) or external USB drives that might disconnect, Billa-Gates requires a sentinel file named `.billa_gates_check` to be present at the root of **every** mounted source folder (e.g. `/sources/documents/.billa_gates_check`) and **every** destination folder (e.g. `/destinations/main/.billa_gates_check`). If either file is missing, the backup or integrity check will fail immediately rather than running on an empty path or unmounted target.
+  Interval schedules (`6h`, `1d`, `30m`) count from application startup, not from the last backup. Restarting the container resets the countdown. If your container restarts frequently, use a cron schedule instead — cron fires at fixed wall-clock times and is unaffected by restarts.
+
+- Billa-Gates **must** run as a single-process container with exactly one (1) Uvicorn worker, and cannot be scaled horizontally:
+  The application uses Python's `asyncio.Lock` to coordinate and prevent overlapping backup, prune, or check runs on the same repository. Because locks are held in memory, running multiple Uvicorn workers (e.g., `--workers 4`) or scaling the container horizontally across multiple nodes will bypass this locking mechanism. If multiple workers or container replicas attempt to perform write operations (like backup, prune, or forget) on the same restic repository simultaneously, it will cause lock conflicts, failed runs, or potential repository write collisions.
 
 ## License
 
