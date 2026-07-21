@@ -441,86 +441,30 @@ describe('JobForm', () => {
     })
   })
 
-  describe('integrity verification section', () => {
-    // The form must expose every job setting (except the password) so an
-    // edit round-trips the full configuration — check_* fields were
-    // historically missing, and each save silently reset them.
-    it('exposes check_enabled as a checkbox (default off)', async () => {
-      const onSubmit = vi.fn()
-      const user = userEvent.setup()
-      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
-      const cb = screen.getByLabelText(/scheduled integrity check/i) as HTMLInputElement
-      expect(cb.checked).toBe(false)
-      await user.click(cb)
-      await user.type(screen.getByLabelText(/name/i), 'Test Job')
-      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ check_enabled: true }))
-    })
-
-    it('exposes check_mode as a select and sends null when unset', async () => {
-      const onSubmit = vi.fn()
-      const user = userEvent.setup()
-      render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
-      const select = screen.getByLabelText(/check mode/i)
-      expect(select.tagName).toBe('SELECT')
-      await user.type(screen.getByLabelText(/name/i), 'Test Job')
-      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      expect(onSubmit).toHaveBeenCalledWith(
-        expect.objectContaining({ check_mode: null, check_subset_percent: null })
-      )
-    })
-
-    it('shows subset percent input only when subset mode is selected', async () => {
-      const user = userEvent.setup()
+  describe('integrity verification is not part of the job form', () => {
+    // Integrity-check options are configured per-run in the "Trigger Integrity
+    // Check" popup on the Job Details page — not stored on the job. The form
+    // must therefore expose none of the check_* fields, and must never send
+    // them in its onSubmit payload (the backend keeps its defaults).
+    it('does not render any integrity-verification controls', () => {
       render(<JobForm onSubmit={vi.fn()} sourceMounts={['m']} destinationMounts={['d']} />)
-      expect(screen.queryByLabelText(/subset percent/i)).not.toBeInTheDocument()
-      await user.selectOptions(screen.getByLabelText(/check mode/i), 'subset')
-      expect(screen.getByLabelText(/subset percent/i)).toBeInTheDocument()
+      expect(screen.queryByText(/integrity verification/i)).not.toBeInTheDocument()
+      expect(screen.queryByLabelText(/scheduled integrity check/i)).not.toBeInTheDocument()
+      expect(screen.queryByLabelText(/check mode/i)).not.toBeInTheDocument()
+      expect(screen.queryByLabelText(/check timeout/i)).not.toBeInTheDocument()
     })
 
-    it('exposes check_timeout_hours as a number input', async () => {
+    it('omits every check_* key from the onSubmit payload', async () => {
       const onSubmit = vi.fn()
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
-      await user.type(screen.getByLabelText(/check timeout/i), '6')
       await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ check_timeout_hours: 6 }))
-    })
-
-    it('round-trips check settings when editing an existing job', async () => {
-      const onSubmit = vi.fn()
-      const user = userEvent.setup()
-      render(
-        <JobForm
-          job={{
-            ...baseJob,
-            check_enabled: true,
-            check_mode: 'subset',
-            check_subset_percent: 10,
-            check_timeout_hours: 6,
-          }}
-          onSubmit={onSubmit}
-          sourceMounts={['documents']}
-          destinationMounts={['main']}
-        />
-      )
-      expect(
-        (screen.getByLabelText(/scheduled integrity check/i) as HTMLInputElement).checked
-      ).toBe(true)
-      expect((screen.getByLabelText(/check mode/i) as HTMLSelectElement).value).toBe('subset')
-      expect((screen.getByLabelText(/subset percent/i) as HTMLInputElement).value).toBe('10')
-      expect((screen.getByLabelText(/check timeout/i) as HTMLInputElement).value).toBe('6')
-
-      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      expect(onSubmit).toHaveBeenCalledWith(
-        expect.objectContaining({
-          check_enabled: true,
-          check_mode: 'subset',
-          check_subset_percent: 10,
-          check_timeout_hours: 6,
-        })
-      )
+      const payload = onSubmit.mock.calls[0][0] as Record<string, unknown>
+      expect(payload).not.toHaveProperty('check_enabled')
+      expect(payload).not.toHaveProperty('check_mode')
+      expect(payload).not.toHaveProperty('check_subset_percent')
+      expect(payload).not.toHaveProperty('check_timeout_hours')
     })
   })
 
