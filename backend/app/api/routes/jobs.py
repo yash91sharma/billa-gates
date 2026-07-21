@@ -146,11 +146,18 @@ async def _build_job_response(
 
 @log_call
 async def _validate_mounts(source_label: str, destination_label: str) -> None:
-    """Raise HTTP 422 if either mount directory does not exist.
+    """Raise HTTP 422 if either mount directory does not exist, or if its
+    `.billa_gates_check` sentinel file is missing.
 
-    isdir runs through fs.run_probe: on a hung network mount the stat()
-    would otherwise block the event loop and freeze the whole app. A probe
-    timeout is reported as "not mounted".
+    isdir and the sentinel checks run through fs.run_probe: on a hung network
+    mount the stat() would otherwise block the event loop and freeze the whole
+    app. A probe timeout is reported as "not mounted".
+
+    The sentinel gate is what tells a live drive apart from an empty mountpoint
+    left behind by a detached drive — the directory exists either way, so
+    without it job creation would `restic init` a phantom repository onto the
+    container's ephemeral layer. Job creation reads the source and initializes
+    the destination repo, so both sentinels are required here.
     """
     if not await fs.run_probe(
         os.path.isdir, f"{_SOURCES_ROOT}/{source_label}", default=False
@@ -160,12 +167,37 @@ async def _validate_mounts(source_label: str, destination_label: str) -> None:
             detail=f"Source mount '/sources/{source_label}' is not mounted",
         )
     if not await fs.run_probe(
+        backup_runner.check_mount_file_exists, source_label, default=False
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Source mount '/sources/{source_label}' is present but its "
+                f"'.billa_gates_check' sentinel file was not found — the drive "
+                f"is probably not attached. Refusing to create the job."
+            ),
+        )
+    if not await fs.run_probe(
         os.path.isdir, f"{_DESTINATIONS_ROOT}/{destination_label}", default=False
     ):
         raise HTTPException(
             status_code=422,
             detail=(
                 f"Destination mount '/destinations/{destination_label}' is not mounted"
+            ),
+        )
+    if not await fs.run_probe(
+        backup_runner.check_destination_mount_file_exists,
+        destination_label,
+        default=False,
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Destination mount '/destinations/{destination_label}' is "
+                f"present but its '.billa_gates_check' sentinel file was not "
+                f"found — the drive is probably not attached. Refusing to "
+                f"initialize a repository there."
             ),
         )
 

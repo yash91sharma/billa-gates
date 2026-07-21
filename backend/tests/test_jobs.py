@@ -199,6 +199,49 @@ async def test_create_job_destination_not_mounted(client):
     assert "destination mount" in resp.json()["detail"].lower()
 
 
+async def test_create_job_source_sentinel_missing(client):
+    """Both mounts are present as directories but the SOURCE `.billa_gates_check`
+    sentinel is absent — an empty mountpoint left behind by a detached drive.
+    Creation must be refused with 422 naming the missing sentinel, so no restic
+    repo is initialized into an unmounted (ephemeral) directory."""
+    payload = make_job_payload()
+    with (
+        patch("os.path.isdir", return_value=True),
+        patch(
+            "app.services.backup_runner.check_mount_file_exists",
+            return_value=False,
+        ),
+    ):
+        resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert ".billa_gates_check" in detail
+    assert "documents" in detail
+
+
+async def test_create_job_destination_sentinel_missing(client):
+    """Destination mountpoint exists but its `.billa_gates_check` sentinel is
+    gone (drive detached). Creation must be refused with 422 naming the missing
+    sentinel rather than initializing a phantom repo on the container layer."""
+    payload = make_job_payload()
+    with (
+        patch("os.path.isdir", return_value=True),
+        patch(
+            "app.services.backup_runner.check_mount_file_exists",
+            return_value=True,
+        ),
+        patch(
+            "app.services.backup_runner.check_destination_mount_file_exists",
+            return_value=False,
+        ),
+    ):
+        resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert ".billa_gates_check" in detail
+    assert "main" in detail
+
+
 async def test_create_job_duplicate_source_destination(client):
     payload = make_job_payload()
     with patch("os.path.isdir", return_value=True):

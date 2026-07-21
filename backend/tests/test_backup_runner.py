@@ -3421,3 +3421,185 @@ async def test_step4_repo_missing_with_history_sends_failure_notification(engine
     run = await _get_run(engine, run_id)
     assert run.status == RunStatus.failed
     assert "refus" in (run.error_output or "").lower()
+
+
+# ── P0-2: destination sentinel gate on prune / check runs ─────────────────────
+
+
+async def test_run_prune_destination_sentinel_missing_fails_and_notifies(engine):
+    """A prune run must verify the destination `.billa_gates_check` sentinel
+    before touching restic. If the backup drive is detached (mountpoint present
+    but sentinel gone), the run is failed with a clear error naming the missing
+    sentinel, notify_on_failure fires, and `restic prune` is never invoked."""
+    from app.db.models import AppSettings, BackupRun, RunKind, RunStatus, TriggeredBy
+
+    await _setup_job(engine, destination_label="main")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = str(uuid.uuid4())
+
+    async with factory() as s:
+        settings = await s.get(AppSettings, 1)
+        if settings:
+            settings.ntfy_topic = "alerts"
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                kind=RunKind.prune,
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    prune_called = {"v": False}
+
+    async def fake_prune(*args, **kwargs):
+        prune_called["v"] = True
+        return (0, "", "")
+
+    with (
+        patch(
+            "app.services.backup_runner.check_destination_mount_file_exists",
+            return_value=False,
+        ),
+        patch("app.services.restic.restic_prune", side_effect=fake_prune),
+        patch("app.services.backup_runner.send_notification") as mock_notify,
+    ):
+        await run_prune(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert run.error_output is not None
+    assert ".billa_gates_check" in run.error_output
+    assert "main" in run.error_output
+    assert prune_called["v"] is False
+
+    assert mock_notify.call_count == 1
+    assert "failed" in mock_notify.call_args[0][2].lower()
+    assert ".billa_gates_check" in mock_notify.call_args[0][3]
+
+
+async def test_run_prune_ignores_missing_source_sentinel(engine):
+    """Prune never reads /sources, so a missing source sentinel must not block
+    it — only the destination sentinel gates a prune run."""
+    from app.db.models import BackupRun, RunKind, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = str(uuid.uuid4())
+
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                kind=RunKind.prune,
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with (
+        patch(
+            "app.services.backup_runner.check_mount_file_exists",
+            return_value=False,
+        ),
+        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
+    ):
+        await run_prune(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.success
+
+
+async def test_run_check_destination_sentinel_missing_fails_and_notifies(engine):
+    """A check run must verify the destination sentinel before running restic
+    check. A detached backup drive fails the run with a clear error naming the
+    missing sentinel, fires notify_on_failure, and never invokes restic."""
+    from app.db.models import AppSettings, BackupRun, RunKind, RunStatus, TriggeredBy
+
+    await _setup_job(engine, destination_label="main")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = str(uuid.uuid4())
+
+    async with factory() as s:
+        settings = await s.get(AppSettings, 1)
+        if settings:
+            settings.ntfy_topic = "alerts"
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                kind=RunKind.check,
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    check_called = {"v": False}
+
+    async def fake_check(*args, **kwargs):
+        check_called["v"] = True
+        return (0, "", "")
+
+    with (
+        patch(
+            "app.services.backup_runner.check_destination_mount_file_exists",
+            return_value=False,
+        ),
+        patch("app.services.restic.restic_check", side_effect=fake_check),
+        patch("app.services.backup_runner.send_notification") as mock_notify,
+    ):
+        await run_check(JOB_ID, uuid.UUID(run_id), "structural", None, None)
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert run.error_output is not None
+    assert ".billa_gates_check" in run.error_output
+    assert "main" in run.error_output
+    assert check_called["v"] is False
+
+    assert mock_notify.call_count == 1
+    assert "failed" in mock_notify.call_args[0][2].lower()
+    assert ".billa_gates_check" in mock_notify.call_args[0][3]
+
+
+async def test_run_check_ignores_missing_source_sentinel(engine):
+    """Check never reads /sources, so a missing source sentinel must not block
+    it — only the destination sentinel gates a check run."""
+    from app.db.models import BackupRun, RunKind, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = str(uuid.uuid4())
+
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                kind=RunKind.check,
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with (
+        patch(
+            "app.services.backup_runner.check_mount_file_exists",
+            return_value=False,
+        ),
+        patch("app.services.restic.restic_check", return_value=(0, "", "")),
+    ):
+        await run_check(JOB_ID, uuid.UUID(run_id), "structural", None, None)
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.success

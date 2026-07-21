@@ -327,6 +327,62 @@ async def _finalize_if_canceled(
     return True
 
 
+async def _fail_run_missing_destination_sentinel(
+    factory: async_sessionmaker[AsyncSession],
+    job: BackupJob,
+    run_id: uuid.UUID,
+    *,
+    kind_label: str,
+) -> None:
+    """Finalize a prune/check run as failed because the destination
+    `.billa_gates_check` sentinel is absent, and fire a notify_on_failure alert.
+
+    A prune or check only touches the destination repository, so the
+    destination sentinel is the "this drive is really mounted" proof these
+    pipelines need before spawning restic. An empty mountpoint left behind by a
+    detached drive otherwise looks like a healthy directory, and restic would
+    silently operate against nothing. Mirrors run_backup's mount-check failure
+    path (clear error naming the missing file + notify_on_failure).
+    """
+    error_msg = (
+        f"Destination mount check failed: '.billa_gates_check' file was not "
+        f"found at the root of the destination mount "
+        f"'/destinations/{job.destination_label}' (or the mount did not respond "
+        f"within the probe timeout)."
+    )
+    logger.error(
+        f"job_id={job.id} run_id={run_id} step=verify_mount "
+        f"error=destination_mount_check_failed "
+        f"destination_label={job.destination_label}"
+    )
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        run: BackupRun | None = await s.get(BackupRun, str(run_id))
+        if run is not None:
+            run.status = RunStatus.failed
+            run.error_output = error_msg
+            run.finished_at = now
+            run.duration_seconds = int(
+                (now.replace(tzinfo=None) - run.started_at).total_seconds()
+            )
+            if not run.prune_status:
+                run.prune_status = PruneStatus.skipped
+            if not run.check_status:
+                run.check_status = CheckStatus.skipped
+            await s.commit()
+
+    async with factory() as s:
+        settings_obj: AppSettings | None = await s.get(AppSettings, 1)
+    if settings_obj and settings_obj.notify_on_failure and settings_obj.ntfy_topic:
+        await _try_notify(
+            settings_obj.ntfy_server_url,
+            settings_obj.ntfy_topic,
+            f"{kind_label} failed: {job.name}",
+            error_msg[:200],
+            token=settings_obj.ntfy_token,
+        )
+
+
 async def run_prune(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
     """Execute `restic prune` for a job's repo and finalize the run row.
 
@@ -372,6 +428,18 @@ async def run_prune(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         # A cancel that lands before the subprocess spawns must stop the
         # (possibly hours-long) prune from starting at all.
         if await _finalize_if_canceled(factory, job.name, run_id, kind_label="Prune"):
+            return
+
+        # Verify the destination sentinel before touching restic: an empty
+        # mountpoint left by a detached backup drive passes an isdir check but
+        # is not the real repo. Probed on a worker thread so a hung mount can't
+        # freeze the event loop.
+        if not await fs.run_probe(
+            check_destination_mount_file_exists, job.destination_label, default=False
+        ):
+            await _fail_run_missing_destination_sentinel(
+                factory, job, run_id, kind_label="Prune"
+            )
             return
 
         rc, _, prune_err = await restic.restic_prune(
@@ -593,6 +661,18 @@ async def run_check(
         if await _finalize_if_canceled(
             factory, job.name, run_id, kind_label="Verification"
         ):
+            return
+
+        # Verify the destination sentinel before touching restic (and before
+        # any "started" notification): an empty mountpoint left by a detached
+        # backup drive passes an isdir check but is not the real repo. Probed
+        # on a worker thread so a hung mount can't freeze the event loop.
+        if not await fs.run_probe(
+            check_destination_mount_file_exists, job.destination_label, default=False
+        ):
+            await _fail_run_missing_destination_sentinel(
+                factory, job, run_id, kind_label="Verification"
+            )
             return
 
         if notify_on_verification and ntfy_topic:
