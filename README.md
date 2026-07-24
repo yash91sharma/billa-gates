@@ -67,11 +67,12 @@ services:
 
 ## Sentinel files
 
-Billa-Gates refuses to run against a folder that is missing a sentinel file named `.billa_gates_check` at its root. Create one in **every source and destination folder** (on the host, using the real paths from your `volumes` block):
+Billa-Gates won't run against a folder missing a sentinel file (`.billa_gates_check`) at its root:
 
 ```bash
-touch /path/to/back/up/.billa_gates_check       # each source
-touch /path/to/backup/drive/.billa_gates_check  # each destination
+touch /path/to/back/up/.billa_gates_check         # each source mount
+touch /path/to/back/up/photos/.billa_gates_check  # each subfolder a job backs up
+touch /path/to/backup/drive/.billa_gates_check    # each destination
 ```
 
 > [!IMPORTANT]
@@ -80,15 +81,18 @@ touch /path/to/backup/drive/.billa_gates_check  # each destination
 Then open <http://localhost:12345> and create your first job.
 
 - **Sources** are mounted read-only under `/sources/{label}` and become selectable in the UI.
+- If a job sets a **Subfolder**, the folder it backs up is `/sources/{label}/{subfolder}` — that is its effective backup path, and it needs its own sentinel file. A sentinel at the mount root does not cover it.
 - **Destinations** are backup drives mounted under `/destinations/{label}`. Each job gets its own restic repository on that drive at `/destinations/{label}/{job name}`, created when you create the job.
-- Application state (SQLite DB + restic cache) lives in `/app/data` — keep it on a volume.
 
-### A note on the `.billa_gates_check` sentinel files
-
-Network shares (SMB/NFS) and external USB drives can silently drop and reappear as **empty** directories. A backup run could record an empty snapshot — and retention could then prune real history. To prevent this, every source and destination folder must contain an empty `.billa_gates_check` file at its root. Billa-Gates checks for it before every backup and integrity run: if the file is missing, the run **fails** instead of operating on an unmounted or empty target.
+| Job configuration                     | Effective backup path | Sentinel file                            |
+| ------------------------------------- | --------------------- | ---------------------------------------- |
+| Source `documents`, no subfolder      | `/sources/documents`  | `/sources/documents/.billa_gates_check`  |
+| Source `nas` + subfolder `photos`     | `/sources/nas/photos` | `/sources/nas/photos/.billa_gates_check` |
+| Destination `main` (any job using it) | `/destinations/main`  | `/destinations/main/.billa_gates_check`  |
 
 - Create the file once, on the underlying drive/share — not on a temporary mountpoint.
 - If a run fails with a missing-sentinel error, it usually means the mount actually dropped. Check the mount before recreating the file.
+- Application state (SQLite DB + restic cache) lives in `/app/data` — keep it on a volume.
 
 ## Recovering a job after losing the database
 

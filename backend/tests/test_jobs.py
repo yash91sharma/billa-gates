@@ -219,6 +219,54 @@ async def test_create_job_source_sentinel_missing(client):
     assert "documents" in detail
 
 
+async def test_create_job_source_sentinel_checked_at_subpath(client):
+    """A job with source_subpath backs up /sources/<label>/<subpath>, so the
+    sentinel has to be verified there. A sentinel at the mount root alone must
+    not let the job be created — every run would then be free to snapshot an
+    empty subfolder and let retention forget the real history."""
+    payload = make_job_payload(source_subpath="photos")
+    probe_calls: list[tuple[str, str | None]] = []
+
+    def sentinel(label: str, subpath: str | None = None) -> bool:
+        probe_calls.append((label, subpath))
+        return False  # present at the mount root, absent in the subfolder
+
+    with (
+        patch("os.path.isdir", return_value=True),
+        patch(
+            "app.services.backup_runner.check_mount_file_exists",
+            side_effect=sentinel,
+        ),
+    ):
+        resp = await client.post("/api/jobs", json=payload)
+
+    assert resp.status_code == 422
+    assert probe_calls == [("documents", "photos")]
+    detail = resp.json()["detail"]
+    assert ".billa_gates_check" in detail
+    assert "/sources/documents/photos" in detail
+
+
+async def test_create_job_succeeds_when_subpath_sentinel_present(client):
+    """Mirror case: sentinel inside the subfolder → creation goes through."""
+    payload = make_job_payload(source_subpath="photos")
+
+    def sentinel(label: str, subpath: str | None = None) -> bool:
+        return (label, subpath) == ("documents", "photos")
+
+    with (
+        patch("os.path.isdir", return_value=True),
+        patch(
+            "app.services.backup_runner.check_mount_file_exists",
+            side_effect=sentinel,
+        ),
+    ):
+        resp = await client.post("/api/jobs", json=payload)
+
+    assert resp.status_code == 201
+    assert resp.json()["source_subpath"] == "photos"
+
+
 async def test_create_job_destination_sentinel_missing(client):
     """Destination mountpoint exists but its `.billa_gates_check` sentinel is
     gone (drive detached). Creation must be refused with 422 naming the missing

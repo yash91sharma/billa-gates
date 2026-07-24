@@ -50,12 +50,36 @@ SOURCES_ROOT: str = "/sources"
 
 
 @log_call
-def check_mount_file_exists(source_label: str) -> bool:
-    """Verify that the source mount contains the required sentinel check file.
+def build_source_path(source_label: str, source_subpath: Optional[str] = None) -> str:
+    """Return the path a run actually reads: ``/sources/<label>[/<subpath>]``.
 
-    Checks for .billa_gates_check at the root of the volume mount.
+    Single source of truth for the effective backup source, so the path the
+    sentinel is checked at can never drift from the path handed to restic.
     """
-    check_file_path = os.path.join(SOURCES_ROOT, source_label, ".billa_gates_check")
+    if source_subpath:
+        return os.path.join(SOURCES_ROOT, source_label, source_subpath)
+    return os.path.join(SOURCES_ROOT, source_label)
+
+
+@log_call
+def check_mount_file_exists(
+    source_label: str, source_subpath: Optional[str] = None
+) -> bool:
+    """Verify that the effective backup source contains the sentinel check file.
+
+    Checks for .billa_gates_check at the root of the directory that is actually
+    backed up — the mount root, or the subfolder when the job sets
+    `source_subpath`.
+
+    Checking only the mount root is not enough for a subpath job: the sentinel
+    would prove the mount is live while saying nothing about the subfolder. An
+    inner share that dropped, or a folder that was moved, leaves an empty
+    directory that restic turns into a 0-file snapshot — and `restic forget`
+    then prunes the real history against it.
+    """
+    check_file_path = os.path.join(
+        build_source_path(source_label, source_subpath), ".billa_gates_check"
+    )
     return os.path.exists(check_file_path)
 
 
@@ -915,17 +939,24 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         # is treated as "mount not verified" — exactly the don't-back-up-now
         # condition the sentinel exists to detect.
         logger.debug(f"job_id={job_id} run_id={current_run_id} step=verify_mount")
+        # Resolved before the check so the path proven live below is byte-for-byte
+        # the path handed to `restic backup` further down.
+        source_path: str = build_source_path(job.source_label, job.source_subpath)
         if not await fs.run_probe(
-            check_mount_file_exists, job.source_label, default=False
+            check_mount_file_exists,
+            job.source_label,
+            job.source_subpath,
+            default=False,
         ):
             error_msg = (
                 f"Mount check failed: '.billa_gates_check' file was not found "
-                f"at the root of the source mount '/sources/{job.source_label}' "
+                f"at the root of the backup source '{source_path}' "
                 f"(or the mount did not respond within the probe timeout)."
             )
             logger.error(
                 f"job_id={job_id} run_id={current_run_id} step=verify_mount "
-                f"error=mount_check_failed source_label={job.source_label}"
+                f"error=mount_check_failed source_label={job.source_label} "
+                f"source_subpath={job.source_subpath}"
             )
             async with factory() as s:
                 failed_run = await s.get(BackupRun, str(current_run_id))
@@ -1003,14 +1034,11 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 token=cast(str | None, settings_dict.get("ntfy_token")),
             )
 
-        # Build repo and source paths
+        # Build repo path. `source_path` was resolved back at the mount check
+        # (Step 2.5) — the verified path and the backed-up path are the same
+        # string by construction.
         job_dest_label: str = job.destination_label
-        job_source_label: str = job.source_label
-        job_source_subpath: str | None = job.source_subpath
         repo_path: str = repository.build_repo_path(job_dest_label, job.name)
-        source_path: str = f"/sources/{job_source_label}"
-        if job_source_subpath:
-            source_path = f"{source_path}/{job_source_subpath}"
 
         # Step 4: Init check
         #

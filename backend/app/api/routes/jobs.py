@@ -145,7 +145,11 @@ async def _build_job_response(
 
 
 @log_call
-async def _validate_mounts(source_label: str, destination_label: str) -> None:
+async def _validate_mounts(
+    source_label: str,
+    destination_label: str,
+    source_subpath: str | None = None,
+) -> None:
     """Raise HTTP 422 if either mount directory does not exist, or if its
     `.billa_gates_check` sentinel file is missing.
 
@@ -158,6 +162,10 @@ async def _validate_mounts(source_label: str, destination_label: str) -> None:
     without it job creation would `restic init` a phantom repository onto the
     container's ephemeral layer. Job creation reads the source and initializes
     the destination repo, so both sentinels are required here.
+
+    The source sentinel is required at the *effective* source path
+    (`/sources/<label>[/<subpath>]`) — the same path each run verifies — so a
+    subpath job cannot be created against a folder that will fail every run.
     """
     if not await fs.run_probe(
         os.path.isdir, f"{_SOURCES_ROOT}/{source_label}", default=False
@@ -167,14 +175,19 @@ async def _validate_mounts(source_label: str, destination_label: str) -> None:
             detail=f"Source mount '/sources/{source_label}' is not mounted",
         )
     if not await fs.run_probe(
-        backup_runner.check_mount_file_exists, source_label, default=False
+        backup_runner.check_mount_file_exists,
+        source_label,
+        source_subpath,
+        default=False,
     ):
+        source_path = backup_runner.build_source_path(source_label, source_subpath)
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Source mount '/sources/{source_label}' is present but its "
-                f"'.billa_gates_check' sentinel file was not found — the drive "
-                f"is probably not attached. Refusing to create the job."
+                f"Backup source '{source_path}' has no '.billa_gates_check' "
+                f"sentinel file at its root — the drive is probably not "
+                f"attached, or that folder is not the one you meant. Refusing "
+                f"to create the job."
             ),
         )
     if not await fs.run_probe(
@@ -387,7 +400,9 @@ async def create_job(
     behind, and it is the reason name/destination_label/restic_password are
     immutable afterwards: together they address the repo.
     """
-    await _validate_mounts(body.source_label, body.destination_label)
+    await _validate_mounts(
+        body.source_label, body.destination_label, body.source_subpath
+    )
     await _check_duplicate(
         body.source_label, body.source_subpath, body.destination_label, session
     )

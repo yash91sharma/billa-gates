@@ -126,6 +126,26 @@ describe('JobForm', () => {
       )
     })
 
+    it('points the sentinel hint at the source mount when no subfolder is set', async () => {
+      const user = userEvent.setup()
+      render(
+        <JobForm onSubmit={vi.fn()} sourceMounts={['documents']} destinationMounts={['main']} />
+      )
+      await user.selectOptions(screen.getByLabelText(/source/i), 'documents')
+      expect(screen.getByText('/sources/documents')).toBeInTheDocument()
+    })
+
+    it('points the sentinel hint at the subfolder once one is set', async () => {
+      // The folder actually backed up is /sources/<label>/<subfolder>, so that
+      // is where `.billa_gates_check` has to live — a sentinel at the mount
+      // root does not cover it, and the backend refuses the job without one.
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={vi.fn()} sourceMounts={['nas']} destinationMounts={['main']} />)
+      await user.selectOptions(screen.getByLabelText(/source/i), 'nas')
+      await user.type(screen.getByLabelText(/subfolder|subpath/i), 'photos')
+      expect(screen.getByText('/sources/nas/photos')).toBeInTheDocument()
+    })
+
     it('includes source_subpath in the onSubmit payload when filled', async () => {
       const onSubmit = vi.fn()
       const user = userEvent.setup()

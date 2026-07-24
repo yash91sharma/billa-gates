@@ -45,14 +45,14 @@ const HELP: Record<string, FieldHelp> = {
   source: {
     label: 'Source',
     description:
-      'Mounted folder to back up. Sources come from /sources/<label> in docker-compose and are mounted read-only. IMPORTANT: The root folder of the mount must contain a .billa_gates_check file, or else the backup will fail.',
+      'Mounted folder to back up. Sources come from /sources/<label> in docker-compose and are mounted read-only. IMPORTANT: The folder this job actually backs up must contain a .billa_gates_check file at its root — the mount root, or the subfolder below if you set one — or else the backup will fail.',
     example: 'documents',
   },
   subfolder: {
     label: 'Subfolder',
     optional: true,
     description:
-      'Back up a single direct subfolder of the source mount instead of the whole mount. No slashes — one level only.',
+      'Back up a single direct subfolder of the source mount instead of the whole mount. No slashes — one level only. The subfolder needs its own .billa_gates_check file: a sentinel at the mount root proves the mount is up but says nothing about the subfolder, which could be empty or gone.',
     example: 'photos',
   },
   destination: {
@@ -441,8 +441,13 @@ export default function JobForm({
               )}
               {sourceLabel && (
                 <p className="text-muted-foreground text-xs mt-1">
-                  ⚠️ The root directory of source <code>{sourceLabel}</code> must contain a{' '}
-                  <code>.billa_gates_check</code> file.
+                  ⚠️ The folder this job backs up must contain a <code>.billa_gates_check</code>{' '}
+                  file at its root:{' '}
+                  <code>
+                    {sourceSubpath
+                      ? `/sources/${sourceLabel}/${sourceSubpath}`
+                      : `/sources/${sourceLabel}`}
+                  </code>
                 </p>
               )}
             </div>
