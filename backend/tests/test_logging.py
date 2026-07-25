@@ -443,3 +443,55 @@ async def test_request_id_propagates_through_route_and_log_call(caplog, client):
         assert r.request_id == rid, (
             f"record {r.funcName!r} had request_id={r.request_id!r}, expected {rid!r}"
         )
+
+
+# ── @log_call does no work for log lines nobody will see ─────────────────────
+
+
+def test_log_call_skips_return_repr_when_debug_is_disabled(caplog):
+    """`repr()` of a return value is built eagerly, so at INFO — the default —
+    every decorated call paid to materialize a string that was then thrown
+    away. For restic_backup, whose return value carried the whole stdout blob,
+    that repr alone roughly doubled peak memory (measured: 549 MB → 951 MB on a
+    210 MB stream). Nothing expensive may run unless DEBUG is enabled."""
+    from unittest.mock import patch as _patch
+
+    from app.core.logging import log_call
+
+    @log_call
+    def returns_a_blob() -> str:
+        return "x" * 1000
+
+    setup_logging()
+    with _patch("app.core.logging._truncate_repr") as mock_repr:
+        with caplog.at_level(logging.INFO):
+            returns_a_blob()
+        assert mock_repr.call_count == 0, (
+            "return value must not be repr()'d when DEBUG is off"
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            returns_a_blob()
+        assert mock_repr.call_count == 1, "at DEBUG the value is still logged"
+
+
+@pytest.mark.asyncio
+async def test_log_call_skips_return_repr_when_debug_is_disabled_async(caplog):
+    """Same guarantee on the async path — that is where restic_backup lives."""
+    from unittest.mock import patch as _patch
+
+    from app.core.logging import log_call
+
+    @log_call
+    async def returns_a_blob_async() -> str:
+        return "x" * 1000
+
+    setup_logging()
+    with _patch("app.core.logging._truncate_repr") as mock_repr:
+        with caplog.at_level(logging.INFO):
+            await returns_a_blob_async()
+        assert mock_repr.call_count == 0
+
+        with caplog.at_level(logging.DEBUG):
+            await returns_a_blob_async()
+        assert mock_repr.call_count == 1

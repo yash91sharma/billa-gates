@@ -123,6 +123,23 @@ describe('RunDetail', () => {
       await waitFor(() => expect(screen.getByText(/Files: 10 new, 5 changed/)).toBeInTheDocument())
     })
 
+    it('shows the live progress line while the run is still running', async () => {
+      // The backend now writes a bounded output snapshot to the run row every
+      // few seconds during a backup, so this page's existing poll has
+      // something to show instead of a bare "running" badge for hours.
+      vi.mocked(api.getRun).mockResolvedValue(
+        makeRun({
+          status: 'running',
+          check_status: null,
+          backup_output: 'progress: 62% · 41,203/68,900 files · 12.4 GiB/19.8 GiB · eta 47m',
+        })
+      )
+      renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
+      await waitFor(() =>
+        expect(screen.getByText(/progress: 62% · 41,203\/68,900 files/)).toBeInTheDocument()
+      )
+    })
+
     it('shows error_output when present', async () => {
       vi.mocked(api.getRun).mockResolvedValue(
         makeRun({ status: 'failed', error_output: 'connection refused' })

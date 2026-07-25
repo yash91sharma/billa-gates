@@ -1,10 +1,12 @@
 import asyncio
+import codecs
 import contextlib
 import json
 import os
 import re
+import time
 import uuid as _uuid
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Tuple
 
 from app.core.logging import get_logger, log_call
 from app.services import process_registry
@@ -222,6 +224,215 @@ async def restic_latest_snapshot_id(
     return snap_id
 
 
+# ── Streamed, bounded capture of `restic backup --json` output ───────────────
+#
+# In JSON mode restic emits a progress line ~50 times a second for the whole
+# duration of a run (~12 KB/s, ~44 MB/hour) — the terminal refresh cadence is
+# kept even when stdout is a pipe. Reading that with `communicate()` held every
+# byte in memory until the process exited (~1 GB RSS on a five-hour backup once
+# the decode/scrub/repr copies are counted), and then all of it was dropped
+# before the run row was written. The collector below consumes the stream line
+# by line and keeps a fixed-size view of it instead: error lines, the final
+# summary, non-JSON diagnostics, and one continuously overwritten progress
+# line. Memory is O(1) in the length of the run.
+
+# Retained-output ceiling. Generous for a post-mortem (thousands of error
+# lines) and still small enough to sit in a DB row and a run-detail response.
+_MAX_RETAINED_OUTPUT_CHARS: int = 256 * 1024
+_MAX_RETAINED_LINE_CHARS: int = 8 * 1024
+_STREAM_CHUNK_BYTES: int = 65536
+# How often the caller may be handed a snapshot of the retained output. At
+# ~50 status lines/second, flushing per line would mean 50 DB writes/second.
+_DEFAULT_PROGRESS_INTERVAL_SECONDS: float = 15.0
+
+
+def _format_bytes(num_bytes: object) -> Optional[str]:
+    """Render a byte count for the human-readable progress line."""
+    if not isinstance(num_bytes, (int, float)) or isinstance(num_bytes, bool):
+        return None
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    value = float(num_bytes)
+    index = 0
+    while value >= 1024 and index < len(units) - 1:
+        value /= 1024
+        index += 1
+    return (
+        f"{int(value)} {units[index]}" if index == 0 else f"{value:.1f} {units[index]}"
+    )
+
+
+def _format_eta(seconds: object) -> Optional[str]:
+    """Render restic's `seconds_remaining` as a short ETA, or None if absent.
+
+    restic omits it until it has scanned enough to estimate.
+    """
+    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool):
+        return None
+    total = int(seconds)
+    if total <= 0:
+        return None
+    if total < 60:
+        return f"eta {total}s"
+    if total < 3600:
+        return f"eta {total // 60}m"
+    return f"eta {total // 3600}h {(total % 3600) // 60}m"
+
+
+def _format_progress(status: Dict[str, Any]) -> str:
+    """Collapse one restic `message_type=status` line into a single line.
+
+    Only what an operator watching a run wants to know — how far along, how
+    many files, how many bytes, how much longer. Everything else in the status
+    message (the rotating `current_files` list above all) is noise once it is
+    one second old.
+    """
+    parts: List[str] = []
+
+    percent = status.get("percent_done")
+    if isinstance(percent, (int, float)) and not isinstance(percent, bool):
+        parts.append(f"{percent * 100:.0f}%")
+
+    files_done = status.get("files_done")
+    total_files = status.get("total_files")
+    if isinstance(files_done, int) and isinstance(total_files, int):
+        parts.append(f"{files_done:,}/{total_files:,} files")
+    elif isinstance(files_done, int):
+        parts.append(f"{files_done:,} files")
+
+    bytes_done = _format_bytes(status.get("bytes_done"))
+    total_bytes = _format_bytes(status.get("total_bytes"))
+    if bytes_done and total_bytes:
+        parts.append(f"{bytes_done}/{total_bytes}")
+    elif bytes_done:
+        parts.append(bytes_done)
+
+    eta = _format_eta(status.get("seconds_remaining"))
+    if eta:
+        parts.append(eta)
+
+    return f"progress: {' · '.join(parts)}" if parts else "progress: running"
+
+
+class _BoundedOutput:
+    """Fixed-size accumulator for a subprocess stream.
+
+    Keeps whole lines up to `max_chars`, truncates any single oversized line,
+    and counts what it had to drop so the caller can say output was omitted
+    rather than silently losing it.
+    """
+
+    def __init__(
+        self, password: str, max_chars: int = _MAX_RETAINED_OUTPUT_CHARS
+    ) -> None:
+        self._password = password
+        self._max_chars = max_chars
+        self._lines: List[str] = []
+        self._chars = 0
+        self._dropped = 0
+
+    def scrub(self, line: str) -> str:
+        """Strip the repo password. Per line now, since there is no longer a
+        whole-stream string to run a single replace() over."""
+        return line.replace(self._password, "") if self._password else line
+
+    def add(self, line: str, *, force: bool = False) -> None:
+        """Retain one line, unless that would push us past the ceiling.
+
+        `force` is for the lines that must survive at any cost (the summary),
+        which arrive last and would otherwise be lost behind an error flood.
+        """
+        if len(line) > _MAX_RETAINED_LINE_CHARS:
+            line = line[:_MAX_RETAINED_LINE_CHARS] + "…<truncated>"
+        if not force and self._chars + len(line) > self._max_chars:
+            self._dropped += 1
+            return
+        self._lines.append(line)
+        self._chars += len(line) + 1
+
+    def text(self, *, extra: Optional[str] = None) -> str:
+        parts = list(self._lines)
+        if self._dropped:
+            parts.append(
+                f"... {self._dropped} more output line(s) omitted "
+                f"(retained output is capped at {self._max_chars} characters)"
+            )
+        if extra:
+            parts.append(extra)
+        return "\n".join(parts)
+
+
+class _BackupOutputCollector:
+    """Classify `restic backup --json` lines into a bounded run record."""
+
+    def __init__(self, password: str) -> None:
+        self._out = _BoundedOutput(password)
+        self.summary: Optional[Dict[str, Any]] = None
+        self.progress: Optional[str] = None
+
+    def feed(self, line: str) -> None:
+        line = self._out.scrub(line.rstrip("\r"))
+        stripped = line.strip()
+        if not stripped:
+            return
+
+        parsed: Optional[Dict[str, Any]] = None
+        if stripped.startswith("{"):
+            try:
+                candidate: Any = json.loads(stripped)
+            except json.JSONDecodeError:
+                candidate = None
+            if isinstance(candidate, dict):
+                parsed = candidate
+
+        if parsed is not None:
+            message_type = parsed.get("message_type")
+            if message_type == "status":
+                # Never retained — this is the line that arrives 50x/second.
+                self.progress = _format_progress(parsed)
+                return
+            if message_type == "summary":
+                self.summary = parsed
+                # Force-retained: it is the run's receipt and it arrives last,
+                # after any per-file error flood that may have filled the cap.
+                self._out.add(line, force=True)
+                return
+
+        self._out.add(line)
+
+    def text(self) -> str:
+        """The retained record, newest progress last."""
+        return self._out.text(extra=self.progress)
+
+
+async def _pump_stream(
+    stream: asyncio.StreamReader, on_line: Callable[[str], Awaitable[None]]
+) -> None:
+    """Feed `on_line` complete lines as they arrive, with O(1) memory.
+
+    Decoding is incremental so a multi-byte character split across two reads is
+    not mangled into replacement characters, and a pathologically long line
+    with no newline is flushed at the retention limit rather than growing
+    without bound.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    buffer = ""
+    while True:
+        chunk = await stream.read(_STREAM_CHUNK_BYTES)
+        if not chunk:
+            break
+        buffer += decoder.decode(chunk)
+        if "\n" in buffer:
+            *complete, buffer = buffer.split("\n")
+            for line in complete:
+                await on_line(line)
+        if len(buffer) > _MAX_RETAINED_LINE_CHARS:
+            await on_line(buffer)
+            buffer = ""
+    buffer += decoder.decode(b"", final=True)
+    if buffer:
+        await on_line(buffer)
+
+
 @log_call
 async def restic_backup(
     repo_path: str,
@@ -231,9 +442,23 @@ async def restic_backup(
     *,
     parent_snapshot_id: Optional[str] = None,
     run_id: Optional[_uuid.UUID] = None,
+    on_output: Optional[Callable[[str], Awaitable[None]]] = None,
+    progress_interval_seconds: Optional[float] = None,
     **kwargs: Any,
 ) -> Tuple[int, str, str, Optional[Dict[str, Any]]]:
-    """Run a backup."""
+    """Run a backup.
+
+    Returns (returncode, retained stdout, retained stderr, parsed summary).
+    Both output strings are bounded (see _BackupOutputCollector) — restic's
+    progress firehose is collapsed into a single progress line rather than
+    buffered.
+
+    `on_output`, when given, is awaited with a snapshot of the retained stdout
+    at most every `progress_interval_seconds` (and once as soon as there is
+    anything to show). The backup runner uses it to keep the run row up to date
+    while a long backup is still in flight. Exceptions from it are logged and
+    swallowed: persistence is a side-effect and must never abort a backup.
+    """
     env = _get_restic_env(repo_path, password)
 
     # --host is pinned to a fixed string so retention isn't silently split
@@ -292,13 +517,42 @@ async def restic_backup(
 
     # Always emit JSON so summary/error lines are machine-parseable. Never
     # add --verbose: it makes restic print one JSON line per new/changed
-    # file, which on a multi-million-file source is hundreds of MB buffered
-    # through communicate() and persisted to the run row. Error lines and
-    # the final summary are emitted regardless of verbosity.
+    # file, which on a multi-million-file source is hundreds of MB of output
+    # for no post-mortem value. Error lines and the final summary are emitted
+    # regardless of verbosity.
     args.append("--json")
 
     # Add source path
     args.append(source_path)
+
+    collector = _BackupOutputCollector(password)
+    stderr_output = _BoundedOutput(password)
+    interval: float = (
+        _DEFAULT_PROGRESS_INTERVAL_SECONDS
+        if progress_interval_seconds is None
+        else progress_interval_seconds
+    )
+    # A monotonic deadline of 0 means the first line flushes immediately, so a
+    # run that is slow to start still shows something before the first
+    # interval elapses.
+    next_flush: float = 0.0
+
+    async def _handle_stdout_line(line: str) -> None:
+        nonlocal next_flush
+        collector.feed(line)
+        if on_output is None:
+            return
+        now = time.monotonic()
+        if now < next_flush:
+            return
+        next_flush = now + interval
+        try:
+            await on_output(collector.text())
+        except Exception as exc:
+            logger.warning(f"progress flush failed (non-fatal): {exc!r}")
+
+    async def _handle_stderr_line(line: str) -> None:
+        stderr_output.add(stderr_output.scrub(line.rstrip("\r")))
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -307,42 +561,37 @@ async def restic_backup(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        stdout_stream = proc.stdout
+        stderr_stream = proc.stderr
+        assert stdout_stream is not None and stderr_stream is not None
         with _tracked(run_id, proc):
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout_seconds
+
+            async def _drain() -> None:
+                # Both pipes must be drained concurrently: a full stderr pipe
+                # would block restic even while stdout is being consumed.
+                await asyncio.gather(
+                    _pump_stream(stdout_stream, _handle_stdout_line),
+                    _pump_stream(stderr_stream, _handle_stderr_line),
                 )
+                await proc.wait()
+
+            try:
+                await asyncio.wait_for(_drain(), timeout=timeout_seconds)
             except asyncio.TimeoutError:
                 await _terminate_then_kill(proc)
-                return (-1, "", "backup timed out", None)
+                # Keep what was collected: on a timeout the partial record is
+                # the only evidence of where the run got to.
+                return (-1, collector.text(), "backup timed out", None)
     except Exception as e:
         return (-1, "", str(e), None)
 
-    stdout_str: str = stdout.decode()
-    stderr_str: str = stderr.decode()
-
-    # Strip password from both streams — stderr is persisted verbatim into
-    # BackupRun.error_output on failure, so it needs the same treatment.
-    stdout_str = stdout_str.replace(password, "")
-    stderr_str = stderr_str.replace(password, "")
-
-    # Parse JSON summary from last line. rc=3 is restic's "partial backup
-    # completed; snapshot was created" code — the summary line is present and
-    # must be parsed so the snapshot can be recorded as a warning run.
-    summary: Optional[Dict[str, Any]] = None
+    # rc=3 is restic's "partial backup completed; snapshot was created" code —
+    # the summary line is present and must be used so the snapshot can be
+    # recorded as a warning run.
     assert proc.returncode is not None
-    if proc.returncode in (0, 3):
-        for line in reversed(stdout_str.split("\n")):
-            if line.strip().startswith("{"):
-                try:
-                    parsed = json.loads(line)
-                    if parsed.get("message_type") == "summary":
-                        summary = parsed
-                        break
-                except json.JSONDecodeError:
-                    pass
+    summary = collector.summary if proc.returncode in (0, 3) else None
 
-    return proc.returncode, stdout_str, stderr_str, summary
+    return proc.returncode, collector.text(), stderr_output.text(), summary
 
 
 @log_call

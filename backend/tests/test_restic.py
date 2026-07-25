@@ -22,21 +22,37 @@ PASSWORD = "s3cr3t"
 # decoupled from forget (gaps.md H1) — prune now runs on its own schedule.
 
 
-def _make_process(returncode: int, stdout: str = "", stderr: str = "") -> AsyncMock:
+class _FakeStream:
+    """Minimal StreamReader stand-in that hands out a payload in chunks.
+
+    `restic_backup` consumes stdout/stderr incrementally (see
+    app/services/restic.py::_pump_stream), so the fake has to *drain* — an
+    always-returns-everything read() would spin forever. `chunk_size` lets a
+    test force reads to land mid-line (or mid-UTF-8-character).
+    """
+
+    def __init__(self, data: bytes, chunk_size: int = 65536) -> None:
+        self._data = data
+        self._pos = 0
+        self._chunk_size = chunk_size
+
+    async def read(self, n: int = -1) -> bytes:
+        if self._pos >= len(self._data):
+            return b""
+        size = self._chunk_size if n is None or n < 0 else min(n, self._chunk_size)
+        chunk = self._data[self._pos : self._pos + size]
+        self._pos += len(chunk)
+        return chunk
+
+
+def _make_process(
+    returncode: int, stdout: str = "", stderr: str = "", chunk_size: int = 65536
+) -> AsyncMock:
     proc = AsyncMock()
     proc.returncode = returncode
-    proc.stdout = AsyncMock()
-    proc.stderr = AsyncMock()
-
-    async def stdout_read(*args, **kwargs):
-        return stdout.encode()
-
-    async def stderr_read(*args, **kwargs):
-        return stderr.encode()
-
+    proc.stdout = _FakeStream(stdout.encode(), chunk_size)
+    proc.stderr = _FakeStream(stderr.encode(), chunk_size)
     proc.communicate = AsyncMock(return_value=(stdout.encode(), stderr.encode()))
-    proc.stdout.read = stdout_read
-    proc.stderr.read = stderr_read
     proc.wait = AsyncMock(return_value=returncode)
     proc.kill = MagicMock()
     proc.terminate = MagicMock()
@@ -529,6 +545,200 @@ async def test_backup_password_never_in_stderr():
             timeout_seconds=3600,
         )
     assert PASSWORD not in stderr
+
+
+# ── restic_backup: streamed, bounded output ──────────────────────────────────
+#
+# In JSON mode restic emits a progress line ~50 times a second for the whole
+# run (~12 KB/s, ~44 MB/hour). Buffering that whole stream costs GBs of RAM on
+# a long backup — and all of it was dropped before the run row was written.
+# The wrapper must consume the stream incrementally and keep a bounded view of
+# it: errors, the summary, non-JSON diagnostics, and one live progress line.
+
+
+def _status_line(files_done: int, percent: float = 0.5) -> str:
+    return json.dumps(
+        {
+            "message_type": "status",
+            "seconds_remaining": 120,
+            "percent_done": percent,
+            "total_files": 68900,
+            "files_done": files_done,
+            "total_bytes": 21260929843,
+            "bytes_done": 13314398208,
+            "current_files": ["/sources/photos/2021/album/IMG_1234.jpg"],
+        }
+    )
+
+
+def _error_line(path: str) -> str:
+    return json.dumps(
+        {
+            "message_type": "error",
+            "error": {"message": "input/output error"},
+            "during": "archival",
+            "item": path,
+        }
+    )
+
+
+async def test_backup_drops_progress_lines_from_retained_output():
+    """Progress lines must never reach the retained output — they are the
+    entire memory problem and carry no post-mortem value."""
+    stream = (
+        "\n".join(_status_line(i) for i in range(500))
+        + "\n"
+        + _error_line("/sources/documents/locked.db")
+        + "\n"
+        + BACKUP_SUMMARY
+    )
+    proc = _make_process(0, stdout=stream)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        code, stdout, _stderr, summary = await restic_backup(
+            REPO, PASSWORD, "/sources/documents", timeout_seconds=3600
+        )
+
+    assert code == 0
+    assert '"message_type":"status"' not in stdout.replace(" ", "")
+    assert "/sources/documents/locked.db" in stdout, "error lines must be kept"
+    assert summary is not None and summary["files_new"] == 10
+    assert len(stdout) < 10_000, (
+        f"500 progress lines must not reach the run row (got {len(stdout)} chars)"
+    )
+
+
+async def test_backup_keeps_one_live_progress_line():
+    """'Some sort of progress' is kept: a single, continuously overwritten
+    human-readable line, so the run row shows where the backup got to."""
+    stream = "\n".join(_status_line(i, percent=i / 100) for i in range(1, 100))
+    proc = _make_process(0, stdout=stream + "\n" + BACKUP_SUMMARY)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        _code, stdout, _stderr, _summary = await restic_backup(
+            REPO, PASSWORD, "/sources/documents", timeout_seconds=3600
+        )
+
+    progress_lines = [ln for ln in stdout.splitlines() if ln.startswith("progress:")]
+    assert len(progress_lines) == 1, "exactly one progress line, always the newest"
+    assert "99/68900 files" in progress_lines[0].replace(",", "")
+
+
+async def test_backup_retained_output_is_capped():
+    """A pathological run (millions of per-file errors) must not put the whole
+    stream in the run row either — the retained view is hard-capped."""
+    from app.services.restic import _MAX_RETAINED_OUTPUT_CHARS
+
+    stream = "\n".join(_error_line(f"/sources/documents/f{i}") for i in range(20000))
+    proc = _make_process(0, stdout=stream + "\n" + BACKUP_SUMMARY)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        _code, stdout, _stderr, summary = await restic_backup(
+            REPO, PASSWORD, "/sources/documents", timeout_seconds=3600
+        )
+
+    assert len(stdout) <= _MAX_RETAINED_OUTPUT_CHARS + 4096
+    assert "omitted" in stdout, "the user must be told output was dropped"
+    assert summary is not None, (
+        "the summary drives the run's stats columns and must survive the cap"
+    )
+
+
+async def test_backup_flushes_output_snapshots_while_running():
+    """The wrapper hands the caller periodic snapshots so a live run can show
+    progress; without it the run row stays empty until restic exits."""
+    snapshots: list[str] = []
+
+    async def on_output(text: str) -> None:
+        snapshots.append(text)
+
+    stream = "\n".join(_status_line(i) for i in range(200)) + "\n" + BACKUP_SUMMARY
+    proc = _make_process(0, stdout=stream)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        await restic_backup(
+            REPO,
+            PASSWORD,
+            "/sources/documents",
+            timeout_seconds=3600,
+            on_output=on_output,
+            progress_interval_seconds=0,
+        )
+
+    assert snapshots, "on_output must be called during the run"
+    assert any("progress:" in s for s in snapshots)
+
+
+async def test_backup_flush_is_throttled():
+    """Flushing on every status line would mean ~50 DB writes a second."""
+    calls: list[str] = []
+
+    async def on_output(text: str) -> None:
+        calls.append(text)
+
+    stream = "\n".join(_status_line(i) for i in range(500)) + "\n" + BACKUP_SUMMARY
+    proc = _make_process(0, stdout=stream)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        await restic_backup(
+            REPO,
+            PASSWORD,
+            "/sources/documents",
+            timeout_seconds=3600,
+            on_output=on_output,
+            progress_interval_seconds=3600,
+        )
+
+    assert len(calls) == 1, (
+        f"expected a single initial flush inside the interval, got {len(calls)}"
+    )
+
+
+async def test_backup_survives_a_failing_output_flush():
+    """A DB hiccup while persisting progress must never abort the backup."""
+
+    async def on_output(text: str) -> None:
+        raise RuntimeError("db is locked")
+
+    proc = _make_process(0, stdout=_status_line(1) + "\n" + BACKUP_SUMMARY)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        code, _stdout, _stderr, summary = await restic_backup(
+            REPO,
+            PASSWORD,
+            "/sources/documents",
+            timeout_seconds=3600,
+            on_output=on_output,
+            progress_interval_seconds=0,
+        )
+
+    assert code == 0
+    assert summary is not None
+
+
+async def test_backup_scrubs_password_from_streamed_lines():
+    """Scrubbing moved per-line with the streaming rewrite; it must still hold
+    for retained lines and for the progress line's file paths."""
+    proc = _make_process(
+        0, stdout=f"warning: could not read {PASSWORD}\n" + BACKUP_SUMMARY
+    )
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        _code, stdout, _stderr, _summary = await restic_backup(
+            REPO, PASSWORD, "/sources/documents", timeout_seconds=3600
+        )
+
+    assert PASSWORD not in stdout
+    assert "could not read" in stdout
+
+
+async def test_backup_handles_multibyte_split_across_chunks():
+    """The stream is read in fixed-size chunks; a UTF-8 character straddling a
+    chunk boundary must not be mangled into replacement characters."""
+    name = "/sources/documents/café-αβγ-日本語.txt"
+    # 3-byte chunks guarantee multi-byte characters are split mid-sequence.
+    proc = _make_process(
+        0, stdout=f"warning: skipped {name}\n" + BACKUP_SUMMARY, chunk_size=3
+    )
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        _code, stdout, _stderr, _summary = await restic_backup(
+            REPO, PASSWORD, "/sources/documents", timeout_seconds=3600
+        )
+
+    assert name in stdout
 
 
 # ── restic_latest_snapshot_id ────────────────────────────────────────────────

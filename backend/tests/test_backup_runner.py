@@ -3272,6 +3272,57 @@ async def test_run_backup_proceeds_when_subpath_sentinel_is_present(engine):
     )
 
 
+async def test_run_backup_persists_progress_snapshots_while_running(engine):
+    """The runner must hand restic_backup a sink that writes each bounded
+    output snapshot to the run row *during* the backup. Until this existed,
+    backup_output was written only after restic exited, so RunDetail's poll had
+    nothing to show for the whole (possibly multi-hour) run."""
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    mid_run_output: list[str | None] = []
+
+    async def fake_backup(*args, on_output=None, **kwargs):
+        assert on_output is not None, "runner must pass an output sink"
+        # Simulate restic emitting progress, then read the row back the way
+        # the API would while the run is still in flight.
+        await on_output("progress: 62% · 41203/68900 files")
+        async with factory() as s:
+            row = await s.get(BackupRun, run_id)
+            mid_run_output.append(row.backup_output if row else None)
+        return (0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY)
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch("app.services.restic.restic_backup", side_effect=fake_backup),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert mid_run_output == ["progress: 62% · 41203/68900 files"], (
+        "the snapshot must be visible in the run row before the backup returns"
+    )
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.success
+    assert run.backup_output is not None
+    assert "summary" in run.backup_output, "final output still wins at the end"
+
+
 async def test_run_backup_fails_on_parent_lookup_failure(engine):
     """Verify that if restic_latest_snapshot_id raises a ResticError (such as a timeout
     or network failure), the backup fails cleanly and records the error, preventing

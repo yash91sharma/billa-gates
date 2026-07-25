@@ -173,22 +173,26 @@ def log_call(fn: F) -> F:
 
         @functools.wraps(fn)
         def sync_wrapper(*args: object, **kwargs: object) -> object:
-            sanitized_args: object = sanitize(
-                _redact_positional(args, sensitive_positions)
-            )
-            sanitized_kwargs: object = sanitize(kwargs)
-            logger.debug(
-                "%s called args=%s kwargs=%s",
-                fn.__name__,
-                sanitized_args,
-                sanitized_kwargs,
-            )
+            # Both sanitize() and _truncate_repr() build throwaway copies of
+            # the data, so they must not run when the DEBUG line they feed
+            # would be discarded anyway. _truncate_repr in particular repr()s
+            # the whole return value before trimming it: on restic_backup,
+            # whose return carried the full stdout blob, that one call roughly
+            # doubled peak memory (measured 549 MB → 951 MB on a 210 MB stream)
+            # at the default INFO level.
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "%s called args=%s kwargs=%s",
+                    fn.__name__,
+                    sanitize(_redact_positional(args, sensitive_positions)),
+                    sanitize(kwargs),
+                )
             try:
                 result: object = fn(*args, **kwargs)
-                sanitized_result: object = sanitize(result)
-                logger.debug(
-                    "%s returned %s", fn.__name__, _truncate_repr(sanitized_result)
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "%s returned %s", fn.__name__, _truncate_repr(sanitize(result))
+                    )
                 return result
             except Exception as exc:
                 logger.exception("%s raised %s", fn.__name__, exc)
@@ -198,17 +202,19 @@ def log_call(fn: F) -> F:
 
     @functools.wraps(fn)
     async def async_wrapper(*args: object, **kwargs: object) -> object:
-        sanitized_args: object = sanitize(_redact_positional(args, sensitive_positions))
-        sanitized_kwargs: object = sanitize(kwargs)
-        logger.debug(
-            "%s called args=%s kwargs=%s", fn.__name__, sanitized_args, sanitized_kwargs
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "%s called args=%s kwargs=%s",
+                fn.__name__,
+                sanitize(_redact_positional(args, sensitive_positions)),
+                sanitize(kwargs),
+            )
         try:
             result: object = await fn(*args, **kwargs)
-            sanitized_result: object = sanitize(result)
-            logger.debug(
-                "%s returned %s", fn.__name__, _truncate_repr(sanitized_result)
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "%s returned %s", fn.__name__, _truncate_repr(sanitize(result))
+                )
             return result
         except Exception as exc:
             logger.exception("%s raised %s", fn.__name__, exc)

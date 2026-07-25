@@ -1289,6 +1289,24 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     await s.commit()
             parent_lookup_success = False
 
+        async def _persist_output_snapshot(output_text: str) -> None:
+            """Write a bounded progress snapshot to the run row mid-backup.
+
+            RunDetail polls the run row for the whole (possibly multi-hour)
+            run, but until now had nothing to show: backup_output was written
+            only after restic exited. `restic_backup` hands us a small snapshot
+            — the newest progress line plus any errors so far — every few
+            seconds, and the existing poll surfaces it. The final value is
+            still written by the stats step below, which wins.
+            """
+            async with factory() as s:
+                progress_run: BackupRun | None = await s.get(
+                    BackupRun, str(current_run_id)
+                )
+                if progress_run is not None:
+                    progress_run.backup_output = output_text
+                    await s.commit()
+
         backup_success: bool = False
         # rc=3 means restic ran but some files couldn't be read; the snapshot
         # was still saved. We treat it as success-with-warnings: prune + sync
@@ -1326,6 +1344,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     timeout_seconds,
                     parent_snapshot_id=parent_snapshot_id,
                     run_id=current_run_id,
+                    on_output=_persist_output_snapshot,
                     **backup_kwargs,
                 )
                 if await _was_canceled():
