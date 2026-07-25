@@ -1312,6 +1312,14 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         # was still saved. We treat it as success-with-warnings: prune + sync
         # still run, but the final status is `warning` (not `success`).
         backup_warning: bool = False
+        # `restic forget` *is* the retention policy — the only thing that drops
+        # old snapshots. Its usual failure causes (stale lock, permissions,
+        # disk full) persist across runs, so reporting such a run as `success`
+        # meant the badge, the run list and the ntfy push all looked healthy
+        # while the repo grew without bound until the destination filled up
+        # months later. The snapshot *was* written, so the run is not `failed`
+        # either — it is a `warning`.
+        retention_failed: bool = False
         summary: Optional[Dict[str, Any]] = None
         stdout: str = ""
 
@@ -1539,9 +1547,10 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                         else:
                             forget_run.prune_status = PruneStatus.failed
                             forget_run.prune_error_output = forget_err
+                            retention_failed = True
                             logger.warning(
                                 f"job_id={job_id} run_id={current_run_id} "
-                                f"step=forget status=failed"
+                                f"step=forget status=failed rc={rc}"
                             )
                         await s.commit()
             else:
@@ -1586,7 +1595,9 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 final_status: Any = final_run.status
                 if final_status == RunStatus.running:
                     final_run.status = (
-                        RunStatus.warning if backup_warning else RunStatus.success
+                        RunStatus.warning
+                        if (backup_warning or retention_failed)
+                        else RunStatus.success
                     )
                 final_run.finished_at = now
                 now_naive: datetime = now.replace(tzinfo=None)
@@ -1620,9 +1631,21 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
             elif final_status_notify == RunStatus.warning and settings_dict.get(
                 "notify_on_warning"
             ):
+                # Name what actually went wrong. A run can be a warning because
+                # files were unreadable, because retention failed, or both —
+                # a body hardcoded to one of them misinforms the operator.
+                reasons: List[str] = []
+                if backup_warning:
+                    reasons.append(
+                        "some files could not be read; snapshot was still saved"
+                    )
+                if retention_failed:
+                    reasons.append(
+                        "retention (restic forget) failed — old snapshots were "
+                        "not removed, so the repository will keep growing"
+                    )
                 warn_msg: str = (
-                    f"Duration: {final_run.duration_seconds}s — some files "
-                    f"could not be read; snapshot was still saved."
+                    f"Duration: {final_run.duration_seconds}s — {'; '.join(reasons)}."
                 )
                 await _try_notify(
                     cast(str | None, settings_dict.get("ntfy_server_url")),

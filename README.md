@@ -9,9 +9,9 @@ backup jobs, run them on a schedule, apply retention, verify integrity, and get
 notified.
 
 > Note: I have used AI tools (Claude Code, Codex, Antigravity) to build this project, and I
-use this to backup my NAS directories (Photos, documents, log files). If you are using this,
-please first test (backup+restore) to make sure it works for your use case. Please do start
-and issue if you find a bug.
+> use this to backup my NAS directories (Photos, documents, log files). If you are using this,
+> please first test (backup+restore) to make sure it works for your use case. Please do start
+> and issue if you find a bug.
 
 ![Dashboard](frontend/screenshots/pages/Dashboard.png)
 

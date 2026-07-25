@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import * as api from '../lib/api'
 import type { BackupJob, BackupRun, Snapshot } from '../lib/types'
@@ -582,6 +582,35 @@ describe('JobDetail', () => {
     })
   })
 
+  describe('runs list retention column', () => {
+    it('shows each run’s retention outcome in the table', async () => {
+      // `restic forget` is the retention policy. Its failures persist across
+      // runs, so the operator needs to see the pattern in the history — not
+      // by opening runs one at a time.
+      vi.mocked(api.getJobRuns).mockResolvedValue([
+        makeRun({ id: 'r-1', status: 'warning', prune_status: 'failed' }),
+        makeRun({ id: 'r-2', status: 'success', prune_status: 'passed' }),
+      ])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      const table = await screen.findByRole('table')
+
+      expect(screen.getByText('Retention')).toBeInTheDocument()
+      const rows = Array.from(table.querySelectorAll('tbody tr'))
+      expect(within(rows[0] as HTMLElement).getByText('failed')).toBeInTheDocument()
+      expect(within(rows[1] as HTMLElement).getByText('passed')).toBeInTheDocument()
+    })
+
+    it('marks the run itself as a warning when retention failed', async () => {
+      // Backend contract: a failed forget is never reported as success.
+      vi.mocked(api.getJobRuns).mockResolvedValue([
+        makeRun({ id: 'r-1', status: 'warning', prune_status: 'failed' }),
+      ])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await screen.findByRole('table')
+      expect(screen.getByText('warning')).toBeInTheDocument()
+    })
+  })
+
   describe('runs list statistics columns', () => {
     it('renders Total Size, Added size, Files, and Snapshot columns for runs with stats', async () => {
       vi.mocked(api.getJobRuns).mockResolvedValue([
@@ -637,17 +666,18 @@ describe('JobDetail', () => {
 
       // Kind (0): 'prune'
       // Status (1): 'success' (RunStatusBadge)
-      // Started (2): date
-      // Duration (3): duration
-      // Total Size (4): '—'
-      // Added (5): '—'
-      // Files (6): '—'
-      // Snapshot (7): '—'
-      // Triggered By (8): Icon
-      expect(cells[4]).toBe('—')
+      // Retention (2): prune_status (RunStatusBadge)
+      // Started (3): date
+      // Duration (4): duration
+      // Total Size (5): '—'
+      // Added (6): '—'
+      // Files (7): '—'
+      // Snapshot (8): '—'
+      // Triggered By (9): Icon
       expect(cells[5]).toBe('—')
       expect(cells[6]).toBe('—')
       expect(cells[7]).toBe('—')
+      expect(cells[8]).toBe('—')
     })
   })
 

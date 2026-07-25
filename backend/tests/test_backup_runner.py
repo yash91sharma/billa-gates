@@ -1422,10 +1422,15 @@ async def test_step8_forget_called_when_retention_set(engine):
     assert prune_called["v"] is False, "backup pipeline must never call restic_prune"
 
 
-async def test_step8_forget_failure_nonfatal(engine):
-    """If `restic forget` fails (e.g. transient repo error), the run still
-    succeeds — forget is a maintenance step. The failure is recorded on the
-    run via prune_status=failed + prune_error_output."""
+async def test_step8_forget_failure_marks_run_warning(engine):
+    """A failed `restic forget` must NOT report the run as success.
+
+    forget *is* the retention policy — the only thing that drops old
+    snapshots. Its usual failure causes (stale lock, permissions, disk full)
+    persist across runs, so it fails every time while the badge, the run list
+    and the ntfy push all said "success"; the repo then grows without bound
+    until the destination fills months later. `warning` is the honest status:
+    the snapshot was written, but the policy did not apply."""
     await _setup_job(engine, retain_keep_last=7)
     run_id = str(uuid.uuid4())
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -1457,9 +1462,187 @@ async def test_step8_forget_failure_nonfatal(engine):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
     run = await _get_run(engine, run_id)
-    assert run.status == RunStatus.success
+    assert run.status == RunStatus.warning, (
+        "a failed retention must not be reported as a successful run"
+    )
     assert run.prune_status == PruneStatus.failed
     assert run.prune_error_output is not None
+    assert run.snapshot_id is not None, "the snapshot itself was still written"
+
+
+async def test_step8_forget_failure_notification_names_retention(engine):
+    """The warning push must say what actually went wrong. The body used to be
+    hardcoded to the rc=3 reason ('some files could not be read'), which would
+    be plain wrong for a retention failure."""
+    from app.db.models import AppSettings, BackupRun, RunStatus, TriggeredBy
+
+    await _setup_job(engine, retain_keep_last=7)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as s:
+        settings = await s.get(AppSettings, 1)
+        if settings:
+            settings.ntfy_topic = "alerts"
+            settings.notify_on_warning = True
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
+        ),
+        patch(
+            "app.services.restic.restic_forget",
+            return_value=(1, "", "repository is already locked"),
+        ),
+        patch("app.services.backup_runner.send_notification") as mock_notify,
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    # call_args is the last call — the completion push (the first one is the
+    # notify_on_start "Starting backup" message).
+    title, body = mock_notify.call_args[0][2], mock_notify.call_args[0][3]
+    assert "warning" in title.lower()
+    assert "retention" in body.lower()
+    assert "could not be read" not in body.lower(), (
+        "must not claim a read failure that did not happen"
+    )
+
+
+async def test_step8_partial_backup_and_forget_failure_reports_both(engine):
+    """rc=3 *and* a failed forget: one warning run naming both causes."""
+    from app.db.models import (
+        AppSettings,
+        BackupRun,
+        PruneStatus,
+        RunStatus,
+        TriggeredBy,
+    )
+
+    await _setup_job(engine, retain_keep_last=7)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as s:
+        settings = await s.get(AppSettings, 1)
+        if settings:
+            settings.ntfy_topic = "alerts"
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(3, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_forget", return_value=(1, "", "locked")),
+        patch("app.services.backup_runner.send_notification") as mock_notify,
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.warning
+    assert run.prune_status == PruneStatus.failed
+    body = mock_notify.call_args[0][3].lower()
+    assert "could not be read" in body
+    assert "retention" in body
+
+
+async def test_step8_partial_backup_alone_still_reports_the_read_failure(engine):
+    """The rc=3-only message must keep its original wording."""
+    from app.db.models import AppSettings, BackupRun, RunStatus, TriggeredBy
+
+    await _setup_job(engine, retain_keep_last=7)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as s:
+        settings = await s.get(AppSettings, 1)
+        if settings:
+            settings.ntfy_topic = "alerts"
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(3, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_forget", return_value=(0, "", "")),
+        patch("app.services.backup_runner.send_notification") as mock_notify,
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.warning
+    body = mock_notify.call_args[0][3].lower()
+    assert "could not be read" in body
+    assert "retention" not in body
+
+
+async def test_step8_clean_run_is_still_success(engine):
+    """The happy path must stay `success` — no crying wolf."""
+    from app.db.models import BackupRun, PruneStatus, RunStatus, TriggeredBy
+
+    await _setup_job(engine, retain_keep_last=7)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_forget", return_value=(0, "", "")),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.success
+    assert run.prune_status == PruneStatus.passed
 
 
 # ── Step 9: snapshot reconciliation ──────────────────────────────────────────

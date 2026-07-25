@@ -337,6 +337,7 @@ export default function JobDetail() {
                 <tr className="text-left border-b">
                   <th className="py-2 pr-4">Kind</th>
                   <th className="py-2 pr-4">Status</th>
+                  <th className="py-2 pr-4">Retention</th>
                   <th className="py-2 pr-4">Started</th>
                   <th className="py-2 pr-4">Duration</th>
                   <th className="py-2 pr-4">Total Size</th>
@@ -354,6 +355,12 @@ export default function JobDetail() {
                       <Link to={`/runs/${r.id}`} className="hover:underline">
                         <RunStatusBadge status={r.status} />
                       </Link>
+                    </td>
+                    {/* `restic forget` is the retention policy; when it fails
+                        it keeps failing, so the pattern has to be visible
+                        across the history rather than one run at a time. */}
+                    <td className="py-2 pr-4">
+                      <RunStatusBadge status={r.prune_status} />
                     </td>
                     <td className="py-2 pr-4">{new Date(r.started_at).toLocaleString()}</td>
                     <td className="py-2 pr-4">
