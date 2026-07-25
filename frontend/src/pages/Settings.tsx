@@ -329,6 +329,8 @@ export default function Settings() {
                   onChange={(e) => setTimeoutHours(Number(e.target.value))}
                   aria-describedby={helpId('timeout')}
                   className="border rounded px-2 py-1 text-sm w-24"
+                  min={1}
+                  max={168}
                 />
               </div>
               <div>

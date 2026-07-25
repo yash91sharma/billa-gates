@@ -245,6 +245,41 @@ describe('JobDetail', () => {
       await waitFor(() => expect(screen.getByText('abcdef12')).toBeInTheDocument())
     })
 
+    it('reports an unreachable repository instead of "no snapshots"', async () => {
+      // A detached drive makes the listing fail. Rendering that as "No
+      // snapshots yet" tells the user their backups are gone and invites them
+      // to delete and recreate the job — the snapshots are fine, the drive is
+      // just not mounted.
+      const user = userEvent.setup()
+      vi.mocked(api.getJobSnapshots).mockRejectedValue(
+        Object.assign(new Error('unreachable'), {
+          status: 503,
+          data: {
+            detail:
+              "Could not list snapshots for the repository at '/destinations/main/My Documents'.",
+          },
+        })
+      )
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() => screen.getByRole('tab', { name: /snapshots/i }))
+      await user.click(screen.getByRole('tab', { name: /snapshots/i }))
+
+      await waitFor(() => expect(screen.getByText('Could not list snapshots.')).toBeInTheDocument())
+      expect(screen.getByText(/destination drive is mounted/i)).toBeInTheDocument()
+      expect(screen.queryByText(/no snapshots yet/i)).not.toBeInTheDocument()
+    })
+
+    it('still says "no snapshots yet" when the repo is reachable but empty', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.getJobSnapshots).mockResolvedValue([])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() => screen.getByRole('tab', { name: /snapshots/i }))
+      await user.click(screen.getByRole('tab', { name: /snapshots/i }))
+
+      await waitFor(() => expect(screen.getByText(/no snapshots yet/i)).toBeInTheDocument())
+      expect(screen.queryByText(/could not list snapshots/i)).not.toBeInTheDocument()
+    })
+
     it('shows run list in Runs tab', async () => {
       vi.mocked(api.getJobRuns).mockResolvedValue([makeRun({ id: 'run-1' })])
       renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })

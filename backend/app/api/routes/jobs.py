@@ -849,14 +849,24 @@ async def list_job_snapshots(
             repo_path, job.restic_password, timeout_seconds=timeout
         )
     except snapshot_listing.SnapshotListingError as exc:
-        # If the repo doesn't exist yet (genuine first run before any backup),
-        # the UI should see "no snapshots" rather than a 503 — distinguish via
-        # stderr containing "does not exist" / "no such file". Anything else
-        # is a real failure the operator needs to see.
-        msg = str(exc).lower()
-        if "does not exist" in msg or "no such file" in msg or "unable to open" in msg:
-            return []
-        raise HTTPException(status_code=503, detail=f"snapshot listing failed: {exc}")
+        # Every failure is an error, never an empty list. The repository is
+        # created with the job, so "unable to open" means the drive is detached
+        # or the directory moved — not that the job has no backups. Reporting
+        # that as `200 []` told the user their snapshots were gone and invited
+        # them to delete and recreate the job. An empty repository is a
+        # different thing entirely: restic exits 0 with `[]` and never lands
+        # here.
+        logger.error(
+            "snapshot listing failed job_id=%s repo=%s error=%s", job_id, repo_path, exc
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Could not list snapshots for the repository at '{repo_path}'. "
+                f"The destination is probably not mounted — the snapshots "
+                f"themselves are unaffected.\n\n{exc}"
+            ),
+        )
     # Restic returns snapshots oldest-first; flip so the UI shows newest-first.
     raw_sorted = sorted(raw, key=lambda s: s["snapshot_time"], reverse=True)
     return [SnapshotResponse.model_validate(s) for s in raw_sorted]

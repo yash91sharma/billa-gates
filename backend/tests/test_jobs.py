@@ -4,6 +4,8 @@ import uuid
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from tests.conftest import make_job_payload
 
 # ── POST /api/jobs ────────────────────────────────────────────────────────────
@@ -290,6 +292,120 @@ async def test_create_job_destination_sentinel_missing(client):
     assert "main" in detail
 
 
+# ── Inputs restic itself rejects ─────────────────────────────────────────────
+#
+# A value restic refuses must be caught at the API, not stored and then blown
+# up on every run — a rejected --pack-size fails the whole backup, and a
+# rejected --keep-within fails `restic forget` while the run still reports
+# success, so retention silently stops applying. Limits verified against
+# restic 0.18.1:
+#   --pack-size       4–128 MiB ("pack size smaller than minimum of 4 MiB" /
+#                     "pack size larger than limit of 128 MiB")
+#   --keep-within*    one or more <int><unit> pairs, units y/m/d/h, lowercase
+#                     ('30' → "no unit found", '1w' → "invalid unit 'w'")
+#   --read-concurrency any positive integer
+
+
+@pytest.mark.parametrize("pack_size", [0, 3, 129, 512])
+async def test_create_job_rejects_pack_size_outside_restic_limits(client, pack_size):
+    payload = make_job_payload(pack_size=pack_size)
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422, f"pack_size={pack_size} must be refused"
+    assert "pack_size" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("pack_size", [4, 16, 128])
+async def test_create_job_accepts_pack_size_within_restic_limits(client, pack_size):
+    payload = make_job_payload(name=f"Pack {pack_size}", pack_size=pack_size)
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 201
+    assert resp.json()["pack_size"] == pack_size
+
+
+async def test_update_job_rejects_pack_size_outside_restic_limits(client):
+    """PUT must enforce the same bounds — otherwise the edit form is a way
+    back into a job that fails every run."""
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+        resp = await client.put(f"/api/jobs/{created['id']}", json={"pack_size": 512})
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("value", ["8w", "30", "30 days", "1.5d", "-5d", "d30", "30D"])
+async def test_create_job_rejects_invalid_keep_within_durations(client, value):
+    payload = make_job_payload(retain_keep_within=value)
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422, f"keep-within {value!r} must be refused"
+    assert "retain_keep_within" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("value", ["30d", "1y", "48h", "6m", "2y5m7d3h"])
+async def test_create_job_accepts_valid_keep_within_durations(client, value):
+    payload = make_job_payload(name=f"Keep {value}", retain_keep_within=value)
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 201
+    assert resp.json()["retain_keep_within"] == value
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "retain_keep_within_hourly",
+        "retain_keep_within_daily",
+        "retain_keep_within_weekly",
+        "retain_keep_within_monthly",
+        "retain_keep_within_yearly",
+    ],
+)
+async def test_create_job_validates_every_keep_within_field(client, field):
+    """All six --keep-within* flags share restic's duration parser; '8w' is the
+    value the UI used to suggest for the weekly one."""
+    payload = make_job_payload(**{field: "8w"})
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+    assert field in resp.json()["detail"]
+
+
+async def test_update_job_rejects_invalid_keep_within(client):
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+        resp = await client.put(
+            f"/api/jobs/{created['id']}", json={"retain_keep_within_weekly": "8w"}
+        )
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("value", [0, -1])
+async def test_create_job_rejects_non_positive_read_concurrency(client, value):
+    payload = make_job_payload(read_concurrency=value)
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("value", [0, -1, 169])
+async def test_create_job_rejects_timeout_hours_outside_range(client, value):
+    """timeout_hours drives asyncio.wait_for: 0/negative would abort the run
+    instantly, and the ceiling matches the global default_job_timeout_hours."""
+    payload = make_job_payload(timeout_hours=value)
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("value", [0, 169])
+async def test_create_job_rejects_check_timeout_hours_outside_range(client, value):
+    payload = make_job_payload(check_timeout_hours=value)
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422
+
+
 async def test_create_job_duplicate_source_destination(client):
     payload = make_job_payload()
     with patch("os.path.isdir", return_value=True):
@@ -360,7 +476,9 @@ async def test_create_job_retain_keep_last_too_high(client):
 
 
 async def test_create_job_pack_size_valid(client):
-    payload = make_job_payload(pack_size=512)
+    # 512 used to be accepted here (and was the value the UI suggested), but
+    # restic caps --pack-size at 128 MiB and fails the whole backup above it.
+    payload = make_job_payload(pack_size=64)
     with patch("os.path.isdir", return_value=True):
         resp = await client.post("/api/jobs", json=payload)
     assert resp.status_code == 201
@@ -1342,10 +1460,16 @@ async def test_get_job_snapshots_ordered_newest_first(client):
     assert times == sorted(times, reverse=True)
 
 
-async def test_get_job_snapshots_repo_missing_returns_empty_list(client):
-    """A genuine first run (or a deleted repo) raises SnapshotListingError with
-    a 'does not exist' / 'unable to open' stderr — the route must surface this
-    as an empty list rather than a 503 so the UI shows 'No snapshots yet'."""
+async def test_get_job_snapshots_unreachable_repo_is_an_error_not_an_empty_list(client):
+    """An unreachable repository must never be rendered as 'no snapshots'.
+
+    The repo is created with the job, so 'unable to open' means the drive is
+    detached or the directory was moved — not that the job has no backups. The
+    old stderr substring match turned exactly that case into `200 []`, which
+    tells a user their backups are gone and invites them to delete and recreate
+    the job. An empty repository is a different thing: restic exits 0 with `[]`
+    and the route still returns an empty list (see test above).
+    """
     from unittest.mock import AsyncMock
 
     from app.services.snapshot_listing import SnapshotListingError
@@ -1357,14 +1481,18 @@ async def test_get_job_snapshots_repo_missing_returns_empty_list(client):
         "app.services.snapshot_listing.list_snapshots",
         new=AsyncMock(
             side_effect=SnapshotListingError(
-                "restic snapshots failed rc=10 stderr='Fatal: unable to open repo'"
+                "restic snapshots failed rc=10 stderr='Fatal: unable to open "
+                "config file: stat /destinations/main/Test Backup/config: no "
+                "such file or directory'"
             )
         ),
     ):
         resp = await client.get(f"/api/jobs/{created['id']}/snapshots")
 
-    assert resp.status_code == 200
-    assert resp.json() == []
+    assert resp.status_code == 503
+    detail = resp.json()["detail"]
+    assert "/destinations/main/Test Backup" in detail, "name the repo that failed"
+    assert "no such file" in detail, "keep restic's own words for diagnosis"
 
 
 async def test_get_job_snapshots_genuine_failure_returns_503(client):

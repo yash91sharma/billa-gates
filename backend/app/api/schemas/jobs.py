@@ -6,6 +6,7 @@ from typing import Any, List, Optional
 
 from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core.core_schema import ValidationInfo
 
 from app.api.schemas.base import UTCDateTime
 from app.db.models import CheckMode, CompressionMode, ScheduleType
@@ -28,6 +29,42 @@ _MIN_CRON_INTERVAL_SECONDS = 3600
 
 # Minimum interval schedule value in minutes.
 _MIN_INTERVAL_MINUTES = 5
+
+# ── Limits restic itself imposes ─────────────────────────────────────────────
+#
+# A value restic refuses has to be caught here, not stored and then blown up on
+# every run: a rejected --pack-size fails the whole backup, and a rejected
+# --keep-within fails `restic forget` while the run still reports success — so
+# retention silently stops applying and the repo grows forever. Verified
+# against restic 0.18.1.
+
+# "pack size smaller than minimum of 4 MiB" / "larger than limit of 128 MiB".
+_PACK_SIZE_MIN_MIB = 4
+_PACK_SIZE_MAX_MIB = 128
+
+# `--keep-within*` durations: one or more <integer><unit> pairs, units y/m/d/h,
+# lowercase, no separators. Order and repeats are allowed by restic ('3h2y' and
+# '1d1d' both parse); weeks are not a unit, and a bare number is rejected with
+# "no unit found after number".
+_KEEP_WITHIN_RE = re.compile(r"^(?:\d+[ymdh])+$")
+
+# Not a restic limit: the run timeout drives asyncio.wait_for, so 0/negative
+# would abort a run instantly. The ceiling matches AppSettings'
+# default_job_timeout_hours (1 week).
+_MIN_TIMEOUT_HOURS = 1
+_MAX_TIMEOUT_HOURS = 168
+
+
+def _validate_keep_within(value: str, field_name: str) -> str:
+    """Validate one `--keep-within*` value against restic's duration parser."""
+    if not _KEEP_WITHIN_RE.fullmatch(value):
+        raise ValueError(
+            f"{field_name} must be a restic duration: one or more "
+            f"<number><unit> pairs using y, m, d, or h — for example '30d', "
+            f"'48h', or '2y5m7d3h'. Weeks ('8w'), spaces, decimals, and bare "
+            f"numbers are rejected by restic"
+        )
+    return value
 
 
 def _validate_label(value: str, field_name: str) -> str:
@@ -124,15 +161,33 @@ class JobCreate(BaseModel):
     no_scan: bool = False
     tags: Optional[List[str]] = None
     compression: Optional[CompressionMode] = None
-    pack_size: Optional[int] = Field(None, ge=1, le=1500)
-    read_concurrency: Optional[int] = None
-    timeout_hours: Optional[int] = None
+    pack_size: Optional[int] = Field(None, ge=_PACK_SIZE_MIN_MIB, le=_PACK_SIZE_MAX_MIB)
+    read_concurrency: Optional[int] = Field(None, ge=1)
+    timeout_hours: Optional[int] = Field(
+        None, ge=_MIN_TIMEOUT_HOURS, le=_MAX_TIMEOUT_HOURS
+    )
 
     # --- Integrity verification ---
     check_enabled: bool = False
     check_mode: Optional[CheckMode] = None
     check_subset_percent: Optional[int] = Field(None, ge=1, le=100)
-    check_timeout_hours: Optional[int] = None
+    check_timeout_hours: Optional[int] = Field(
+        None, ge=_MIN_TIMEOUT_HOURS, le=_MAX_TIMEOUT_HOURS
+    )
+
+    @field_validator(
+        "retain_keep_within",
+        "retain_keep_within_hourly",
+        "retain_keep_within_daily",
+        "retain_keep_within_weekly",
+        "retain_keep_within_monthly",
+        "retain_keep_within_yearly",
+    )
+    @classmethod
+    def validate_keep_within(
+        cls, v: Optional[str], info: ValidationInfo
+    ) -> Optional[str]:
+        return v if v is None else _validate_keep_within(v, info.field_name or "value")
 
     @field_validator("name")
     @classmethod
@@ -205,14 +260,32 @@ class JobUpdate(BaseModel):
     no_scan: Optional[bool] = None
     tags: Optional[List[str]] = None
     compression: Optional[CompressionMode] = None
-    pack_size: Optional[int] = Field(None, ge=1, le=1500)
-    read_concurrency: Optional[int] = None
-    timeout_hours: Optional[int] = None
+    pack_size: Optional[int] = Field(None, ge=_PACK_SIZE_MIN_MIB, le=_PACK_SIZE_MAX_MIB)
+    read_concurrency: Optional[int] = Field(None, ge=1)
+    timeout_hours: Optional[int] = Field(
+        None, ge=_MIN_TIMEOUT_HOURS, le=_MAX_TIMEOUT_HOURS
+    )
 
     check_enabled: Optional[bool] = None
     check_mode: Optional[CheckMode] = None
     check_subset_percent: Optional[int] = Field(None, ge=1, le=100)
-    check_timeout_hours: Optional[int] = None
+    check_timeout_hours: Optional[int] = Field(
+        None, ge=_MIN_TIMEOUT_HOURS, le=_MAX_TIMEOUT_HOURS
+    )
+
+    @field_validator(
+        "retain_keep_within",
+        "retain_keep_within_hourly",
+        "retain_keep_within_daily",
+        "retain_keep_within_weekly",
+        "retain_keep_within_monthly",
+        "retain_keep_within_yearly",
+    )
+    @classmethod
+    def validate_keep_within(
+        cls, v: Optional[str], info: ValidationInfo
+    ) -> Optional[str]:
+        return v if v is None else _validate_keep_within(v, info.field_name or "value")
 
     @field_validator("name")
     @classmethod

@@ -126,6 +126,80 @@ describe('JobForm', () => {
       )
     })
 
+    // ── inputs restic itself constrains ──────────────────────────────────
+    // Offering a value restic rejects turns every future run into a failure —
+    // and the form used to suggest two of them (`pack size 512`, `8w`).
+
+    it('constrains pack size to restic’s 4–128 MiB range', () => {
+      render(<JobForm onSubmit={vi.fn()} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      const input = screen.getByLabelText(/pack size/i)
+      expect(input).toHaveAttribute('min', '4')
+      expect(input).toHaveAttribute('max', '128')
+    })
+
+    it('never suggests a pack size restic would reject', () => {
+      // The form used to offer "512" as the example, which fails every backup
+      // with "pack size larger than limit of 128 MiB".
+      render(<JobForm onSubmit={vi.fn()} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      const input = screen.getByLabelText(/pack size/i)
+      const help = document.getElementById(input.getAttribute('aria-describedby') ?? '')
+      const suggested = Number(help?.textContent?.match(/Example:\s*(\d+)/)?.[1])
+      expect(suggested).toBeGreaterThanOrEqual(4)
+      expect(suggested).toBeLessThanOrEqual(128)
+    })
+
+    it('constrains the run timeout to 1–168 hours', () => {
+      render(<JobForm onSubmit={vi.fn()} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      const input = screen.getByLabelText(/timeout/i)
+      expect(input).toHaveAttribute('min', '1')
+      expect(input).toHaveAttribute('max', '168')
+    })
+
+    it('rejects a keep-within value restic cannot parse', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      await user.click(screen.getByRole('button', { name: /retention policy/i }))
+      await user.type(screen.getByLabelText(/keep within weekly/i), '8w')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+
+      expect(onSubmit).not.toHaveBeenCalled()
+      expect(screen.getByText(/is not a duration restic accepts/i)).toBeInTheDocument()
+    })
+
+    it('accepts restic duration syntax for keep-within values', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      await user.click(screen.getByRole('button', { name: /retention policy/i }))
+      await user.type(screen.getByLabelText(/keep within weekly/i), '56d')
+      await user.type(screen.getByLabelText(/name/i), 'Test Job')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ retain_keep_within_weekly: '56d' })
+      )
+    })
+
+    it('never suggests a keep-within example restic would reject', async () => {
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={vi.fn()} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      await user.click(screen.getByRole('button', { name: /retention policy/i }))
+      const durationRe = /^(?:\d+[ymdh])+$/
+      for (const label of [
+        /^keep within$/i,
+        /keep within hourly/i,
+        /keep within daily/i,
+        /keep within weekly/i,
+        /keep within monthly/i,
+        /keep within yearly/i,
+      ]) {
+        const input = screen.getByLabelText(label) as HTMLInputElement
+        expect(input.placeholder, `${input.id} placeholder`).toMatch(durationRe)
+      }
+    })
+
     it('points the sentinel hint at the source mount when no subfolder is set', async () => {
       const user = userEvent.setup()
       render(
@@ -627,7 +701,8 @@ describe('JobForm', () => {
       { label: /^one file system$/i, defaultMatcher: /default:\s*off/i },
       { label: /^no scan$/i, defaultMatcher: /default:\s*off/i },
       { label: /^compression$/i, defaultMatcher: /default:\s*auto/i },
-      { label: /^pack size/i, defaultMatcher: /default:\s*128/i },
+      // restic's own default is 16 MiB — the tooltip used to claim 128.
+      { label: /^pack size/i, defaultMatcher: /default:\s*16/i },
       { label: /^read concurrency$/i, defaultMatcher: /default:.*restic/i },
       { label: /^timeout \(hours\)$/i, defaultMatcher: /default:.*global|default:.*settings/i },
     ]
@@ -708,10 +783,12 @@ describe('JobForm', () => {
       const onSubmit = vi.fn()
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
-      await user.type(screen.getByLabelText(/pack size/i), '512')
+      // 512 was rejected by restic ("pack size larger than limit of 128 MiB")
+      // and is now refused by the form itself.
+      await user.type(screen.getByLabelText(/pack size/i), '64')
       await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ pack_size: 512 }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ pack_size: 64 }))
     })
 
     it('exposes read_concurrency as a number input', async () => {
@@ -734,7 +811,7 @@ describe('JobForm', () => {
             exclude_if_present: ['.nobackup'],
             one_file_system: true,
             no_scan: true,
-            pack_size: 256,
+            pack_size: 128,
             read_concurrency: 2,
           }}
           onSubmit={onSubmit}
@@ -747,7 +824,7 @@ describe('JobForm', () => {
       )
       expect((screen.getByLabelText(/one file system/i) as HTMLInputElement).checked).toBe(true)
       expect((screen.getByLabelText(/no scan/i) as HTMLInputElement).checked).toBe(true)
-      expect((screen.getByLabelText(/pack size/i) as HTMLInputElement).value).toBe('256')
+      expect((screen.getByLabelText(/pack size/i) as HTMLInputElement).value).toBe('128')
       expect((screen.getByLabelText(/read concurrency/i) as HTMLInputElement).value).toBe('2')
 
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
@@ -756,7 +833,7 @@ describe('JobForm', () => {
           exclude_if_present: ['.nobackup'],
           one_file_system: true,
           no_scan: true,
-          pack_size: 256,
+          pack_size: 128,
           read_concurrency: 2,
         })
       )

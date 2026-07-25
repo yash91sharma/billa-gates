@@ -324,6 +324,15 @@ describe('Settings', () => {
       renderWithProviders(<Settings />)
       await waitFor(() => expect(screen.getByDisplayValue('48')).toBeInTheDocument())
     })
+
+    it('constrains the field to the range the API accepts (1–168 hours)', async () => {
+      // Out-of-range values come back as a bare "failed to save settings",
+      // so the input has to refuse them itself.
+      renderWithProviders(<Settings />)
+      const input = await screen.findByLabelText(/timeout|default.*timeout/i)
+      expect(input).toHaveAttribute('min', '1')
+      expect(input).toHaveAttribute('max', '168')
+    })
   })
 
   describe('notification toggles initial state', () => {

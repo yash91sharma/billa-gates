@@ -51,7 +51,7 @@ export default function JobDetail() {
     refetchInterval: (q) => (shouldPoll(q.state.data ?? []) ? 60_000 : false),
   })
 
-  const { data: snapshots } = useQuery({
+  const { data: snapshots, error: snapshotsError } = useQuery({
     queryKey: ['jobSnapshots', id],
     queryFn: () => api.getJobSnapshots(id ?? ''),
   })
@@ -382,7 +382,25 @@ export default function JobDetail() {
 
       {tab === 'snapshots' && (
         <div>
-          {(snapshots ?? []).length === 0 ? (
+          {snapshotsError ? (
+            // Never render a failed listing as "no snapshots" — the repository
+            // is created with the job, so a failure here means the drive is
+            // detached, not that the backups are gone. Saying "none" would
+            // invite the user to delete and recreate the job.
+            <div className="bg-warning/15 border border-warning/40 rounded-sm p-3 text-sm space-y-1">
+              <p>
+                <strong>Could not list snapshots.</strong> The repository at{' '}
+                <code>
+                  /destinations/{job.destination_label}/{job.name}
+                </code>{' '}
+                is not reachable — check that the destination drive is mounted. Your snapshots are
+                not affected by this.
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {parseApiError(snapshotsError).message ?? 'The listing request failed.'}
+              </p>
+            </div>
+          ) : (snapshots ?? []).length === 0 ? (
             <p className="text-muted-foreground text-sm">No snapshots yet.</p>
           ) : (
             <ul className="space-y-1 text-sm">
@@ -490,6 +508,7 @@ restic restore latest --target ./restored`}
                 id="modal-check-timeout-hours"
                 type="number"
                 min={1}
+                max={168}
                 value={checkTimeoutHours}
                 onChange={(e) => setCheckTimeoutHours(e.target.value)}
                 placeholder="24"

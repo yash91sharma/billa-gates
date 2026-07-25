@@ -24,6 +24,20 @@ function parseLines(text: string): string[] | null {
 // too, not free text.
 const SUBPATH_RE = /^[\p{L}\p{N}_][\p{L}\p{N}_ .-]*$/u
 
+// Limits restic itself imposes (verified against restic 0.18.1). Offering a
+// value it rejects turns every future run into a failure — and a rejected
+// --keep-within fails `restic forget` while the run still reports success, so
+// retention silently stops applying. Mirrors app/api/schemas/jobs.py.
+const PACK_SIZE_MIN_MIB = 4
+const PACK_SIZE_MAX_MIB = 128
+// `--keep-within*`: one or more <integer><unit> pairs, units y/m/d/h,
+// lowercase. Weeks are not a unit and a bare number is rejected outright.
+const KEEP_WITHIN_RE = /^(?:\d+[ymdh])+$/
+// Not a restic limit: the run timeout drives the runner's deadline, and the
+// ceiling matches the global default in Settings.
+const TIMEOUT_HOURS_MIN = 1
+const TIMEOUT_HOURS_MAX = 168
+
 // Split a comma-separated input into a string array, or null when empty.
 function parseCsv(text: string): string[] | null {
   const items = text
@@ -116,37 +130,43 @@ const HELP: Record<string, FieldHelp> = {
   keepWithin: {
     label: 'Keep Within',
     optional: true,
-    description: 'Keep every snapshot taken within this window. Format: Nh, Nd, Nm, or Ny.',
+    description:
+      'Keep every snapshot taken within this window. restic duration: one or more <number><unit> pairs using y, m, d, or h — weeks are not a unit, and a bare number is rejected.',
     example: '30d',
   },
   keepWithinHourly: {
     label: 'Keep Within Hourly',
     optional: true,
-    description: 'Keep one snapshot per hour for the snapshots within this window.',
+    description:
+      'Keep one snapshot per hour for the snapshots within this window. Units: y, m, d, h.',
     example: '48h',
   },
   keepWithinDaily: {
     label: 'Keep Within Daily',
     optional: true,
-    description: 'Keep one snapshot per day for the snapshots within this window.',
+    description:
+      'Keep one snapshot per day for the snapshots within this window. Units: y, m, d, h.',
     example: '14d',
   },
   keepWithinWeekly: {
     label: 'Keep Within Weekly',
     optional: true,
-    description: 'Keep one snapshot per week for the snapshots within this window.',
-    example: '8w',
+    description:
+      'Keep one snapshot per week for the snapshots within this window. Units: y, m, d, h — restic has no week unit, so express weeks in days (8 weeks = 56d).',
+    example: '56d',
   },
   keepWithinMonthly: {
     label: 'Keep Within Monthly',
     optional: true,
-    description: 'Keep one snapshot per month for the snapshots within this window.',
+    description:
+      'Keep one snapshot per month for the snapshots within this window. Units: y, m, d, h.',
     example: '6m',
   },
   keepWithinYearly: {
     label: 'Keep Within Yearly',
     optional: true,
-    description: 'Keep one snapshot per year for the snapshots within this window.',
+    description:
+      'Keep one snapshot per year for the snapshots within this window. Units: y, m, d, h.',
     example: '2y',
   },
   excludePatterns: {
@@ -197,21 +217,21 @@ const HELP: Record<string, FieldHelp> = {
     label: 'Pack size (MiB)',
     optional: true,
     description:
-      'Internal pack file size in MiB. Increase for large repos to reduce the destination file count. Default: 128 MiB (leave blank).',
-    example: '512',
+      'Internal pack file size in MiB. Increase for large repos to reduce the destination file count. restic accepts 4–128 MiB and fails the backup outside that range. Default: 16 MiB (leave blank).',
+    example: '64',
   },
   readConcurrency: {
     label: 'Read concurrency',
     optional: true,
     description:
-      'Number of source files read in parallel. Default: restic’s automatic value (leave blank).',
+      'Number of source files read in parallel. Must be 1 or more. Default: restic’s automatic value (leave blank).',
     example: '2',
   },
   timeoutHours: {
     label: 'Timeout (hours)',
     optional: true,
     description:
-      'Maximum hours the backup may run before it is killed and marked failed. Default: the global value from Settings (leave blank).',
+      'Maximum hours the backup may run before it is killed and marked failed. Between 1 and 168 (one week). Default: the global value from Settings (leave blank).',
     example: '12',
   },
 }
@@ -313,6 +333,57 @@ export default function JobForm({
       return
     }
 
+    // restic parses every --keep-within* value itself and rejects anything
+    // else. A bad value here does not fail the backup — it fails `restic
+    // forget` afterwards, so the run still says "success" while retention
+    // silently stops applying. Catch it before the job is saved.
+    const badDuration = (
+      [
+        ['Keep Within', keepWithin],
+        ['Keep Within Hourly', keepWithinHourly],
+        ['Keep Within Daily', keepWithinDaily],
+        ['Keep Within Weekly', keepWithinWeekly],
+        ['Keep Within Monthly', keepWithinMonthly],
+        ['Keep Within Yearly', keepWithinYearly],
+      ] as const
+    ).find(([, value]) => value && !KEEP_WITHIN_RE.test(value))
+    if (badDuration) {
+      setSubmitError(
+        `${badDuration[0]}: "${badDuration[1]}" is not a duration restic accepts. ` +
+          'Use one or more <number><unit> pairs with the units y, m, d, or h — ' +
+          'for example 30d, 48h, or 2y5m7d3h. There is no unit for weeks (use 56d ' +
+          'for 8 weeks), and bare numbers, spaces and decimals are rejected.'
+      )
+      return
+    }
+
+    const packSizeValue = packSizeText ? parseInt(packSizeText) : null
+    if (
+      packSizeValue !== null &&
+      (packSizeValue < PACK_SIZE_MIN_MIB || packSizeValue > PACK_SIZE_MAX_MIB)
+    ) {
+      setSubmitError(
+        `Pack size must be between ${PACK_SIZE_MIN_MIB} and ${PACK_SIZE_MAX_MIB} MiB — ` +
+          'restic refuses anything outside that range and the backup would fail.'
+      )
+      return
+    }
+
+    const timeoutValue = timeoutHoursText ? parseInt(timeoutHoursText) : null
+    if (
+      timeoutValue !== null &&
+      (timeoutValue < TIMEOUT_HOURS_MIN || timeoutValue > TIMEOUT_HOURS_MAX)
+    ) {
+      setSubmitError(`Timeout must be between ${TIMEOUT_HOURS_MIN} and ${TIMEOUT_HOURS_MAX} hours.`)
+      return
+    }
+
+    const readConcurrencyValue = readConcurrencyText ? parseInt(readConcurrencyText) : null
+    if (readConcurrencyValue !== null && readConcurrencyValue < 1) {
+      setSubmitError('Read concurrency must be 1 or more (leave blank for restic’s default).')
+      return
+    }
+
     onSubmit({
       name,
       source_label: sourceLabel,
@@ -341,9 +412,9 @@ export default function JobForm({
       no_scan: noScan,
       tags: parseCsv(tagsText),
       compression: compression || null,
-      pack_size: packSizeText ? parseInt(packSizeText) : null,
-      read_concurrency: readConcurrencyText ? parseInt(readConcurrencyText) : null,
-      timeout_hours: timeoutHoursText ? parseInt(timeoutHoursText) : null,
+      pack_size: packSizeValue,
+      read_concurrency: readConcurrencyValue,
+      timeout_hours: timeoutValue,
     })
   }
 
@@ -594,6 +665,7 @@ export default function JobForm({
                     aria-describedby={helpId(id)}
                     className={inputCls}
                     min={1}
+                    max={9999}
                   />
                 </div>
               ))}
@@ -745,10 +817,11 @@ export default function JobForm({
               <input
                 id="job-pack-size"
                 type="number"
-                min={1}
+                min={PACK_SIZE_MIN_MIB}
+                max={PACK_SIZE_MAX_MIB}
                 value={packSizeText}
                 onChange={(e) => setPackSizeText(e.target.value)}
-                placeholder="128"
+                placeholder="16"
                 aria-describedby={helpId('job-pack-size')}
                 className={inputCls}
               />
@@ -772,7 +845,8 @@ export default function JobForm({
               <input
                 id="job-timeout-hours"
                 type="number"
-                min={1}
+                min={TIMEOUT_HOURS_MIN}
+                max={TIMEOUT_HOURS_MAX}
                 value={timeoutHoursText}
                 onChange={(e) => setTimeoutHoursText(e.target.value)}
                 placeholder="24"
