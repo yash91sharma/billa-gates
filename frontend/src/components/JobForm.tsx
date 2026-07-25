@@ -1,3 +1,4 @@
+import { Eye, EyeOff } from 'lucide-react'
 import { useState } from 'react'
 import type { BackupJob } from '../lib/types'
 import FieldLabel, { helpId, type FieldHelp } from './FieldLabel'
@@ -267,6 +268,7 @@ export default function JobForm({
   const [sourceSubpath, setSourceSubpath] = useState(job?.source_subpath ?? '')
   const [destinationLabel, setDestinationLabel] = useState(job?.destination_label ?? '')
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [enabled, setEnabled] = useState(job?.enabled ?? true)
   const [schedule, setSchedule] = useState<ScheduleValue>({
     type: job?.schedule_type ?? 'interval',
@@ -587,15 +589,39 @@ export default function JobForm({
 
             <div>
               <FieldLabel htmlFor="job-password" help={HELP.password} />
-              <input
-                id="job-password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                disabled={isEdit}
-                aria-describedby={helpId('job-password')}
-                className={inputCls}
-              />
+              {/* The password is typed once and never echoed back by the API,
+                  and it addresses the repository, so it cannot be corrected
+                  later — the reveal toggle is the only way to confirm what was
+                  typed. It is pointless in edit mode, where the field is empty
+                  and disabled, so it is only rendered on create. */}
+              <div className="relative">
+                <input
+                  id="job-password"
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={isEdit}
+                  aria-describedby={helpId('job-password')}
+                  className={`${inputCls}${isEdit ? '' : ' pr-9'}`}
+                />
+                {!isEdit && (
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((v) => !v)}
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    aria-pressed={showPassword}
+                    aria-controls="job-password"
+                    title={showPassword ? 'Hide password' : 'Show password'}
+                    className="absolute inset-y-0 right-0 flex items-center px-2 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-r"
+                  >
+                    {showPassword ? (
+                      <EyeOff className="h-4 w-4" aria-hidden="true" />
+                    ) : (
+                      <Eye className="h-4 w-4" aria-hidden="true" />
+                    )}
+                  </button>
+                )}
+              </div>
               {isEdit && (
                 <p className="text-muted-foreground text-xs mt-1">
                   🔒 The repository is encrypted with this password, so it cannot be changed. To

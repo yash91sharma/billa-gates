@@ -59,7 +59,7 @@ describe('JobForm', () => {
 
     it('shows editable password field', () => {
       render(<JobForm onSubmit={vi.fn()} />)
-      const pwField = screen.getByLabelText(/password/i)
+      const pwField = screen.getByLabelText(/^password$/i)
       expect(pwField).not.toBeDisabled()
       expect(pwField).not.toHaveAttribute('readonly')
     })
@@ -288,7 +288,7 @@ describe('JobForm', () => {
       const onSubmit = vi.fn()
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
-      await user.type(screen.getByLabelText(/password/i), 'hunter2')
+      await user.type(screen.getByLabelText(/^password$/i), 'hunter2')
       await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
       const payload = onSubmit.mock.calls[0][0] as Record<string, unknown>
@@ -311,6 +311,71 @@ describe('JobForm', () => {
     })
   })
 
+  describe('password visibility toggle', () => {
+    // The password is typed once, is never echoed back by the API and cannot
+    // be changed afterwards — so a typo is only recoverable by deleting the
+    // repository. The reveal toggle is how the user confirms what they typed.
+
+    it('masks the password by default', () => {
+      render(<JobForm onSubmit={vi.fn()} />)
+      expect(screen.getByLabelText(/^password$/i)).toHaveAttribute('type', 'password')
+    })
+
+    it('reveals the password when the toggle is clicked', async () => {
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={vi.fn()} />)
+      await user.type(screen.getByLabelText(/^password$/i), 'hunter2')
+      await user.click(screen.getByRole('button', { name: /show password/i }))
+      const pwField = screen.getByLabelText(/^password$/i)
+      expect(pwField).toHaveAttribute('type', 'text')
+      expect(pwField).toHaveValue('hunter2')
+    })
+
+    it('masks it again on a second click', async () => {
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={vi.fn()} />)
+      await user.click(screen.getByRole('button', { name: /show password/i }))
+      await user.click(screen.getByRole('button', { name: /hide password/i }))
+      expect(screen.getByLabelText(/^password$/i)).toHaveAttribute('type', 'password')
+      expect(screen.getByRole('button', { name: /show password/i })).toBeInTheDocument()
+    })
+
+    it('reports its state to assistive tech via aria-pressed', async () => {
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={vi.fn()} />)
+      const toggle = screen.getByRole('button', { name: /show password/i })
+      expect(toggle).toHaveAttribute('aria-pressed', 'false')
+      await user.click(toggle)
+      expect(screen.getByRole('button', { name: /hide password/i })).toHaveAttribute(
+        'aria-pressed',
+        'true'
+      )
+    })
+
+    it('does not submit the form when toggled', async () => {
+      // A bare <button> inside a <form> defaults to type=submit, which would
+      // create the job the moment the user peeked at their password.
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      await user.type(screen.getByLabelText(/^name$/i), 'Test Job')
+      await user.click(screen.getByRole('button', { name: /show password/i }))
+      expect(onSubmit).not.toHaveBeenCalled()
+    })
+
+    it('still submits the typed password after revealing it', async () => {
+      const onSubmit = vi.fn()
+      const user = userEvent.setup()
+      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
+      await user.type(screen.getByLabelText(/^password$/i), 'hunter2')
+      await user.click(screen.getByRole('button', { name: /show password/i }))
+      await user.type(screen.getByLabelText(/^name$/i), 'Test Job')
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      const payload = onSubmit.mock.calls[0][0] as Record<string, unknown>
+      expect(payload.restic_password).toBe('hunter2')
+    })
+  })
+
   describe('edit mode — identity locks', () => {
     // The repository is created and encrypted at job-create time, so name,
     // destination and password all address it and lock as soon as the job
@@ -318,7 +383,7 @@ describe('JobForm', () => {
 
     it('locks the password field in edit mode', () => {
       render(<JobForm job={baseJob} onSubmit={vi.fn()} />)
-      expect(screen.getByLabelText(/password/i)).toBeDisabled()
+      expect(screen.getByLabelText(/^password$/i)).toBeDisabled()
     })
 
     it('locks the name field in edit mode', () => {
@@ -328,7 +393,7 @@ describe('JobForm', () => {
 
     it('leaves the password field editable when creating', () => {
       render(<JobForm onSubmit={vi.fn()} />)
-      expect(screen.getByLabelText(/password/i)).not.toBeDisabled()
+      expect(screen.getByLabelText(/^password$/i)).not.toBeDisabled()
     })
 
     it('leaves the name field editable when creating', () => {
@@ -344,6 +409,13 @@ describe('JobForm', () => {
     it('explains restic key rotation when the password is locked', () => {
       render(<JobForm job={baseJob} onSubmit={vi.fn()} />)
       expect(screen.getAllByText(/restic key/i).length).toBeGreaterThan(0)
+    })
+
+    it('hides the reveal toggle when the password field is locked', () => {
+      // Nothing to reveal: the stored password is never returned to the
+      // frontend, so in edit mode the field is empty and disabled.
+      render(<JobForm job={baseJob} onSubmit={vi.fn()} />)
+      expect(screen.queryByRole('button', { name: /show password|hide password/i })).toBeNull()
     })
 
     it('shows the repository path the name maps to', () => {
