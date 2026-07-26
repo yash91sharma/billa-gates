@@ -641,6 +641,75 @@ async def test_backup_retained_output_is_capped():
     )
 
 
+async def test_backup_retains_error_lines_written_to_stderr():
+    """restic writes per-file `message_type=error` lines to *stderr*; stdout
+    carries only `status` and `summary`. Verified against restic 0.18.1 — see
+    the stream capture in tests/test_backup_runner.py. The wrapper must hand
+    that stderr back intact, because it is the only record of which file
+    failed, and it must stay bounded like stdout does.
+    """
+    stderr = (
+        "\n".join(_error_line(f"/sources/documents/f{i}") for i in range(3))
+        + '\n{"message_type":"exit_error","code":3,"message":"Warning: at least '
+        'one source file could not be read"}'
+    )
+    proc = _make_process(3, stdout=BACKUP_SUMMARY, stderr=stderr)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        code, stdout, err, summary = await restic_backup(
+            REPO, PASSWORD, "/sources/documents", timeout_seconds=3600
+        )
+
+    assert code == 3
+    assert summary is not None, "rc=3 still produced a snapshot"
+    assert "/sources/documents/f0" in err
+    assert "/sources/documents/f2" in err
+    assert "/sources/documents/f0" not in stdout, (
+        "stdout is not where the caller can find the failing items"
+    )
+
+
+async def test_backup_stderr_flood_stays_bounded():
+    """A million-file permission failure is drained and capped, not buffered —
+    the error path must not reintroduce the memory problem stdout already
+    solved."""
+    from app.services.restic import _MAX_RETAINED_OUTPUT_CHARS
+
+    stderr = "\n".join(_error_line(f"/sources/documents/f{i}") for i in range(20000))
+    proc = _make_process(3, stdout=BACKUP_SUMMARY, stderr=stderr)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        _code, _stdout, err, _summary = await restic_backup(
+            REPO, PASSWORD, "/sources/documents", timeout_seconds=3600
+        )
+
+    assert len(err) <= _MAX_RETAINED_OUTPUT_CHARS + 4096
+    assert "omitted" in err, "the user must be told error output was dropped"
+
+
+def test_format_progress_reports_error_count():
+    """restic's status line carries `error_count`, and dropping it is why a run
+    could show `100% · 1,234/1,234 files` next to a warning badge with nothing
+    connecting the two."""
+    from app.services.restic import _format_progress
+
+    line = _format_progress(
+        {
+            "message_type": "status",
+            "percent_done": 1,
+            "total_files": 1234,
+            "files_done": 1234,
+            "error_count": 3,
+        }
+    )
+    assert "100%" in line
+    assert "3 errors" in line
+
+    singular = _format_progress({"percent_done": 0.5, "error_count": 1})
+    assert "1 error" in singular and "1 errors" not in singular
+
+    clean = _format_progress({"percent_done": 0.5, "error_count": 0})
+    assert "error" not in clean, "a clean run must not grow a scary suffix"
+
+
 async def test_backup_flushes_output_snapshots_while_running():
     """The wrapper hands the caller periodic snapshots so a live run can show
     progress; without it the run row stays empty until restic exits."""

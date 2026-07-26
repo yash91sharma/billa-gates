@@ -4,7 +4,7 @@ import os
 import traceback
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set, cast
+from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -794,28 +794,109 @@ async def run_check(
         logger.info(f"job_id={job_id} run_id={run_id} check_completed")
 
 
-def _extract_failed_items(backup_stdout: str) -> List[str]:
-    """Pull per-file error messages out of restic's --json output stream so
-    the run record can show *which* files failed, not just that something did.
+# How many failing items are parsed out of the streams, and how many of those
+# are rendered into `error_output`. The parse limit keeps a pathological run (a
+# share that denies every one of a million files) from building a million-entry
+# list; the render limit keeps the DB column — which is loaded on every
+# run-detail fetch — small. Both are far above the count an operator will
+# actually read before going to look at the mount.
+_FAILED_ITEM_PARSE_LIMIT: int = 200
+_MAX_REPORTED_FAILED_ITEMS: int = 50
+# Fallback when restic said something we could not parse: keep the tail, since
+# the fatal and the exit_error line arrive last.
+_MAX_STDERR_TAIL_CHARS: int = 4000
+
+
+def _extract_failed_items(
+    *streams: str, limit: int = _FAILED_ITEM_PARSE_LIMIT
+) -> List[str]:
+    """Pull per-file error messages out of restic's --json streams so the run
+    record can show *which* items failed, not just that something did.
+
+    **Both** streams must be passed for a partial backup. restic writes its
+    `message_type=error` lines to stderr, not stdout — verified against restic
+    0.18.1, where stdout carried only `status` and `summary`. This function
+    used to be called with stdout alone, so every real rc=3 run recorded zero
+    failed items and the run page showed a bare "some files could not be read"
+    with no paths after it. stdout is still scanned because it costs one pass
+    over an already-bounded string and covers merged streams and older builds.
+
+    One failure can be reported more than once — an unreadable directory comes
+    back from both the scanner and the archiver (observed with restic 0.18.1) —
+    so identical (item, message) pairs are collapsed into one entry and their
+    phases merged. Counting the error *events* would report two failures for
+    one folder and inflate the count on every real mount.
+
+    Parsing stops at `limit` distinct items; the caller renders fewer still.
     """
-    items: List[str] = []
-    for line in backup_stdout.split("\n"):
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if obj.get("message_type") == "error":
+    # Insertion-ordered: (item, message) -> phases seen, in the order restic
+    # reported them.
+    collected: Dict[Tuple[str, str], List[str]] = {}
+    for stream in streams:
+        for line in stream.split("\n"):
+            if len(collected) >= limit:
+                break
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("message_type") != "error":
+                continue
             err = obj.get("error", {})
-            msg = err.get("message") if isinstance(err, dict) else str(err)
-            item = obj.get("item")
-            if item:
-                items.append(f"{item}: {msg}")
-            elif msg:
-                items.append(str(msg))
+            msg = str(err.get("message") if isinstance(err, dict) else err)
+            item = str(obj.get("item") or "")
+            if not item and not msg:
+                continue
+            phases: List[str] = collected.setdefault((item, msg), [])
+            # `during` separates a file that could not be read (archival) from
+            # a directory that could not even be listed (scan) — different
+            # causes, different fixes.
+            during = obj.get("during")
+            if during and during not in phases:
+                phases.append(str(during))
+
+    items: List[str] = []
+    for (item, msg), phases in collected.items():
+        suffix: str = f" [{', '.join(phases)}]" if phases else ""
+        items.append(f"{item}: {msg}{suffix}" if item else f"{msg}{suffix}")
     return items
+
+
+def _format_partial_backup_error(failed_items: List[str], stderr: str) -> str:
+    """Build the user-visible `error_output` for an rc=3 (partial) backup.
+
+    The contract this enforces: the field is never uninformative. When restic
+    named the items, they are listed (capped, with an honest count of what was
+    not shown). When it did not, the retained stderr tail goes in verbatim
+    rather than leaving the operator with a sentence they cannot act on.
+    """
+    count: int = len(failed_items)
+    if count:
+        # `+` because parsing stopped at the limit — there may be more.
+        at_least: str = "+" if count >= _FAILED_ITEM_PARSE_LIMIT else ""
+        parts: List[str] = [
+            f"Partial backup: {count}{at_least} item(s) could not be read; "
+            f"the snapshot was still saved."
+        ]
+        shown: List[str] = failed_items[:_MAX_REPORTED_FAILED_ITEMS]
+        parts.extend(shown)
+        hidden: int = count - len(shown)
+        if hidden > 0:
+            parts.append(f"... and {hidden}{at_least} more")
+        return "\n".join(parts)
+
+    parts = [
+        "Partial backup: some files could not be read; the snapshot was still saved."
+    ]
+    tail: str = stderr.strip()
+    if tail:
+        parts.append("")
+        parts.append("restic stderr:")
+        parts.append(tail[-_MAX_STDERR_TAIL_CHARS:])
+    return "\n".join(parts)
 
 
 def _filter_backup_output(backup_stdout: str) -> str:
@@ -1320,6 +1401,9 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         # months later. The snapshot *was* written, so the run is not `failed`
         # either — it is a `warning`.
         retention_failed: bool = False
+        # Carried out of the backup step so the completion push can say how
+        # many items failed, not just that something did.
+        failed_item_count: int = 0
         summary: Optional[Dict[str, Any]] = None
         stdout: str = ""
 
@@ -1402,20 +1486,25 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 elif rc == 3:
                     backup_success = True
                     backup_warning = True
-                    failed_items = _extract_failed_items(stdout)
+                    # stderr first: that is where restic puts the per-file
+                    # error lines. Passing only stdout here (as this did) made
+                    # every partial backup report zero failed items, so the run
+                    # page named no file and the log recorded only a count.
+                    failed_items = _extract_failed_items(stderr, stdout)
+                    failed_item_count = len(failed_items)
                     logger.warning(
                         f"job_id={job_id} run_id={current_run_id} "
                         f"step=backup_execution status=warning rc=3 "
-                        f"failed_items={len(failed_items)}"
+                        f"failed_items={failed_item_count} "
+                        f"first_failed={failed_items[:3]}"
                     )
                     async with factory() as s:
                         warn_run: BackupRun | None = await s.get(
                             BackupRun, str(current_run_id)
                         )
                         if warn_run:
-                            warn_run.error_output = (
-                                "Partial backup: some files could not be read.\n"
-                                + "\n".join(failed_items)
+                            warn_run.error_output = _format_partial_backup_error(
+                                failed_items, stderr
                             )
                             await s.commit()
                 else:
@@ -1635,7 +1724,12 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 # files were unreadable, because retention failed, or both —
                 # a body hardcoded to one of them misinforms the operator.
                 reasons: List[str] = []
-                if backup_warning:
+                if backup_warning and failed_item_count:
+                    reasons.append(
+                        f"{failed_item_count} item(s) could not be read; "
+                        "snapshot was still saved"
+                    )
+                elif backup_warning:
                     reasons.append(
                         "some files could not be read; snapshot was still saved"
                     )

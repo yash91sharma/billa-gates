@@ -282,9 +282,14 @@ def _format_progress(status: Dict[str, Any]) -> str:
     """Collapse one restic `message_type=status` line into a single line.
 
     Only what an operator watching a run wants to know — how far along, how
-    many files, how many bytes, how much longer. Everything else in the status
-    message (the rotating `current_files` list above all) is noise once it is
-    one second old.
+    many files, how many bytes, how much longer, and how many items restic
+    could not read. Everything else in the status message (the rotating
+    `current_files` list above all) is noise once it is one second old.
+
+    `error_count` matters out of proportion to its size: files that fail during
+    the scan never enter `total_files`, so a run that ends `warning` can show a
+    spotless `100% · 1,234/1,234 files`. Without the error tally the progress
+    line flatly contradicts the badge next to it.
     """
     parts: List[str] = []
 
@@ -309,6 +314,14 @@ def _format_progress(status: Dict[str, Any]) -> str:
     eta = _format_eta(status.get("seconds_remaining"))
     if eta:
         parts.append(eta)
+
+    error_count = status.get("error_count")
+    if (
+        isinstance(error_count, int)
+        and not isinstance(error_count, bool)
+        and error_count > 0
+    ):
+        parts.append(f"{error_count:,} error{'' if error_count == 1 else 's'}")
 
     return f"progress: {' · '.join(parts)}" if parts else "progress: running"
 

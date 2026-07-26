@@ -1084,6 +1084,242 @@ async def test_step5_backup_rc3_without_retention_skips_forget_and_prune(engine)
     assert run.prune_status == PruneStatus.skipped
 
 
+# ── Step 5: rc=3 must name the files, from the stream restic actually uses ────
+#
+# Captured from restic 0.18.1 (`restic backup --json` over a source containing
+# one unreadable directory), stdout and stderr kept separate:
+#
+#   EXIT=3
+#   stdout: {"message_type":"status",...,"error_count":1}
+#           {"message_type":"summary",...}
+#   stderr: {"message_type":"error","error":{"message":"openfile for
+#            readdirnames failed: ... permission denied"},"during":"scan",
+#            "item":"/sources/Docs/locked"}
+#           {"message_type":"exit_error","code":3,"message":"Warning: at least
+#            one source file could not be read"}
+#
+# Every per-file error is on *stderr*. Parsing only stdout (as this code did)
+# produced `failed_items=0` on every real partial backup, so the run page showed
+# a bare "Partial backup: some files could not be read." with nothing after it.
+
+RC3_STDERR = (
+    '{"message_type":"error","error":{"message":"openfile for readdirnames '
+    'failed: open /sources/Docs/locked: permission denied"},"during":"scan",'
+    '"item":"/sources/Docs/locked"}\n'
+    '{"message_type":"exit_error","code":3,"message":"Warning: at least one '
+    'source file could not be read"}'
+)
+
+
+# The same capture, verbatim, when the unreadable item is a *directory*:
+# restic reports it once from the scanner and once from the archiver. One
+# folder, two error lines — the count shown to the user must be 1.
+RC3_STDERR_DOUBLE_REPORTED = (
+    '{"message_type":"error","error":{"message":"openfile for readdirnames '
+    'failed: open /sources/Docs/locked: permission denied"},"during":'
+    '"archival","item":"/sources/Docs/locked"}\n'
+    '{"message_type":"error","error":{"message":"openfile for readdirnames '
+    'failed: open /sources/Docs/locked: permission denied"},"during":"scan",'
+    '"item":"/sources/Docs/locked"}\n'
+    '{"message_type":"exit_error","code":3,"message":"Warning: at least one '
+    'source file could not be read"}'
+)
+
+
+async def _run_rc3(engine, *, stdout: str, stderr: str, run_id: str) -> None:
+    """Drive a full rc=3 backup with the given restic streams."""
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(3, stdout, stderr, BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_forget", return_value=(0, "", "")),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+
+async def test_step5_rc3_names_the_failing_paths_from_stderr(engine):
+    """The whole point of the fix: an operator must be able to see *which*
+    item failed without re-running the backup by hand."""
+    from app.db.models import RunStatus
+
+    await _setup_job(engine, retain_keep_last=5)
+    run_id = str(uuid.uuid4())
+    await _run_rc3(
+        engine,
+        stdout=json.dumps(BACKUP_SUMMARY),
+        stderr=RC3_STDERR,
+        run_id=run_id,
+    )
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.warning
+    assert run.snapshot_id is not None, "rc=3 still wrote a snapshot"
+    assert "/sources/Docs/locked" in run.error_output, (
+        "the failing path lives on stderr and must reach error_output"
+    )
+    assert "permission denied" in run.error_output
+    assert "scan" in run.error_output, "the phase tells read-failure from scan-failure"
+    assert "1 item" in run.error_output, "the headline must carry the real count"
+
+
+async def test_step5_rc3_counts_one_item_reported_twice_once(engine):
+    """An unreadable directory is reported by both the scanner and the
+    archiver. Counting the events instead of the items would tell the user two
+    things failed when one did — and inflate every count on a real mount."""
+    await _setup_job(engine, retain_keep_last=5)
+    run_id = str(uuid.uuid4())
+    await _run_rc3(
+        engine,
+        stdout=json.dumps(BACKUP_SUMMARY),
+        stderr=RC3_STDERR_DOUBLE_REPORTED,
+        run_id=run_id,
+    )
+
+    run = await _get_run(engine, run_id)
+    assert "1 item" in run.error_output, run.error_output
+    listed = [ln for ln in run.error_output.splitlines() if ln.startswith("/sources/")]
+    assert len(listed) == 1, "one line per failing item, not per error event"
+    assert "scan" in listed[0] and "archival" in listed[0], (
+        "both phases are still worth showing — they narrow down the cause"
+    )
+
+
+async def test_step5_rc3_still_reads_error_lines_from_stdout(engine):
+    """Back-compat: older restic builds (and anything that merges the streams)
+    put the error lines on stdout. Both streams are scanned."""
+    await _setup_job(engine, retain_keep_last=5)
+    run_id = str(uuid.uuid4())
+    await _run_rc3(
+        engine,
+        stdout=RC3_STDERR + "\n" + json.dumps(BACKUP_SUMMARY),
+        stderr="",
+        run_id=run_id,
+    )
+
+    run = await _get_run(engine, run_id)
+    assert "/sources/Docs/locked" in run.error_output
+
+
+async def test_step5_rc3_falls_back_to_raw_stderr_when_unparseable(engine):
+    """restic can exit 3 having printed something that is not a JSON error line
+    (a plain warning, or output from a version that formats differently). The
+    operator still gets the text — never a bare sentence."""
+    await _setup_job(engine, retain_keep_last=5)
+    run_id = str(uuid.uuid4())
+    await _run_rc3(
+        engine,
+        stdout=json.dumps(BACKUP_SUMMARY),
+        stderr="Warning: at least one source file could not be read",
+        run_id=run_id,
+    )
+
+    run = await _get_run(engine, run_id)
+    assert "at least one source file could not be read" in run.error_output
+
+
+async def test_step5_rc3_error_output_is_never_uninformative(engine):
+    """Regression guard for the exact bug reported: rc=3 with nothing parseable
+    on either stream must still explain what the warning means."""
+    await _setup_job(engine, retain_keep_last=5)
+    run_id = str(uuid.uuid4())
+    await _run_rc3(engine, stdout=json.dumps(BACKUP_SUMMARY), stderr="", run_id=run_id)
+
+    run = await _get_run(engine, run_id)
+    assert run.error_output
+    assert "could not be read" in run.error_output
+    assert "snapshot was still saved" in run.error_output, (
+        "the user must know the snapshot exists despite the warning"
+    )
+
+
+async def test_step5_rc3_failed_item_list_is_capped(engine):
+    """A share that denies a million files must not write a million lines into
+    the run row — error_output is read on every run-detail fetch."""
+    from app.services.backup_runner import _MAX_REPORTED_FAILED_ITEMS
+
+    await _setup_job(engine, retain_keep_last=5)
+    run_id = str(uuid.uuid4())
+    flood = "\n".join(
+        json.dumps(
+            {
+                "message_type": "error",
+                "error": {"message": "permission denied"},
+                "during": "archival",
+                "item": f"/sources/Docs/f{i}",
+            }
+        )
+        for i in range(500)
+    )
+    await _run_rc3(
+        engine, stdout=json.dumps(BACKUP_SUMMARY), stderr=flood, run_id=run_id
+    )
+
+    run = await _get_run(engine, run_id)
+    listed = [ln for ln in run.error_output.splitlines() if ln.startswith("/sources/")]
+    assert len(listed) == _MAX_REPORTED_FAILED_ITEMS
+    assert "more" in run.error_output, "the user must be told the list was truncated"
+    assert len(run.error_output) < 20_000
+
+
+async def test_step5_rc3_notification_names_the_count(engine):
+    """The push should say how bad it is, not just that it happened."""
+    from app.db.models import AppSettings, BackupRun, RunStatus, TriggeredBy
+
+    await _setup_job(engine, retain_keep_last=5)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        settings = await s.get(AppSettings, 1)
+        if settings:
+            settings.ntfy_topic = "alerts"
+            settings.notify_on_warning = True
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(3, json.dumps(BACKUP_SUMMARY), RC3_STDERR, BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_forget", return_value=(0, "", "")),
+        patch("app.services.backup_runner.send_notification") as mock_notify,
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.warning
+    body = mock_notify.call_args[0][3]
+    assert "1 item" in body
+    assert "could not be read" in body
+
+
 # ── Run-history retention ─────────────────────────────────────────────────────
 
 
