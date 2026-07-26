@@ -1,0 +1,2 @@
+/sources/does-not-exist does not exist, skipping
+{"message_type":"exit_error","code":1,"message":"Fatal: all source directories/files do not exist"}

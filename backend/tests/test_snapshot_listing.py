@@ -35,25 +35,71 @@ def _make_process(returncode: int, stdout: str = "", stderr: str = "") -> AsyncM
     return proc
 
 
+_SIZE_FIRST = 1024 * 1024 * 500
+_SIZE_SECOND = 1024 * 1024 * 510
+
+# Shaped after real `restic snapshots --json` output — see
+# tests/fixtures/restic_0_19_1/snapshots.json, which this is checked against by
+# test_restic_contract.py. Two things here are load-bearing and were wrong
+# before: the size lives in the `summary` sub-object (there is no top-level
+# `total_size`; inventing one is how `size_bytes` came to be null in production
+# while these tests passed), and snapshots carry no `job:<uuid>` tag — the repo
+# is the scope, so per-job tagging does not exist (CLAUDE.md).
+#
+# The second record deliberately has no `tags` key at all: restic omits it
+# rather than sending null, and it carries a `parent`, as every non-initial
+# snapshot does.
 _RESTIC_SNAPSHOTS_JSON = json.dumps(
     [
         {
             "id": "a" * 64,
             "short_id": "a" * 8,
             "time": "2026-05-01T12:00:00Z",
+            "tree": "c" * 64,
             "hostname": "billa-gates",
+            "username": "root",
             "paths": ["/sources/documents"],
-            "tags": [f"job:{JOB_ID}", "weekly"],
-            "total_size": 1024 * 1024 * 500,
+            "tags": ["weekly", "important"],
+            "program_version": "restic 0.19.1",
+            "summary": {
+                "backup_start": "2026-05-01T12:00:00Z",
+                "backup_end": "2026-05-01T12:04:00Z",
+                "files_new": 10,
+                "files_changed": 0,
+                "files_unmodified": 0,
+                "dirs_new": 3,
+                "dirs_changed": 0,
+                "dirs_unmodified": 0,
+                "data_added": _SIZE_FIRST,
+                "data_added_packed": _SIZE_FIRST - 4096,
+                "total_files_processed": 10,
+                "total_bytes_processed": _SIZE_FIRST,
+            },
         },
         {
             "id": "b" * 64,
             "short_id": "b" * 8,
             "time": "2026-05-02T12:00:00Z",
+            "parent": "a" * 64,
+            "tree": "d" * 64,
             "hostname": "billa-gates",
+            "username": "root",
             "paths": ["/sources/documents"],
-            "tags": [f"job:{JOB_ID}"],
-            "total_size": 1024 * 1024 * 510,
+            "program_version": "restic 0.19.1",
+            "summary": {
+                "backup_start": "2026-05-02T12:00:00Z",
+                "backup_end": "2026-05-02T12:01:00Z",
+                "files_new": 1,
+                "files_changed": 0,
+                "files_unmodified": 10,
+                "dirs_new": 0,
+                "dirs_changed": 1,
+                "dirs_unmodified": 2,
+                "data_added": 4096,
+                "data_added_packed": 4000,
+                "total_files_processed": 11,
+                "total_bytes_processed": _SIZE_SECOND,
+            },
         },
     ]
 )
@@ -130,8 +176,8 @@ async def test_list_snapshots_passes_env_vars():
 
 async def test_list_snapshots_returns_normalized_dicts():
     """The service must translate restic's raw JSON keys (`id`, `time`,
-    `total_size`) into the stable response shape the API exposes
-    (`snapshot_id`, `snapshot_time`, `size_bytes`) so changes to restic's
+    `summary.total_bytes_processed`) into the stable response shape the API
+    exposes (`snapshot_id`, `snapshot_time`, `size_bytes`) so changes to restic's
     schema do not leak into the API contract."""
     proc = _make_process(0, stdout=_RESTIC_SNAPSHOTS_JSON)
     with patch("asyncio.create_subprocess_exec", return_value=proc):
@@ -143,12 +189,56 @@ async def test_list_snapshots_returns_normalized_dicts():
     assert first["snapshot_time"] == "2026-05-01T12:00:00Z"
     assert first["hostname"] == "billa-gates"
     assert first["paths"] == ["/sources/documents"]
-    assert first["tags"] == [f"job:{JOB_ID}", "weekly"]
-    assert first["size_bytes"] == 1024 * 1024 * 500
+    assert first["tags"] == ["weekly", "important"]
+    assert first["size_bytes"] == _SIZE_FIRST
     # Internal restic keys must not leak through.
-    assert "id" not in first
-    assert "time" not in first
-    assert "total_size" not in first
+    for leaked in ("id", "time", "summary", "tree", "username", "program_version"):
+        assert leaked not in first, (
+            f"restic-internal key {leaked!r} leaked into the API"
+        )
+
+
+async def test_list_snapshots_exposes_exactly_the_documented_response_keys():
+    """The response shape is the API contract (SnapshotResponse). Pin it, so a
+    field added to restic's output cannot quietly become part of it."""
+    proc = _make_process(0, stdout=_RESTIC_SNAPSHOTS_JSON)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await list_snapshots(REPO, PASSWORD, use_cache=False)
+
+    assert set(result[0]) == {
+        "snapshot_id",
+        "snapshot_time",
+        "hostname",
+        "paths",
+        "tags",
+        "size_bytes",
+    }
+
+
+async def test_list_snapshots_reads_size_from_the_summary_sub_object():
+    """Regression guard for a bug that shipped: `size_bytes` was read from a
+    top-level `total_size` that restic has never emitted, so the UI's Size
+    column was blank for every snapshot while the tests passed against a fixture
+    that invented the key. See tests/test_restic_contract.py."""
+    raw = json.dumps(
+        [
+            {
+                "id": "e" * 64,
+                "time": "2026-05-03T12:00:00Z",
+                "hostname": "billa-gates",
+                "paths": ["/sources/documents"],
+                # A top-level total_size must be ignored even if something one
+                # day emits it — the summary is the source of truth.
+                "total_size": 999,
+                "summary": {"total_bytes_processed": 4242},
+            }
+        ]
+    )
+    proc = _make_process(0, stdout=raw)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await list_snapshots(REPO, PASSWORD, use_cache=False)
+
+    assert result[0]["size_bytes"] == 4242
 
 
 async def test_list_snapshots_handles_empty_array():
@@ -162,8 +252,9 @@ async def test_list_snapshots_handles_empty_array():
 
 
 async def test_list_snapshots_handles_missing_optional_fields():
-    """restic snapshots may omit `tags` or `total_size` for snapshots created
-    by older restic versions or non-restic tooling — the service must not crash."""
+    """restic omits `tags` entirely when there are none, and snapshots written
+    before restic 0.17 have no `summary` block at all — a repo adopted from an
+    older install can hold both. Unknown size, not a crash."""
     minimal = json.dumps(
         [
             {
@@ -180,6 +271,38 @@ async def test_list_snapshots_handles_missing_optional_fields():
     assert len(result) == 1
     assert result[0]["tags"] is None
     assert result[0]["size_bytes"] is None
+
+
+@pytest.mark.parametrize("summary", (None, "not-a-dict", 42, [], {}))
+async def test_list_snapshots_survives_a_malformed_summary_block(summary):
+    """`summary` is restic's, not ours. A non-dict value must yield an unknown
+    size rather than an AttributeError that turns the whole listing into a 503
+    and tells the user their destination is unmounted."""
+    raw = json.dumps(
+        [
+            {
+                "id": "f" * 64,
+                "time": "2026-05-01T12:00:00Z",
+                "hostname": "h",
+                "paths": ["/sources/x"],
+                "summary": summary,
+            }
+        ]
+    )
+    proc = _make_process(0, stdout=raw)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await list_snapshots(REPO, PASSWORD, use_cache=False)
+    assert result[0]["size_bytes"] is None
+
+
+async def test_list_snapshots_preserves_restic_ordering():
+    """restic returns snapshots oldest-first and the UI relies on that ordering;
+    the service must not sort or reverse them."""
+    proc = _make_process(0, stdout=_RESTIC_SNAPSHOTS_JSON)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await list_snapshots(REPO, PASSWORD, use_cache=False)
+
+    assert [s["snapshot_id"] for s in result] == ["a" * 64, "b" * 64]
 
 
 # ── failure modes ─────────────────────────────────────────────────────────────
@@ -204,6 +327,53 @@ async def test_list_snapshots_raises_on_malformed_json():
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         with pytest.raises(SnapshotListingError):
             await list_snapshots(REPO, PASSWORD, use_cache=False)
+
+
+@pytest.mark.parametrize("payload", ('{"snapshots": []}', '"a string"', "42", "null"))
+async def test_list_snapshots_raises_on_json_that_is_not_a_list(payload):
+    """rc=0 with well-formed JSON that is not an array is still a failure. A bare
+    `{}` would otherwise be iterated as its keys and produce garbage snapshot
+    records, or an empty list — which is the C4 failure mode of telling the user
+    their backups are gone."""
+    proc = _make_process(0, stdout=payload)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with pytest.raises(SnapshotListingError) as exc_info:
+            await list_snapshots(REPO, PASSWORD, use_cache=False)
+    assert "non-list" in str(exc_info.value)
+
+
+async def test_list_snapshots_raises_when_restic_cannot_be_launched():
+    """No restic on PATH, fork failure, or a bad executable bit. This must be a
+    typed error, not a bare OSError escaping into the route — and never an empty
+    list, which the UI would render as "no snapshots yet"."""
+    with patch(
+        "asyncio.create_subprocess_exec",
+        side_effect=FileNotFoundError("No such file or directory: 'restic'"),
+    ):
+        with pytest.raises(SnapshotListingError) as exc_info:
+            await list_snapshots(REPO, PASSWORD, use_cache=False)
+    assert "failed to launch restic" in str(exc_info.value)
+
+
+async def test_launch_failure_is_not_cached():
+    """A transient launch failure must not lock the UI into an error for the full
+    TTL window — the next request has to retry."""
+    calls = {"n": 0}
+    proc = _make_process(0, stdout=_RESTIC_SNAPSHOTS_JSON)
+
+    async def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("fork failed")
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=flaky):
+        with pytest.raises(SnapshotListingError):
+            await list_snapshots(REPO, PASSWORD)
+        result = await list_snapshots(REPO, PASSWORD)
+
+    assert calls["n"] == 2
+    assert len(result) == 2
 
 
 async def test_list_snapshots_times_out():

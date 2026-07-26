@@ -1,0 +1,18 @@
+Applying Policy: keep 1 latest snapshots
+keep 1 snapshots:
+ID        Time                 Host         Tags        Reasons        Paths               Size
+------------------------------------------------------------------------------------------------------
+46943ac4  2026-07-26 06:44:04  billa-gates              last snapshot  /sources/documents  572.586 MiB
+------------------------------------------------------------------------------------------------------
+Timestamps shown in local time
+1 snapshots
+
+remove 1 snapshots:
+ID        Time                 Host         Tags             Paths               Size
+--------------------------------------------------------------------------------------------
+dd63508e  2026-07-26 06:44:02  billa-gates  daily,important  /sources/documents  390.638 KiB
+--------------------------------------------------------------------------------------------
+Timestamps shown in local time
+1 snapshots
+
+[0:00] 100.00%  1 / 1 files deleted

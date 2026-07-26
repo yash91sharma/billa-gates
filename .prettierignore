@@ -3,3 +3,7 @@ frontend/dist/
 package-lock.json
 backend/.pytest_cache/
 **/__pycache__/
+# Verbatim recorded restic output. These are captures, not source: reformatting
+# them destroys the byte-for-byte property the contract test relies on and turns
+# every re-capture into a whitespace diff. See the directory's PROVENANCE.md.
+backend/tests/fixtures/

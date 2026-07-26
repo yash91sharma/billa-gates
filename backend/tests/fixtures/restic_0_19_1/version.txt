@@ -1,0 +1,1 @@
+restic 0.19.1 compiled with go1.26.4 on linux/arm64

@@ -1,0 +1,3 @@
+{"message_type":"error","error":{"message":"openfile for readdirnames failed: open /sources/partial/secret: permission denied"},"during":"scan","item":"/sources/partial/secret"}
+{"message_type":"error","error":{"message":"openfile for readdirnames failed: open /sources/partial/secret: permission denied"},"during":"archival","item":"/sources/partial/secret"}
+{"message_type":"exit_error","code":3,"message":"Warning: at least one source file could not be read"}

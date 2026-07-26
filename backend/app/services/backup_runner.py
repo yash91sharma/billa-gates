@@ -846,7 +846,12 @@ def _extract_failed_items(
             if obj.get("message_type") != "error":
                 continue
             err = obj.get("error", {})
-            msg = str(err.get("message") if isinstance(err, dict) else err)
+            raw_msg = err.get("message") if isinstance(err, dict) else err
+            # Do not stringify before the emptiness check below: str(None) is
+            # "None", which is truthy, so an error line carrying neither a path
+            # nor a message used to survive the guard and be rendered to the
+            # operator as a failed item literally named "None".
+            msg = "" if raw_msg is None else str(raw_msg)
             item = str(obj.get("item") or "")
             if not item and not msg:
                 continue
@@ -1369,6 +1374,15 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     fail_run.error_output = f"snapshots command failed: {exc}"
                     await s.commit()
             parent_lookup_success = False
+
+        # The parent lookup is itself a restic subprocess, so Stop can land on
+        # it — and terminating that lookup does nothing to prevent the backup.
+        # Without this poll the cancel goes unnoticed until the (possibly
+        # multi-hour) backup it was meant to prevent has already finished, and
+        # the run is then marked canceled after the fact. Every gap between two
+        # restic subprocesses needs one of these.
+        if await _was_canceled():
+            return
 
         async def _persist_output_snapshot(output_text: str) -> None:
             """Write a bounded progress snapshot to the run row mid-backup.

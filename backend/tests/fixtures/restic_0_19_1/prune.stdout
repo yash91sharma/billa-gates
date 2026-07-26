@@ -1,0 +1,22 @@
+loading all snapshots...
+finding data that is still in use for 1 snapshots
+[0:00] 100.00%  1 / 1 snapshots
+searching used packs...
+collecting packs for deletion and repacking
+[0:00] 100.00%  37 / 37 packs processed
+
+to repack:             4 blobs / 1.320 KiB
+this removes:          3 blobs / 899 B
+to delete:             0 blobs / 0 B
+total prune:           3 blobs / 899 B
+remaining:           379 blobs / 572.629 MiB
+unused size after prune: 0 B (0.00% of remaining size)
+
+repacking packs
+[0:00] 100.00%  1 / 1 packs repacked
+rebuilding index
+[0:00] 100.00%  3 / 3 indexes processed
+[0:00] 100.00%  3 / 3 old indexes deleted
+removing 1 old packs
+[0:00] 100.00%  1 / 1 files deleted
+done

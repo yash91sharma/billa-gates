@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db.models import CheckStatus, PruneStatus
@@ -4238,3 +4239,513 @@ async def test_run_check_ignores_missing_source_sentinel(engine):
 
     run = await _get_run(engine, run_id)
     assert run.status == RunStatus.success
+
+
+# ── Exit-code classification, exhaustively ────────────────────────────────────
+#
+# The pipeline branches on restic's exit code and nothing else — stderr wording
+# is not a contract (gaps.md H5). Two of these codes changed meaning in restic
+# 0.19.0, so each one gets an explicit test of the status it produces:
+#
+#   0    success
+#   3    partial backup — snapshot written, so `warning`, and retention still runs
+#   10   repo not found      → failed, never re-init (the destination was swapped)
+#   11   lock failed         → unlock, retry once
+#   12   wrong password      → failed
+#   130  killed by signal    → failed (was 1 before 0.19.0; SIGTERM now also 130)
+#   -1   wrapper-level launch failure / timeout → failed
+
+
+async def _run_with_backup_rc(engine, rc, *, stdout="", stderr="", summary=None):
+    """Drive one run whose `restic backup` exits with `rc`, returning the row."""
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(rc, stdout, stderr, summary),
+        ),
+        patch("app.services.restic.restic_forget", return_value=(0, "", "")),
+        patch("app.services.restic.restic_unlock", return_value=(0, "", "")),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    return await _get_run(engine, run_id)
+
+
+async def test_backup_rc130_marks_the_run_failed(engine):
+    """restic 0.19.0 returns 130 when killed by SIGINT *or* SIGTERM (previously
+    1). Both land in the generic failure branch — the important part is that 130
+    is never mistaken for a completed backup, because `_terminate_then_kill`
+    sends SIGTERM and a killed backup has no valid summary to report stats from.
+    """
+    run = await _run_with_backup_rc(
+        engine, 130, stderr='{"message_type":"exit_error","code":130}'
+    )
+
+    from app.db.models import RunStatus
+
+    assert run.status == RunStatus.failed
+    assert "130" in (run.error_output or ""), "the exit code must reach the operator"
+    assert run.snapshot_id is None
+    assert run.files_new is None, "no stats may be written from a killed process"
+
+
+@pytest.mark.parametrize("rc", (1, 2, 130, 137, -1))
+async def test_backup_nonzero_codes_other_than_three_all_fail(engine, rc):
+    """Anything that is not 0 or 3 is a failure, and the code is surfaced. This
+    is what keeps a future restic exit code from being silently absorbed into
+    `success`."""
+    run = await _run_with_backup_rc(engine, rc, stderr="something went wrong")
+
+    from app.db.models import CheckStatus, PruneStatus, RunStatus
+
+    assert run.status == RunStatus.failed
+    assert str(rc) in (run.error_output or "")
+    assert run.prune_status == PruneStatus.skipped, "retention must not run"
+    assert run.check_status == CheckStatus.skipped
+
+
+async def test_forget_rc3_marks_retention_failed(engine):
+    """restic 0.19.0 returns 3 when `forget` fails to remove one or more
+    snapshots — it returned 0 before, which meant a retention failure was
+    invisible. The runner treats any non-zero rc as a failed policy, so 3 now
+    surfaces as a `warning` run with the Retention column showing failed.
+    """
+    await _setup_job(engine, retain_keep_last=7)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
+        ),
+        patch(
+            "app.services.restic.restic_forget",
+            return_value=(3, "", "unable to remove snapshot abc123: stale lock"),
+        ),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.warning
+    assert run.prune_status == PruneStatus.failed
+    assert "stale lock" in (run.prune_error_output or "")
+    assert run.snapshot_id is not None, "the snapshot itself was still written"
+
+
+# ── The single-source invariant ───────────────────────────────────────────────
+
+
+async def test_backup_is_invoked_with_exactly_one_source_path(engine):
+    """restic 0.19.0 changed a missing backup source path from exit 0 to exit 3.
+    That only affects invocations with *several* sources: with one source, a
+    missing path is still a plain fatal (exit 1) and the run fails, rather than
+    becoming a `warning` whose retention step then runs against a repo that
+    received no new snapshot.
+
+    This test pins the property that makes the change harmless. If a job ever
+    grows multiple source paths, rc=3 handling has to be revisited first —
+    `backup_success = True` on rc=3 would then be reachable with nothing backed
+    up.
+    """
+    await _setup_job(engine, source_subpath="reports")
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    captured = {}
+
+    async def fake_backup(repo_path, password, source_path, timeout_seconds, **kwargs):
+        captured["source_path"] = source_path
+        captured["kwargs"] = kwargs
+        return (0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY)
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch("app.services.restic.restic_backup", side_effect=fake_backup),
+        patch("app.services.restic.restic_forget", return_value=(0, "", "")),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    source_path = captured["source_path"]
+    assert isinstance(source_path, str), "one path, not a list of them"
+    assert source_path == "/sources/documents/reports"
+    # No kwarg smuggles a second path in either.
+    assert "source_paths" not in captured["kwargs"]
+
+
+async def test_partial_backup_still_records_stats_from_the_summary(engine):
+    """rc=3 is success-with-warnings: the snapshot exists, so its stats must land
+    in the run row. A partial backup showing empty stats columns reads as a
+    failed run that somehow warned."""
+    partial_summary = dict(BACKUP_SUMMARY)
+    run = await _run_with_backup_rc(
+        engine,
+        3,
+        stdout=json.dumps(partial_summary),
+        stderr=RC3_STDERR,
+        summary=partial_summary,
+    )
+
+    from app.db.models import RunStatus
+
+    assert run.status == RunStatus.warning
+    assert run.snapshot_id == partial_summary["snapshot_id"]
+    assert run.files_new == partial_summary["files_new"]
+    assert run.data_added_bytes == partial_summary["data_added"]
+    assert run.total_bytes_processed == partial_summary["total_bytes_processed"]
+    assert "/sources/Docs/locked" in (run.error_output or "")
+
+
+# ── trigger_check / run_check: the paths the prune and backup twins already have ──
+
+
+async def test_trigger_check_returns_skipped_when_backup_is_running(engine):
+    """A manual verification must not start while a backup holds the repo. All
+    three entry points share one per-job lock and `active_jobs` set precisely so
+    two restic processes never write to the same repository — `check` takes a
+    lock too, so overlapping it with a backup produces lock conflicts and failed
+    runs, not just slowness. trigger_run and trigger_prune have this test; the
+    check path did not."""
+    from app.db.models import BackupRun, RunKind, RunReason, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+
+    active_jobs.add(JOB_ID)
+    try:
+        run_id = await trigger_check(JOB_ID, TriggeredBy.manual)
+    finally:
+        active_jobs.discard(JOB_ID)
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        run = await s.get(BackupRun, run_id)
+    assert run is not None
+    assert run.kind == RunKind.check
+    assert run.status == RunStatus.skipped
+    assert run.reason == RunReason.overlapping_run
+    assert run.check_status == CheckStatus.skipped
+    assert run.prune_status == PruneStatus.skipped
+
+
+async def test_trigger_check_returns_skipped_when_a_run_row_is_still_running(engine):
+    """The DB row is as authoritative as the in-memory set — after a container
+    restart `active_jobs` is empty while a `running` row may still be there."""
+    from app.db.models import BackupRun, RunReason, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=str(uuid.uuid4()),
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.scheduler,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    run_id = await trigger_check(JOB_ID, TriggeredBy.manual)
+
+    async with factory() as s:
+        run = await s.get(BackupRun, run_id)
+    assert run.status == RunStatus.skipped
+    assert run.reason == RunReason.overlapping_run
+
+
+async def test_trigger_check_job_not_found_returns_none(engine):
+    """Mirrors trigger_run/trigger_prune so the route layer can map it to a 404
+    rather than creating an orphan run row."""
+    from sqlalchemy import select
+
+    from app.db.models import BackupRun, TriggeredBy
+
+    result = await trigger_check(uuid.uuid4(), TriggeredBy.manual)
+    assert result is None
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        rows = (await s.execute(select(BackupRun))).scalars().all()
+    assert rows == []
+
+
+async def _run_check_with(engine, rc, *, notify_on_verification=True):
+    """Drive one `run_check` whose restic exits with `rc`; return (row, pushes)."""
+    from app.db.models import AppSettings, BackupRun, RunKind, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        settings = await s.get(AppSettings, 1)
+        # A push needs a topic: _setup_job leaves it empty, which disables all
+        # notifications regardless of the per-event flags.
+        settings.ntfy_topic = "alerts"
+        settings.notify_on_verification = notify_on_verification
+        await s.commit()
+
+    run_id = str(uuid.uuid4())
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                kind=RunKind.check,
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    pushes: list = []
+
+    async def fake_notify(server_url, topic, title, body, **kwargs):
+        pushes.append((title, body))
+
+    with (
+        patch("app.services.restic.restic_check", return_value=(rc, "", "boom")),
+        patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
+    ):
+        await run_check(JOB_ID, uuid.UUID(run_id), "structural", None, None)
+
+    return await _get_run(engine, run_id), pushes
+
+
+@pytest.mark.parametrize(
+    "rc,expected_word", ((0, "passed"), (1, "failed"), (2, "failed"))
+)
+async def test_run_check_verification_notification_names_the_outcome(
+    engine, rc, expected_word
+):
+    """A verification push that does not say whether the repo passed is useless —
+    the operator would have to open the UI to learn what they were told about."""
+    _, pushes = await _run_check_with(engine, rc, notify_on_verification=True)
+
+    assert pushes, "notify_on_verification=True must produce a push"
+    title, body = pushes[-1]
+    assert expected_word in title.lower() or expected_word in body.lower()
+
+
+async def test_notify_on_verification_false_sends_no_push(engine):
+    _, pushes = await _run_check_with(engine, 0, notify_on_verification=False)
+    assert pushes == []
+
+
+async def test_run_check_unhandled_exception_finalizes_run_to_failed(engine):
+    """Mirrors the backup and prune crash guards. Without it a crash inside the
+    check pipeline leaves the row at `running` forever, which blocks every future
+    backup for that job via the overlap check — the job silently stops backing
+    up."""
+    from app.db.models import BackupRun, RunKind, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = str(uuid.uuid4())
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                kind=RunKind.check,
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with patch(
+        "app.services.restic.restic_check",
+        side_effect=RuntimeError("something exploded mid-check"),
+    ):
+        await run_check(JOB_ID, uuid.UUID(run_id), "structural", None, None)
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed, "a crashed check must not stay running"
+    assert run.check_status == CheckStatus.failed
+    assert "something exploded mid-check" in (run.check_error_output or "")
+    assert run.finished_at is not None
+    assert run.duration_seconds is not None
+    assert run.prune_status == PruneStatus.skipped
+
+
+# ── Output parsers: robustness against whatever restic actually writes ────────
+#
+# These run over untrusted subprocess output on every run. A crash here happens
+# *after* the backup has already succeeded, so it would turn a good run into a
+# failed one — and a truncated final line is entirely normal when a process is
+# killed mid-write.
+
+
+@pytest.mark.parametrize(
+    "line",
+    (
+        "not json at all",
+        '{"unterminated',
+        "[]",
+        '"a bare string"',
+        "null",
+        "{}",
+    ),
+)
+def test_extract_failed_items_skips_unparseable_lines(line):
+    from app.services.backup_runner import _extract_failed_items
+
+    assert _extract_failed_items(line) == []
+
+
+def test_extract_failed_items_ignores_non_error_message_types():
+    """status and summary lines share the stream with error lines; only errors
+    name a failed item."""
+    from app.services.backup_runner import _extract_failed_items
+
+    stream = "\n".join(
+        [
+            json.dumps({"message_type": "status", "percent_done": 0.5}),
+            json.dumps({"message_type": "summary", "files_new": 1}),
+            json.dumps({"message_type": "verbose_status", "item": "/x"}),
+        ]
+    )
+    assert _extract_failed_items(stream) == []
+
+
+def test_extract_failed_items_skips_error_lines_with_neither_item_nor_message():
+    """An error line carrying no path and no text tells the operator nothing —
+    listing it as a failed item would inflate the count with blanks."""
+    from app.services.backup_runner import _extract_failed_items
+
+    stream = json.dumps({"message_type": "error", "error": {}, "item": ""})
+    assert _extract_failed_items(stream) == []
+
+
+def test_extract_failed_items_handles_a_non_dict_error_value():
+    """`error` is restic's field; if it is ever a bare string the parser must
+    still surface it rather than raising."""
+    from app.services.backup_runner import _extract_failed_items
+
+    stream = json.dumps(
+        {"message_type": "error", "error": "permission denied", "item": "/sources/x"}
+    )
+    items = _extract_failed_items(stream)
+    assert len(items) == 1
+    assert "permission denied" in items[0]
+
+
+def test_extract_failed_items_merges_phases_for_one_item():
+    """Scanner and archiver both report an unreadable directory. One entry, both
+    phases — counting events would report two failures for one folder."""
+    from app.services.backup_runner import _extract_failed_items
+
+    items = _extract_failed_items(RC3_STDERR_DOUBLE_REPORTED)
+    assert len(items) == 1
+
+
+def test_extract_failed_items_respects_the_parse_limit():
+    """A share that denies a million files must not write a million lines into
+    the run row — error_output is read on every run-detail fetch."""
+    from app.services.backup_runner import (
+        _FAILED_ITEM_PARSE_LIMIT,
+        _extract_failed_items,
+    )
+
+    stream = "\n".join(
+        json.dumps(
+            {
+                "message_type": "error",
+                "error": {"message": "permission denied"},
+                "item": f"/sources/x/file-{i}",
+                "during": "archival",
+            }
+        )
+        for i in range(_FAILED_ITEM_PARSE_LIMIT * 3)
+    )
+    assert len(_extract_failed_items(stream)) <= _FAILED_ITEM_PARSE_LIMIT
+
+
+def test_filter_backup_output_keeps_unparseable_lines():
+    """Non-JSON diagnostics are often the only clue about a weird run, so they
+    are kept verbatim rather than dropped with the progress noise."""
+    from app.services.backup_runner import _filter_backup_output
+
+    out = _filter_backup_output(
+        "\n".join(
+            [
+                "Fatal: something restic printed as plain text",
+                '{"truncated json',
+                json.dumps({"message_type": "status", "percent_done": 0.5}),
+                json.dumps({"message_type": "summary", "files_new": 1}),
+            ]
+        )
+    )
+
+    assert "Fatal: something restic printed as plain text" in out
+    assert '{"truncated json' in out
+    assert "status" not in out, "progress lines must be stripped"
+    assert "summary" in out, "the summary is the run's receipt"
+
+
+def test_format_backup_error_always_names_the_exit_code():
+    """Whatever else is missing, the operator gets the code to search for."""
+    from app.services.backup_runner import _format_backup_error
+
+    assert "exit code 130" in _format_backup_error(130, [], "")
+    assert "exit code 1" in _format_backup_error(1, [], "")
+
+
+def test_format_backup_error_includes_stderr_and_per_file_errors():
+    from app.services.backup_runner import _format_backup_error
+
+    out = _format_backup_error(1, ["/sources/x: denied"], "Fatal: repo locked")
+    assert "Fatal: repo locked" in out
+    assert "/sources/x: denied" in out
+    # Summary first, granular context after.
+    assert out.index("Fatal: repo locked") < out.index("/sources/x: denied")

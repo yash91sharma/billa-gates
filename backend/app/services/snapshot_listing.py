@@ -53,18 +53,31 @@ def _clear_cache() -> None:
 def _normalize(raw: Dict[str, Any]) -> Dict[str, Any]:
     """Map restic's raw snapshot dict to the API response shape.
 
-    Translates restic-internal keys (`id`, `time`, `total_size`) into the
-    stable names exposed by the API (`snapshot_id`, `snapshot_time`,
-    `size_bytes`) so a future restic schema change does not leak through
-    the API contract.
+    Translates restic-internal keys (`id`, `time`, `summary.total_bytes_processed`)
+    into the stable names exposed by the API (`snapshot_id`, `snapshot_time`,
+    `size_bytes`) so a future restic schema change does not leak through the API
+    contract.
+
+    **Size comes out of the `summary` sub-object.** There is no top-level
+    `total_size` in restic's snapshot JSON — not in 0.18.1, not in 0.19.1 — and
+    reading one returned None for every snapshot ever listed, so the UI's Size
+    column was permanently blank. `summary.total_bytes_processed` is the same
+    number restic prints in its own `snapshots` table. Snapshots written before
+    restic 0.17 carry no `summary` at all, so the size stays unknown for those
+    rather than raising. Guarded by tests/test_restic_contract.py, which checks
+    this mapping against recorded restic output instead of a fixture.
     """
+    summary = raw.get("summary")
+    size_bytes = (
+        summary.get("total_bytes_processed") if isinstance(summary, dict) else None
+    )
     return {
         "snapshot_id": raw.get("id"),
         "snapshot_time": raw.get("time"),
         "hostname": raw.get("hostname") or "",
         "paths": raw.get("paths") or [],
         "tags": raw.get("tags"),
-        "size_bytes": raw.get("total_size"),
+        "size_bytes": size_bytes,
     }
 
 

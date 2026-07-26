@@ -1671,3 +1671,851 @@ async def test_check_timeout_terminates_before_kill():
     assert code != 0
     assert "timed out" in err.lower()
     proc.terminate.assert_called_once()
+
+
+# ── Launch failures: restic missing, fork failed, not executable ──────────────
+#
+# Every wrapper catches an exception from create_subprocess_exec and returns
+# (-1, "", str(e)) instead of letting OSError escape into the backup pipeline,
+# where it would abort run_backup before the run row could be finalized and
+# leave the job wedged at status=running (which locks out every future trigger
+# via trigger_run's overlap check).
+#
+# This is not a hypothetical path: the dev container has no restic binary, and
+# an image built without the restic-fetcher stage would hit it on every run.
+
+
+def _launch_failure(exc: Exception):
+    return patch("asyncio.create_subprocess_exec", side_effect=exc)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    (
+        FileNotFoundError("No such file or directory: 'restic'"),
+        PermissionError("Permission denied: 'restic'"),
+        OSError("fork failed"),
+    ),
+    ids=("missing_binary", "not_executable", "fork_failed"),
+)
+async def test_cat_config_launch_failure_returns_minus_one(exc):
+    with _launch_failure(exc):
+        rc, out, err = await restic_cat_config(REPO, PASSWORD)
+    assert rc == -1
+    assert out == ""
+    assert str(exc) in err
+
+
+async def test_init_launch_failure_returns_minus_one():
+    with _launch_failure(FileNotFoundError("restic not found")):
+        rc, out, err = await restic_init(REPO, PASSWORD)
+    assert rc == -1
+    assert "restic not found" in err
+
+
+async def test_backup_launch_failure_returns_minus_one_and_no_summary():
+    """A failed launch must not look like a successful backup: no summary means
+    the stats step writes nothing, and rc=-1 lands in the `failed` branch."""
+    with _launch_failure(FileNotFoundError("restic not found")):
+        rc, out, err, summary = await restic_backup(REPO, PASSWORD, "/sources/x", 3600)
+    assert rc == -1
+    assert out == ""
+    assert "restic not found" in err
+    assert summary is None
+
+
+@pytest.mark.parametrize(
+    "wrapper,args",
+    (
+        (restic_forget, (REPO, PASSWORD, 60)),
+        (restic_prune, (REPO, PASSWORD, 60)),
+        (restic_unlock, (REPO, PASSWORD, 60)),
+    ),
+    ids=("forget", "prune", "unlock"),
+)
+async def test_wrapper_launch_failure_returns_minus_one(wrapper, args):
+    with _launch_failure(OSError("fork failed")):
+        rc, out, err = await wrapper(*args)
+    assert rc == -1
+    assert out == ""
+    assert "fork failed" in err
+
+
+async def test_check_launch_failure_returns_minus_one():
+    with _launch_failure(OSError("fork failed")):
+        rc, out, err = await restic_check(REPO, PASSWORD, "structural", None, 60)
+    assert rc == -1
+    assert "fork failed" in err
+
+
+async def test_version_launch_failure_returns_none():
+    """`restic_version` is called at startup to populate AppSettings. A missing
+    binary must degrade to an unknown version, never crash the lifespan."""
+    with _launch_failure(FileNotFoundError("restic not found")):
+        assert await restic_version() is None
+
+
+# ── restic_version parsing ────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "output,expected",
+    (
+        ("restic 0.19.1 compiled with go1.26.4 on linux/arm64\n", "0.19.1"),
+        ("restic 0.18.1 compiled with go1.25.1 on linux/amd64\n", "0.18.1"),
+        ("restic 1.0 compiled with go1.30 on linux/arm64\n", "1.0"),
+        ("restic 0.19.1-dev compiled with go1.26.4\n", "0.19.1"),
+    ),
+)
+async def test_version_parses_real_version_banners(output, expected):
+    """The health endpoint and the run log both surface this string; a parse
+    miss shows the user "unknown restic" on a working install."""
+    proc = _make_process(0, stdout=output)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        assert await restic_version() == expected
+
+
+@pytest.mark.parametrize("output", ("", "\n", "garbage with no version", "restic\n"))
+async def test_version_returns_none_for_unparseable_output(output):
+    proc = _make_process(0, stdout=output)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        assert await restic_version() is None
+
+
+# ── restic_latest_snapshot_id failure modes ───────────────────────────────────
+#
+# A wrong answer here is worse than no answer: `--parent` pointing at a bogus id
+# fails the whole backup, so every one of these must raise rather than return a
+# value the caller would pass to restic.
+
+
+async def test_latest_snapshot_id_raises_when_restic_cannot_be_launched():
+    from app.services.restic import ResticError, restic_latest_snapshot_id
+
+    with _launch_failure(FileNotFoundError("restic not found")):
+        with pytest.raises(ResticError) as exc_info:
+            await restic_latest_snapshot_id(REPO, PASSWORD)
+    assert "failed to launch" in str(exc_info.value)
+
+
+async def test_latest_snapshot_id_raises_on_timeout_and_terminates():
+    """A hung listing must not stall the run indefinitely before the backup has
+    even started — the parent lookup runs inside the run pipeline."""
+    from app.services.restic import ResticError, restic_latest_snapshot_id
+
+    proc = AsyncMock()
+    proc.communicate = AsyncMock()
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=0)
+    proc.returncode = None
+
+    async def fake_wait_for(coro, timeout):
+        if hasattr(coro, "close"):
+            coro.close()
+        raise asyncio.TimeoutError()
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with patch("asyncio.wait_for", side_effect=fake_wait_for):
+            with pytest.raises(ResticError) as exc_info:
+                await restic_latest_snapshot_id(REPO, PASSWORD, timeout_seconds=1)
+
+    assert "timed out" in str(exc_info.value)
+    proc.terminate.assert_called_once()
+
+
+@pytest.mark.parametrize("payload", ('{"a": 1}', '"str"', "42", "null"))
+async def test_latest_snapshot_id_raises_on_non_list_json(payload):
+    from app.services.restic import ResticError, restic_latest_snapshot_id
+
+    proc = _make_process(0, stdout=payload)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with pytest.raises(ResticError) as exc_info:
+            await restic_latest_snapshot_id(REPO, PASSWORD)
+    assert "non-list" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("bad_id", (None, 42, [], {}))
+async def test_latest_snapshot_id_raises_when_id_is_not_a_string(bad_id):
+    """Passing a non-string straight through would render as e.g. `--parent None`
+    and fail the backup with a confusing restic error."""
+    from app.services.restic import ResticError, restic_latest_snapshot_id
+
+    proc = _make_process(0, stdout=json.dumps([{"id": bad_id}]))
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with pytest.raises(ResticError) as exc_info:
+            await restic_latest_snapshot_id(REPO, PASSWORD)
+    assert "string ID" in str(exc_info.value)
+
+
+async def test_latest_snapshot_id_uses_no_lock_so_it_never_blocks():
+    """Read-only lookup: it must not wait on a write lock held by a concurrent
+    backup, or on a stale lock file left by a killed one."""
+    from app.services.restic import restic_latest_snapshot_id
+
+    proc = _make_process(0, stdout=json.dumps([{"id": "a" * 64}]))
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = args
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await restic_latest_snapshot_id(REPO, PASSWORD)
+
+    assert "--no-lock" in captured["args"]
+
+
+# ── Exit code 130: terminated by signal (new in restic 0.19.0) ────────────────
+
+
+@pytest.mark.parametrize("wrapper_rc", (130,))
+async def test_backup_rc130_returns_no_summary(wrapper_rc):
+    """restic 0.19.0 returns 130 on SIGINT *and* SIGTERM (it returned 1 before).
+    SIGTERM is what `_terminate_then_kill` sends when a run is canceled, so the
+    wrapper must not treat 130 as a completed backup: no summary, so the stats
+    step cannot overwrite the run with numbers from a killed process.
+    """
+    proc = _make_process(wrapper_rc, stdout=BACKUP_SUMMARY)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        rc, _, _, summary = await restic_backup(REPO, PASSWORD, "/sources/x", 3600)
+
+    assert rc == 130
+    assert summary is None, "only rc 0 and 3 may yield a summary"
+
+
+@pytest.mark.parametrize("rc", (1, 2, 10, 11, 12, 130, 137))
+async def test_backup_summary_only_returned_for_rc_zero_and_three(rc):
+    proc = _make_process(rc, stdout=BACKUP_SUMMARY)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        _, _, _, summary = await restic_backup(REPO, PASSWORD, "/sources/x", 3600)
+    assert summary is None
+
+
+@pytest.mark.parametrize("rc", (0, 3))
+async def test_backup_summary_returned_for_success_and_partial(rc):
+    proc = _make_process(rc, stdout=BACKUP_SUMMARY)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        _, _, _, summary = await restic_backup(REPO, PASSWORD, "/sources/x", 3600)
+    assert summary is not None
+    assert summary["message_type"] == "summary"
+
+
+# ── restic_forget flag mapping, exhaustively ──────────────────────────────────
+
+_ALL_RETENTION_FLAGS = {
+    "retain_keep_last": ("--keep-last", 7),
+    "retain_keep_hourly": ("--keep-hourly", 24),
+    "retain_keep_daily": ("--keep-daily", 7),
+    "retain_keep_weekly": ("--keep-weekly", 4),
+    "retain_keep_monthly": ("--keep-monthly", 12),
+    "retain_keep_yearly": ("--keep-yearly", 3),
+    "retain_keep_within": ("--keep-within", "30d"),
+    "retain_keep_within_hourly": ("--keep-within-hourly", "48h"),
+    "retain_keep_within_daily": ("--keep-within-daily", "7d"),
+    "retain_keep_within_weekly": ("--keep-within-weekly", "56d"),
+    "retain_keep_within_monthly": ("--keep-within-monthly", "6m"),
+    "retain_keep_within_yearly": ("--keep-within-yearly", "2y"),
+}
+
+
+@pytest.mark.parametrize(
+    "kwarg,flag,value",
+    [(k, f, v) for k, (f, v) in _ALL_RETENTION_FLAGS.items()],
+)
+async def test_forget_maps_every_retention_field_to_its_flag(kwarg, flag, value):
+    """All twelve retention fields, one test each. A field silently not reaching
+    restic means the policy the user configured is not the policy being applied —
+    and `forget` still exits 0, so the run reports success while snapshots pile
+    up or vanish."""
+    proc = _make_process(0, stdout="")
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = [str(a) for a in args]
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await restic_forget(REPO, PASSWORD, 60, **{kwarg: value})
+
+    args = captured["args"]
+    assert flag in args, f"{kwarg} did not become {flag}"
+    assert args[args.index(flag) + 1] == str(value)
+
+
+async def test_forget_omits_flags_whose_value_is_none():
+    """An unset retention field must not become `--keep-daily None`, which restic
+    rejects — failing forget while the backup itself reports success."""
+    proc = _make_process(0, stdout="")
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = [str(a) for a in args]
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await restic_forget(
+            REPO,
+            PASSWORD,
+            60,
+            retain_keep_last=5,
+            **{k: None for k in _ALL_RETENTION_FLAGS if k != "retain_keep_last"},
+        )
+
+    args = captured["args"]
+    assert "--keep-last" in args
+    assert "None" not in args
+    for flag, _ in _ALL_RETENTION_FLAGS.values():
+        if flag != "--keep-last":
+            assert flag not in args
+
+
+async def test_forget_passes_all_flags_together():
+    """A fully-populated policy must reach restic intact, not just one flag at a
+    time."""
+    proc = _make_process(0, stdout="")
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = [str(a) for a in args]
+        return proc
+
+    kwargs = {k: v for k, (_, v) in _ALL_RETENTION_FLAGS.items()}
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await restic_forget(REPO, PASSWORD, 60, **kwargs)
+
+    args = captured["args"]
+    for flag, value in _ALL_RETENTION_FLAGS.values():
+        assert args[args.index(flag) + 1] == str(value)
+
+
+async def test_forget_rc3_is_reported_to_the_caller():
+    """restic 0.19.0 returns 3 when forget fails to remove one or more snapshots
+    (it returned 0 before). The wrapper passes rc through unchanged so the runner
+    can mark retention failed — reporting success there is what let a repo grow
+    without bound for months."""
+    proc = _make_process(3, stdout="", stderr="unable to remove snapshot")
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        rc, _, err = await restic_forget(REPO, PASSWORD, 60, retain_keep_last=1)
+    assert rc == 3
+    assert "unable to remove" in err
+
+
+# ── restic_check argument construction ────────────────────────────────────────
+
+
+async def test_check_subset_without_percent_falls_back_to_structural():
+    """`mode=subset` with no percentage must not emit a malformed
+    `--read-data-subset=None%`, which restic rejects — turning a verification
+    into a hard failure the user reads as repository corruption."""
+    proc = _make_process(0, stdout="")
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = [str(a) for a in args]
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await restic_check(REPO, PASSWORD, "subset", None, 60)
+
+    args = captured["args"]
+    assert not any("read-data" in a for a in args)
+    assert args[:2] == ["restic", "check"]
+
+
+@pytest.mark.parametrize("percent", (1, 10, 50, 100))
+async def test_check_subset_percent_is_formatted_as_restic_expects(percent):
+    proc = _make_process(0, stdout="")
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = [str(a) for a in args]
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await restic_check(REPO, PASSWORD, "subset", percent, 60)
+
+    assert f"--read-data-subset={percent}%" in captured["args"]
+
+
+async def test_check_unknown_mode_adds_no_flags():
+    """An unrecognised mode degrades to a structural check rather than building a
+    command line restic will refuse."""
+    proc = _make_process(0, stdout="")
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = [str(a) for a in args]
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await restic_check(REPO, PASSWORD, "not-a-mode", 50, 60)
+
+    assert captured["args"] == ["restic", "check"]
+
+
+# ── Pure formatters and the bounded collector ─────────────────────────────────
+#
+# These are what an operator watching a run actually reads, and they are the
+# reason `restic_backup` can consume a 210 MB output stream in O(1) memory. They
+# take restic's JSON straight from the wire, so every branch has to survive a
+# field being absent, a bool where a number belongs, and a line that is not JSON
+# at all.
+
+from app.services.restic import (  # noqa: E402
+    _MAX_RETAINED_LINE_CHARS,
+    _BackupOutputCollector,
+    _BoundedOutput,
+    _format_bytes,
+    _format_eta,
+    _format_progress,
+    _pump_stream,
+)
+
+
+@pytest.mark.parametrize(
+    "num_bytes,expected",
+    (
+        (0, "0 B"),
+        (1, "1 B"),
+        (1023, "1023 B"),
+        (1024, "1.0 KiB"),
+        (1536, "1.5 KiB"),
+        (1024**2, "1.0 MiB"),
+        (1024**3, "1.0 GiB"),
+        (1024**4, "1.0 TiB"),
+        (1024**5, "1024.0 TiB"),  # clamps at the largest unit rather than wrapping
+    ),
+)
+def test_format_bytes_renders_each_unit(num_bytes, expected):
+    assert _format_bytes(num_bytes) == expected
+
+
+@pytest.mark.parametrize("value", (None, "1024", [], {}, True, False))
+def test_format_bytes_rejects_non_numbers(value):
+    """restic sends JSON; a bool is not a byte count and `isinstance(True, int)`
+    is True in Python, so bools must be excluded explicitly."""
+    assert _format_bytes(value) is None
+
+
+@pytest.mark.parametrize(
+    "seconds,expected",
+    (
+        (1, "eta 1s"),
+        (59, "eta 59s"),
+        (60, "eta 1m"),
+        (3599, "eta 59m"),
+        (3600, "eta 1h 0m"),
+        (7320, "eta 2h 2m"),
+        (86400, "eta 24h 0m"),
+    ),
+)
+def test_format_eta_renders_each_magnitude(seconds, expected):
+    assert _format_eta(seconds) == expected
+
+
+@pytest.mark.parametrize("value", (None, 0, -1, "60", True, False, []))
+def test_format_eta_omitted_when_unknown_or_invalid(value):
+    """restic omits `seconds_remaining` until it has scanned enough to estimate,
+    and sends 0 at the end — neither should render as "eta 0s"."""
+    assert _format_eta(value) is None
+
+
+def test_format_progress_on_an_empty_status_line():
+    """Better a bare "running" than an empty string the UI renders as a blank
+    progress area."""
+    assert _format_progress({}) == "progress: running"
+
+
+def test_format_progress_full_line_orders_parts_for_reading():
+    rendered = _format_progress(
+        {
+            "message_type": "status",
+            "percent_done": 0.4567,
+            "files_done": 1234,
+            "total_files": 5000,
+            "bytes_done": 1024**3,
+            "total_bytes": 4 * 1024**3,
+            "seconds_remaining": 125,
+            "error_count": 3,
+        }
+    )
+    assert rendered == (
+        "progress: 46% · 1,234/5,000 files · 1.0 GiB/4.0 GiB · eta 2m · 3 errors"
+    )
+
+
+def test_format_progress_thousands_separators_on_large_counts():
+    """A seven-digit file count without separators is unreadable at a glance."""
+    rendered = _format_progress({"files_done": 1234567, "total_files": 2000000})
+    assert "1,234,567/2,000,000 files" in rendered
+
+
+def test_format_progress_files_done_without_total_when_scan_is_skipped():
+    """With `--no-scan` restic never learns the total, so it sends `files_done`
+    alone. The line must still render rather than dropping the count."""
+    rendered = _format_progress({"files_done": 42, "bytes_done": 2048})
+    assert "42 files" in rendered
+    assert "/" not in rendered.split("files")[0]
+    assert "2.0 KiB" in rendered
+
+
+def test_format_progress_bytes_done_without_total():
+    rendered = _format_progress({"bytes_done": 5 * 1024**2})
+    assert "5.0 MiB" in rendered
+
+
+@pytest.mark.parametrize(
+    "error_count,expected",
+    ((1, "1 error"), (2, "2 errors"), (1500, "1,500 errors")),
+)
+def test_format_progress_pluralises_the_error_tally(error_count, expected):
+    """`error_count` matters out of proportion to its size: files that fail during
+    the scan never enter `total_files`, so a partial backup can otherwise show a
+    spotless 100% next to a `warning` badge."""
+    rendered = _format_progress({"percent_done": 1.0, "error_count": error_count})
+    assert expected in rendered
+
+
+@pytest.mark.parametrize("error_count", (0, None, False, True, "3"))
+def test_format_progress_omits_error_tally_when_absent_or_zero(error_count):
+    rendered = _format_progress({"percent_done": 0.5, "error_count": error_count})
+    assert "error" not in rendered
+
+
+@pytest.mark.parametrize(
+    "status",
+    (
+        {"percent_done": True},
+        {"files_done": True, "total_files": True},
+        {"percent_done": "50%"},
+        {"files_done": None},
+    ),
+)
+def test_format_progress_ignores_fields_of_the_wrong_type(status):
+    """Never raise on restic's output — a malformed status line must degrade to a
+    shorter progress line, not abort the run's progress persistence."""
+    assert _format_progress(status).startswith("progress:")
+
+
+# ── _BoundedOutput ────────────────────────────────────────────────────────────
+
+
+def test_bounded_output_retains_lines_in_order():
+    out = _BoundedOutput(password="")
+    for line in ("first", "second", "third"):
+        out.add(line)
+    assert out.text() == "first\nsecond\nthird"
+
+
+def test_bounded_output_truncates_a_single_oversized_line():
+    """One pathological line (a multi-megabyte filename list, a binary blob on
+    stderr) must not consume the whole budget."""
+    out = _BoundedOutput(password="")
+    out.add("x" * (_MAX_RETAINED_LINE_CHARS * 3))
+    text = out.text()
+    assert "…<truncated>" in text
+    assert len(text) < _MAX_RETAINED_LINE_CHARS * 2
+
+
+def test_bounded_output_drops_past_the_cap_and_says_so():
+    """Silently losing output is worse than a short record — the operator has to
+    know the log is incomplete."""
+    out = _BoundedOutput(password="", max_chars=100)
+    for i in range(50):
+        out.add(f"line-{i:03d} " + "y" * 20)
+    text = out.text()
+    assert "more output line(s) omitted" in text
+    assert "capped at 100 characters" in text
+
+
+def test_bounded_output_force_bypasses_the_cap():
+    """The summary arrives last, after any error flood that may have filled the
+    cap, and it drives every stats column — it must survive regardless."""
+    out = _BoundedOutput(password="", max_chars=50)
+    for i in range(20):
+        out.add(f"noise-{i}" + "z" * 20)
+    out.add("THE-SUMMARY", force=True)
+    assert "THE-SUMMARY" in out.text()
+
+
+def test_bounded_output_scrubs_the_password_per_line():
+    """There is no whole-stream string to run a single replace() over any more, so
+    scrubbing happens per line — a repo password must never reach the DB row."""
+    out = _BoundedOutput(password="s3cr3t")
+    out.add(out.scrub("connecting with password s3cr3t to repo"))
+    text = out.text()
+    assert "s3cr3t" not in text
+    assert "connecting with password  to repo" == text
+
+
+def test_bounded_output_scrub_is_a_noop_for_an_empty_password():
+    out = _BoundedOutput(password="")
+    assert out.scrub("nothing to remove") == "nothing to remove"
+
+
+def test_bounded_output_appends_extra_last():
+    """The live progress line is appended at render time so it always reads as the
+    newest thing in the record."""
+    out = _BoundedOutput(password="")
+    out.add("earlier")
+    assert out.text(extra="progress: 50%") == "earlier\nprogress: 50%"
+
+
+# ── _BackupOutputCollector ────────────────────────────────────────────────────
+
+
+def test_collector_never_retains_the_status_firehose():
+    collector = _BackupOutputCollector(password="")
+    for pct in (0.1, 0.2, 0.3):
+        collector.feed(json.dumps({"message_type": "status", "percent_done": pct}))
+
+    text = collector.text()
+    assert "message_type" not in text
+    assert text.count("progress:") == 1
+    assert "30%" in text, "the newest status line wins"
+
+
+def test_collector_captures_and_retains_the_summary():
+    collector = _BackupOutputCollector(password="")
+    collector.feed(BACKUP_SUMMARY)
+
+    assert collector.summary is not None
+    assert collector.summary["files_new"] == 10
+    assert "summary" in collector.text()
+
+
+def test_collector_retains_error_lines():
+    collector = _BackupOutputCollector(password="")
+    line = json.dumps(
+        {
+            "message_type": "error",
+            "error": {"message": "permission denied"},
+            "item": "/sources/x/secret",
+        }
+    )
+    collector.feed(line)
+    assert "/sources/x/secret" in collector.text()
+
+
+@pytest.mark.parametrize(
+    "line",
+    (
+        "Fatal: unable to open repository",
+        "warning: some plain text diagnostic",
+        "{not valid json at all",
+        '{"unterminated": ',
+        "[1, 2, 3]",
+        '"just a string"',
+    ),
+)
+def test_collector_retains_non_json_and_malformed_lines(line):
+    """restic mixes plain-text diagnostics into its JSON streams, and a truncated
+    line can arrive if the process is killed mid-write. Anything unparseable is
+    kept verbatim — it is often the only clue about what went wrong."""
+    collector = _BackupOutputCollector(password="")
+    collector.feed(line)
+    assert line.strip() in collector.text()
+
+
+def test_collector_ignores_blank_lines():
+    collector = _BackupOutputCollector(password="")
+    for line in ("", "   ", "\r", "\n"):
+        collector.feed(line)
+    assert collector.text() == ""
+
+
+def test_collector_strips_carriage_returns():
+    """restic's progress output is CR-terminated when it thinks it is on a
+    terminal; a stray \\r would render as a control character in the UI."""
+    collector = _BackupOutputCollector(password="")
+    collector.feed("some line\r")
+    assert "\r" not in collector.text()
+
+
+def test_collector_scrubs_the_password_from_every_classification():
+    collector = _BackupOutputCollector(password="s3cr3t")
+    collector.feed("Fatal: repo s3cr3t unreachable")
+    collector.feed(json.dumps({"message_type": "summary", "note": "s3cr3t"}))
+    assert "s3cr3t" not in collector.text()
+
+
+def test_collector_summary_survives_an_error_flood():
+    """The end-to-end version of the force-retention rule: thousands of error
+    lines then the summary, which must still be readable in the record."""
+    collector = _BackupOutputCollector(password="")
+    for i in range(20000):
+        collector.feed(
+            json.dumps(
+                {
+                    "message_type": "error",
+                    "error": {"message": "permission denied"},
+                    "item": f"/sources/x/file-{i}",
+                }
+            )
+        )
+    collector.feed(BACKUP_SUMMARY)
+
+    text = collector.text()
+    assert collector.summary is not None
+    assert "more output line(s) omitted" in text
+    assert '"message_type": "summary"' in text or '"message_type":"summary"' in text
+
+
+# ── _pump_stream ──────────────────────────────────────────────────────────────
+
+
+async def _collect_lines(data: bytes, chunk_size: int = 65536):
+    lines: list[str] = []
+
+    async def on_line(line: str) -> None:
+        lines.append(line)
+
+    await _pump_stream(_FakeStream(data, chunk_size), on_line)
+    return lines
+
+
+async def test_pump_stream_yields_complete_lines():
+    assert await _collect_lines(b"a\nb\nc\n") == ["a", "b", "c"]
+
+
+async def test_pump_stream_flushes_a_final_line_without_a_newline():
+    """restic's last line has no trailing newline when the process exits — and
+    that last line is the summary, which drives every stats column."""
+    assert await _collect_lines(b"first\nsecond-no-newline") == [
+        "first",
+        "second-no-newline",
+    ]
+
+
+async def test_pump_stream_on_an_empty_stream_yields_nothing():
+    assert await _collect_lines(b"") == []
+
+
+async def test_pump_stream_reassembles_a_line_split_across_reads():
+    lines = await _collect_lines(b'{"message_type":"summary"}\n', chunk_size=7)
+    assert lines == ['{"message_type":"summary"}']
+
+
+async def test_pump_stream_does_not_mangle_a_multibyte_char_split_across_reads():
+    """A UTF-8 character straddling a chunk boundary must not become replacement
+    characters — filenames in error lines are frequently non-ASCII."""
+    payload = "/sources/photos/naïve-résumé-日本語.txt\n".encode()
+    for chunk_size in range(1, 12):
+        lines = await _collect_lines(payload, chunk_size=chunk_size)
+        assert lines == ["/sources/photos/naïve-résumé-日本語.txt"], (
+            f"mangled at chunk_size={chunk_size}"
+        )
+
+
+async def test_pump_stream_flushes_an_unterminated_line_at_the_retention_limit():
+    """A stream with no newlines at all (a binary blob on stderr) must not grow
+    the buffer without bound — that unbounded growth is exactly what the
+    `communicate()` version did, and it OOM-killed the container.
+
+    The pump's guarantee is about the *buffer*: it flushes once the accumulator
+    passes the retention limit, so memory stays O(chunk + limit) no matter how
+    long the stream is. Trimming an individual line to a storable length is
+    `_BoundedOutput.add`'s job, not the pump's.
+    """
+    chunk = 1024
+    total = _MAX_RETAINED_LINE_CHARS * 3
+    lines = await _collect_lines(b"x" * total, chunk_size=chunk)
+
+    assert len(lines) >= 2, "buffer was never flushed — it grew for the whole stream"
+    assert sum(len(line) for line in lines) == total, "no data lost across flushes"
+    # Each flush happens as soon as the limit is passed, so a line can overshoot
+    # by at most one read.
+    assert all(len(line) <= _MAX_RETAINED_LINE_CHARS + chunk for line in lines)
+
+
+async def test_pump_stream_bounded_flush_output_is_still_trimmed_by_the_collector():
+    """The two halves of the memory guarantee, together: the pump keeps the
+    buffer small, and the collector keeps what it retains small."""
+    collector = _BackupOutputCollector(password="")
+
+    async def on_line(line: str) -> None:
+        collector.feed(line)
+
+    await _pump_stream(
+        _FakeStream(b"x" * (_MAX_RETAINED_LINE_CHARS * 3), 1024), on_line
+    )
+
+    for line in collector.text().splitlines():
+        assert len(line) <= _MAX_RETAINED_LINE_CHARS + len("…<truncated>")
+
+
+# ── Process-registry tracking ─────────────────────────────────────────────────
+
+
+async def test_wrapper_without_run_id_does_not_touch_the_registry():
+    """`run_id` is optional so callers outside a run (restic_version at startup,
+    repository provisioning at job create) work unchanged. Those must not leave
+    an entry in the registry — a stale handle there would let a later cancel
+    signal a process that no longer belongs to that run."""
+    from app.services import process_registry
+
+    proc = _make_process(0, stdout="{}")
+    before = dict(process_registry._processes)
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        await restic_cat_config(REPO, PASSWORD)
+
+    assert process_registry._processes == before
+
+
+async def test_wrapper_with_run_id_registers_and_unregisters():
+    """Registered for the lifetime of the call, gone afterwards — the cancel
+    endpoint reaches the live process through this map."""
+    import uuid as _uuid
+
+    from app.services import process_registry
+
+    run_id = _uuid.uuid4()
+    proc = _make_process(0, stdout="{}")
+    seen = {}
+
+    async def fake_exec(*args, **kwargs):
+        return proc
+
+    original_register = process_registry.register
+
+    def spy_register(rid, p):
+        seen["registered"] = (rid, p)
+        original_register(rid, p)
+
+    with (
+        patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        patch.object(process_registry, "register", spy_register),
+    ):
+        await restic_cat_config(REPO, PASSWORD, run_id=run_id)
+
+    assert seen["registered"][0] == run_id
+    assert process_registry.get(run_id) is None, "handle must be released"
+
+
+async def test_registry_is_cleaned_up_even_when_the_wrapper_times_out():
+    """The unregister lives in a finally block precisely so a timeout does not
+    leak the handle."""
+    import uuid as _uuid
+
+    from app.services import process_registry
+
+    run_id = _uuid.uuid4()
+    proc = AsyncMock()
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=0)
+    proc.returncode = 0
+    proc.communicate = AsyncMock()
+
+    async def fake_wait_for(coro, timeout):
+        if hasattr(coro, "close"):
+            coro.close()
+        raise asyncio.TimeoutError()
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with patch("asyncio.wait_for", side_effect=fake_wait_for):
+            await restic_cat_config(REPO, PASSWORD, timeout_seconds=1, run_id=run_id)
+
+    assert process_registry.get(run_id) is None
