@@ -6,7 +6,8 @@ export type TriggeredBy = 'scheduler' | 'manual'
 export type PruneStatus = 'passed' | 'failed' | 'skipped'
 export type CheckStatus = 'passed' | 'failed' | 'skipped'
 export type CheckMode = 'structural' | 'subset' | 'full'
-export type CompressionMode = 'auto' | 'max' | 'off'
+// `fastest` and `better` require restic >= 0.19.0 (see Dockerfile RESTIC_VERSION).
+export type CompressionMode = 'auto' | 'max' | 'off' | 'fastest' | 'better'
 
 export interface RunSummary {
   id: string

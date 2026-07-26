@@ -815,14 +815,14 @@ def _extract_failed_items(
 
     **Both** streams must be passed for a partial backup. restic writes its
     `message_type=error` lines to stderr, not stdout — verified against restic
-    0.18.1, where stdout carried only `status` and `summary`. This function
-    used to be called with stdout alone, so every real rc=3 run recorded zero
+    0.18.1 and 0.19.1, where stdout carried only `status` and `summary`. This
+    function used to be called with stdout alone, so every rc=3 run recorded zero
     failed items and the run page showed a bare "some files could not be read"
     with no paths after it. stdout is still scanned because it costs one pass
     over an already-bounded string and covers merged streams and older builds.
 
     One failure can be reported more than once — an unreadable directory comes
-    back from both the scanner and the archiver (observed with restic 0.18.1) —
+    back from both the scanner and the archiver (observed with 0.18.1 and 0.19.1) —
     so identical (item, message) pairs are collapsed into one entry and their
     phases merged. Counting the error *events* would report two failures for
     one folder and inflate the count on every real mount.

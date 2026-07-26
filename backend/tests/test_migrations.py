@@ -222,6 +222,95 @@ async def test_migration_allows_warning_status_in_backup_runs():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["auto", "off", "max", "fastest", "better"])
+async def test_migration_allows_every_restic_compression_mode(mode):
+    """`backup_jobs.compression` must hold all five zstd modes restic 0.19.1
+    accepts. `fastest` and `better` (restic 0.19.0) are 7 and 6 characters,
+    where the pre-0.19 enum sized the column at 4 — migration 002 widens it."""
+    import uuid as _uuid
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db_url = f"sqlite:///{db_path}"
+
+        cfg = Config(Path(__file__).parent.parent / "alembic.ini")
+        cfg.set_main_option("sqlalchemy.url", db_url)
+        command.upgrade(cfg, "head")
+
+        engine = sa.create_engine(db_url, echo=False)
+        job_id = str(_uuid.uuid4())
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(
+                    "INSERT INTO backup_jobs (id, name, source_label, "
+                    "destination_label, restic_password, schedule_type, "
+                    "schedule_value, enabled, exclude_caches, one_file_system, "
+                    "no_scan, check_enabled, compression, created_at, updated_at) "
+                    "VALUES (:id, 'j', 'src', 'dst', 'pw', 'interval', '1h', "
+                    "1, 0, 0, 0, 0, :mode, '2026-01-01', '2026-01-01')"
+                ),
+                {"id": job_id, "mode": mode},
+            )
+        with engine.begin() as conn:
+            stored = conn.execute(
+                sa.text("SELECT compression FROM backup_jobs WHERE id = :id"),
+                {"id": job_id},
+            ).scalar_one()
+        assert stored == mode, f"compression {mode!r} did not round-trip"
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_migration_002_preserves_jobs_and_unique_constraint():
+    """002 rebuilds backup_jobs (SQLite cannot ALTER a column type in place),
+    so it must carry the rows and the (destination_label, name) uniqueness
+    across the table copy. A silent constraint loss there would let two jobs
+    address the same repository directory."""
+    import uuid as _uuid
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db_url = f"sqlite:///{db_path}"
+
+        cfg = Config(Path(__file__).parent.parent / "alembic.ini")
+        cfg.set_main_option("sqlalchemy.url", db_url)
+        # Stop at 001, seed a pre-existing job, then upgrade across 002.
+        command.upgrade(cfg, "001")
+
+        engine = sa.create_engine(db_url, echo=False)
+        insert_job = (
+            "INSERT INTO backup_jobs (id, name, source_label, destination_label, "
+            "restic_password, schedule_type, schedule_value, enabled, "
+            "exclude_caches, one_file_system, no_scan, check_enabled, "
+            "compression, created_at, updated_at) "
+            "VALUES (:id, :name, 'src', 'main', 'pw', 'interval', '1h', "
+            "1, 0, 0, 0, 0, 'max', '2026-01-01', '2026-01-01')"
+        )
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(insert_job), {"id": str(_uuid.uuid4()), "name": "Photos"}
+            )
+        engine.dispose()
+
+        command.upgrade(cfg, "head")
+
+        engine = sa.create_engine(db_url, echo=False)
+        with engine.begin() as conn:
+            rows = conn.execute(
+                sa.text("SELECT name, compression FROM backup_jobs")
+            ).all()
+        assert rows == [("Photos", "max")], "002 lost pre-existing job rows"
+
+        # The unique constraint must have survived the table rebuild.
+        with pytest.raises(sa.exc.IntegrityError):
+            with engine.begin() as conn:
+                conn.execute(
+                    sa.text(insert_job), {"id": str(_uuid.uuid4()), "name": "Photos"}
+                )
+        engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_migration_schema_matches_orm_metadata():
     """The migration must produce the same table/column set as the ORM models."""
     from app.db.models import Base
@@ -296,14 +385,23 @@ async def test_migration_enum_values_match_orm():
     """
     from app.db import models
 
-    migration_src = (
-        Path(__file__).parent.parent / "alembic" / "versions" / "001_initial_schema.py"
-    ).read_text()
-
-    # Extract {enum_name: {values}} from every sa.Enum("a", "b", ..., name="x").
+    # Resolve the *effective* declaration across the whole revision chain, not
+    # just 001: a later migration that widens an enum (002 adding the restic
+    # 0.19 zstd modes) is the authority on that enum's final value set. Files
+    # are read in revision order and later declarations win.
+    #
+    # Only each file's upgrade() body is parsed. A downgrade() necessarily names
+    # the *old* value set too, and counting it would make a widening migration
+    # look like it still declares the narrow enum.
+    versions_dir = Path(__file__).parent.parent / "alembic" / "versions"
     declared: dict[str, set[str]] = {}
-    for body, name in re.findall(r"sa\.Enum\((.*?)name=\"(\w+)\"", migration_src, re.S):
-        declared[name] = set(re.findall(r"\"([a-z_]+)\"", body))
+    for path in sorted(versions_dir.glob("[0-9]*.py")):
+        upgrade_src = path.read_text().split("def downgrade")[0]
+        # Extract {enum_name: {values}} from every sa.Enum("a", ..., name="x").
+        for body, name in re.findall(
+            r"sa\.Enum\((.*?)name=\"(\w+)\"", upgrade_src, re.S
+        ):
+            declared[name] = set(re.findall(r"\"([a-z_]+)\"", body))
 
     # SQLAlchemy derives each SAEnum `name` from the lowercased Python enum
     # class name, which is what the migration hard-codes.

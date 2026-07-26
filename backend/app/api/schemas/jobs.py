@@ -36,7 +36,8 @@ _MIN_INTERVAL_MINUTES = 5
 # every run: a rejected --pack-size fails the whole backup, and a rejected
 # --keep-within fails `restic forget` while the run still reports success — so
 # retention silently stops applying and the repo grows forever. Verified
-# against restic 0.18.1.
+# against restic 0.19.1 — every limit below is unchanged from 0.18.1, rejected
+# with the same messages.
 
 # "pack size smaller than minimum of 4 MiB" / "larger than limit of 128 MiB".
 _PACK_SIZE_MIN_MIB = 4

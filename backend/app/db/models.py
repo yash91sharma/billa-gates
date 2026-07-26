@@ -92,9 +92,20 @@ class CheckMode(str, Enum):
 
 
 class CompressionMode(str, Enum):
+    """zstd modes accepted by `restic backup --compression`.
+
+    `fastest` and `better` were added in restic 0.19.0 — a pre-0.19 binary
+    rejects them outright ("invalid compression mode"), which would fail every
+    run for a job set to one, so they are floored by the image's
+    RESTIC_VERSION. Members are appended rather than reordered to keep the set
+    aligned with migration 002's declaration.
+    """
+
     auto = "auto"
     max = "max"
     off = "off"
+    fastest = "fastest"
+    better = "better"
 
 
 class BackupJob(Base):

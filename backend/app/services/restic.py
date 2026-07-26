@@ -226,10 +226,14 @@ async def restic_latest_snapshot_id(
 
 # ── Streamed, bounded capture of `restic backup --json` output ───────────────
 #
-# In JSON mode restic emits a progress line ~50 times a second for the whole
-# duration of a run (~12 KB/s, ~44 MB/hour) — the terminal refresh cadence is
-# kept even when stdout is a pipe. Reading that with `communicate()` held every
-# byte in memory until the process exited (~1 GB RSS on a five-hour backup once
+# In JSON mode restic emits a progress line continuously for the whole duration
+# of a run, even when stdout is a pipe. The cadence is restic's to choose and it
+# has already changed once: measured over the same 1.2 GB source, 0.18.1 emitted
+# ~42 lines/s (~9.5 KB/s, ~34 MB/hour) and 0.19.1 ~6.5 lines/s (~1.7 KB/s). The
+# bound below is what makes that irrelevant — do not re-derive it from a rate.
+#
+# Reading the stream with `communicate()` held every byte in memory until the
+# process exited (~1 GB RSS on a five-hour backup once
 # the decode/scrub/repr copies are counted), and then all of it was dropped
 # before the run row was written. The collector below consumes the stream line
 # by line and keeps a fixed-size view of it instead: error lines, the final
@@ -241,8 +245,9 @@ async def restic_latest_snapshot_id(
 _MAX_RETAINED_OUTPUT_CHARS: int = 256 * 1024
 _MAX_RETAINED_LINE_CHARS: int = 8 * 1024
 _STREAM_CHUNK_BYTES: int = 65536
-# How often the caller may be handed a snapshot of the retained output. At
-# ~50 status lines/second, flushing per line would mean 50 DB writes/second.
+# How often the caller may be handed a snapshot of the retained output. At the
+# tens-of-lines-per-second restic can emit, flushing per line would mean tens of
+# DB writes per second.
 _DEFAULT_PROGRESS_INTERVAL_SECONDS: float = 15.0
 
 

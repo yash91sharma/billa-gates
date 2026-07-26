@@ -1086,8 +1086,9 @@ async def test_step5_backup_rc3_without_retention_skips_forget_and_prune(engine)
 
 # ── Step 5: rc=3 must name the files, from the stream restic actually uses ────
 #
-# Captured from restic 0.18.1 (`restic backup --json` over a source containing
-# one unreadable directory), stdout and stderr kept separate:
+# Captured from restic 0.18.1 and re-verified byte-for-byte against 0.19.1
+# (`restic backup --json` over a source containing one unreadable directory),
+# stdout and stderr kept separate:
 #
 #   EXIT=3
 #   stdout: {"message_type":"status",...,"error_count":1}

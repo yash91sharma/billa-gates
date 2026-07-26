@@ -298,7 +298,7 @@ async def test_create_job_destination_sentinel_missing(client):
 # up on every run — a rejected --pack-size fails the whole backup, and a
 # rejected --keep-within fails `restic forget` while the run still reports
 # success, so retention silently stops applying. Limits verified against
-# restic 0.18.1:
+# restic 0.19.1, and unchanged from 0.18.1:
 #   --pack-size       4–128 MiB ("pack size smaller than minimum of 4 MiB" /
 #                     "pack size larger than limit of 128 MiB")
 #   --keep-within*    one or more <int><unit> pairs, units y/m/d/h, lowercase
@@ -331,6 +331,42 @@ async def test_update_job_rejects_pack_size_outside_restic_limits(client):
         created = (await client.post("/api/jobs", json=make_job_payload())).json()
         resp = await client.put(f"/api/jobs/{created['id']}", json={"pack_size": 512})
     assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("mode", ["auto", "off", "max", "fastest", "better"])
+async def test_create_job_accepts_every_restic_compression_mode(client, mode):
+    """All five zstd modes restic 0.19.1 accepts must round-trip.
+
+    `fastest` and `better` were added in restic 0.19.0; offering a mode restic
+    refuses would fail every backup for the job, and refusing one it accepts
+    hides a real setting from the user.
+    """
+    payload = make_job_payload(name=f"Comp {mode}", compression=mode)
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 201, f"compression={mode} must be accepted"
+    assert resp.json()["compression"] == mode
+
+
+@pytest.mark.parametrize("mode", ["fast", "high", "zstd", "AUTO", "1", "none"])
+async def test_create_job_rejects_unknown_compression_mode(client, mode):
+    payload = make_job_payload(compression=mode)
+    with patch("os.path.isdir", return_value=True):
+        resp = await client.post("/api/jobs", json=payload)
+    assert resp.status_code == 422, f"compression={mode!r} must be refused"
+    assert "compression" in resp.json()["detail"]
+
+
+async def test_update_job_accepts_new_restic_019_compression_modes(client):
+    """PUT must reach the new modes too — otherwise they are only settable on
+    create and the edit form silently cannot select them."""
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+        resp = await client.put(
+            f"/api/jobs/{created['id']}", json={"compression": "better"}
+        )
+    assert resp.status_code == 200
+    assert resp.json()["compression"] == "better"
 
 
 @pytest.mark.parametrize("value", ["8w", "30", "30 days", "1.5d", "-5d", "d30", "30D"])

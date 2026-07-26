@@ -548,14 +548,24 @@ describe('JobForm', () => {
       )
     })
 
-    it('exposes compression as a select (auto/off/max)', async () => {
+    it('offers every zstd mode restic accepts (auto/off/fastest/better/max)', () => {
+      // restic 0.19.0 added `fastest` and `better`. Offering fewer modes than
+      // restic supports hides real settings; offering one it rejects fails
+      // every backup for the job.
+      render(<JobForm onSubmit={vi.fn()} sourceMounts={['m']} destinationMounts={['d']} />)
+      const select = screen.getByLabelText(/^compression/i) as HTMLSelectElement
+      const values = Array.from(select.options).map((o) => o.value)
+      expect(values).toEqual(['', 'auto', 'off', 'fastest', 'better', 'max'])
+    })
+
+    it.each(['auto', 'off', 'fastest', 'better', 'max'])('submits compression=%s', async (mode) => {
       const onSubmit = vi.fn()
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
-      await user.selectOptions(screen.getByLabelText(/^compression/i), 'max')
+      await user.selectOptions(screen.getByLabelText(/^compression/i), mode)
       await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ compression: 'max' }))
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ compression: mode }))
     })
 
     it('exposes timeout_hours as a number input', async () => {
@@ -791,8 +801,10 @@ describe('JobForm', () => {
     // choices under an explicit "Options:" label so users know what to pick.
     const fieldsWithEnumOptions: Array<{ label: RegExp; optionsMatcher: RegExp }> = [
       {
+        // All five zstd modes restic 0.19.1 accepts, in any order.
         label: /^compression$/i,
-        optionsMatcher: /options:.*auto.*max.*off|options:.*auto.*off.*max/i,
+        optionsMatcher:
+          /options:(?=.*\bauto\b)(?=.*\boff\b)(?=.*\bfastest\b)(?=.*\bbetter\b)(?=.*\bmax\b)/i,
       },
     ]
 

@@ -4,6 +4,8 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from app.services.restic import (
     _terminate_then_kill,
     restic_backup,
@@ -643,7 +645,7 @@ async def test_backup_retained_output_is_capped():
 
 async def test_backup_retains_error_lines_written_to_stderr():
     """restic writes per-file `message_type=error` lines to *stderr*; stdout
-    carries only `status` and `summary`. Verified against restic 0.18.1 — see
+    carries only `status` and `summary`. Verified against 0.18.1 and 0.19.1 — see
     the stream capture in tests/test_backup_runner.py. The wrapper must hand
     that stderr back intact, because it is the only record of which file
     failed, and it must stay bounded like stdout does.
@@ -1366,7 +1368,14 @@ async def test_backup_read_concurrency_flag():
     assert "4" in args_str
 
 
-async def test_backup_compression_flag():
+@pytest.mark.parametrize("mode", ["auto", "off", "max", "fastest", "better"])
+async def test_backup_compression_flag(mode):
+    """Every zstd mode restic 0.19.1 accepts is forwarded verbatim.
+
+    `fastest` and `better` arrived in restic 0.19.0 — verified accepted by the
+    0.19.1 binary; the pre-0.19 binary rejects them with "invalid compression
+    mode", which is why the image floor matters (see Dockerfile RESTIC_VERSION).
+    """
     proc = _make_process(0, stdout=BACKUP_SUMMARY)
     captured = {}
 
@@ -1380,12 +1389,11 @@ async def test_backup_compression_flag():
             PASSWORD,
             "/sources/documents",
             timeout_seconds=3600,
-            compression="max",
+            compression=mode,
         )
 
-    args_str = " ".join(str(a) for a in captured["args"])
-    assert "--compression" in args_str
-    assert "max" in args_str
+    args = [str(a) for a in captured["args"]]
+    assert args[args.index("--compression") + 1] == mode
 
 
 async def test_backup_exclude_if_present_flag():

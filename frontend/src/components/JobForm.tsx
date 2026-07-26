@@ -25,7 +25,7 @@ function parseLines(text: string): string[] | null {
 // too, not free text.
 const SUBPATH_RE = /^[\p{L}\p{N}_][\p{L}\p{N}_ .-]*$/u
 
-// Limits restic itself imposes (verified against restic 0.18.1). Offering a
+// Limits restic itself imposes (verified against restic 0.19.1). Offering a
 // value it rejects turns every future run into a failure — and a rejected
 // --keep-within fails `restic forget` while the run still reports success, so
 // retention silently stops applying. Mirrors app/api/schemas/jobs.py.
@@ -211,7 +211,7 @@ const HELP: Record<string, FieldHelp> = {
     label: 'Compression',
     optional: true,
     description:
-      'Options: auto | max | off. `auto` compresses compressible data (recommended). `max` tries harder but is slower. `off` disables compression entirely. Default: auto.',
+      'Options: off | fastest | auto | better | max — zstd levels, weakest to strongest. `auto` compresses compressible data and is what you want unless you have a reason. `fastest` trades ratio for speed on a slow CPU; `better` and `max` spend more CPU for a smaller repo. `off` disables compression entirely. Default: auto.',
     example: 'auto',
   },
   packSize: {
@@ -834,6 +834,8 @@ export default function JobForm({
                 <option value="">Default (auto)</option>
                 <option value="auto">auto</option>
                 <option value="off">off</option>
+                <option value="fastest">fastest</option>
+                <option value="better">better</option>
                 <option value="max">max</option>
               </select>
             </div>

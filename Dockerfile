@@ -23,7 +23,10 @@ RUN npm run build
 # ─── Stage 2 — restic-fetcher ─────────────────────────────────────────────────
 FROM alpine:3.21 AS restic-fetcher
 RUN apk add --no-cache curl bzip2
-ARG RESTIC_VERSION=0.18.1
+# 0.19.x is a floor, not just a bump: `--compression fastest|better` (offered
+# by JobForm and stored by CompressionMode) does not exist before 0.19.0, and a
+# job set to one would fail every run on an older binary.
+ARG RESTIC_VERSION=0.19.1
 ARG RESTIC_ARCH
 # RESTIC_ARCH must be 'arm64' (Apple Silicon / ARM64 Linux) or 'amd64' (Intel/AMD).
 # Fail the build immediately with a clear message if it's missing or wrong.
