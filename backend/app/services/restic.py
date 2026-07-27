@@ -6,6 +6,7 @@ import os
 import re
 import time
 import uuid as _uuid
+from datetime import datetime, timezone
 from typing import (
     Any,
     Awaitable,
@@ -105,6 +106,11 @@ def build_latest_snapshot_args() -> List[str]:
 
     `--no-lock` keeps this read-only step from blocking on a write lock held by
     a concurrent backup or left behind as a stale lock file.
+
+    `--latest 1` bounds the output, it does not select the parent: restic
+    applies it *per (host, paths) group*, so this can return several rows. The
+    parent is chosen from them by :func:`_newest_snapshot` — see the reasoning
+    there before changing either.
     """
     return [RESTIC_BIN, "snapshots", "--latest", "1", "--json", "--no-lock"]
 
@@ -352,6 +358,87 @@ async def restic_init(
     return proc.returncode, stdout.decode(), stderr.decode()
 
 
+def _parse_snapshot_time(value: object) -> Optional[datetime]:
+    """Parse restic's snapshot `time` field into an aware UTC datetime.
+
+    restic writes RFC3339 with the **local offset of the machine that made the
+    snapshot** (`2026-07-27T09:07:46.96747001-07:00` under the TZ the README
+    recommends) and nanosecond precision; `fromisoformat` handles both on 3.11+.
+    Naive values are read as UTC — the convention `app/api/schemas/base.py`
+    already applies to stored timestamps — because comparing a naive datetime
+    against an aware one raises, and an exception in the parent lookup is not a
+    slow backup, it is no backup.
+
+    Returns None for anything unparseable so the caller can fall back rather
+    than fail.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+@log_call
+def _newest_snapshot(snapshots: List[Any]) -> Optional[Dict[str, Any]]:
+    """The most recent snapshot in a `restic snapshots --latest 1` response.
+
+    **`--latest 1` is not "the newest snapshot".** restic applies it per
+    `(host, paths)` group and returns the groups oldest-first, so a repository
+    that has ever held more than one source path or hostname comes back with
+    several rows. That happens whenever a job's source_label/source_subpath is
+    edited, a job is recreated over an adopted repo with a different source, or
+    somebody runs `restic backup` by hand from a shell — that snapshot carries
+    the machine's own hostname instead of the `--host billa-gates` this app
+    pins. Taking `[0]` therefore passed `--parent` the newest snapshot of the
+    *stale* group, and a parent whose tree does not match the source makes
+    restic re-read and re-hash every file in it, every run, for as long as the
+    stale group survives retention (measured on 0.19.1: 60,001 of 60,001 files
+    re-read instead of 0, and the run then reports every one of them as "new").
+    Adding `--group-by ''` does not fix it — verified against 0.19.1, it does
+    not collapse the groups `--latest` uses.
+
+    Picking the maximum by instant is correct whatever restic groups by: the
+    newest snapshot in the repository is by definition the newest of its own
+    group, so it is always one of the rows returned.
+    """
+    if len(snapshots) > 1:
+        logger.debug(
+            "parent lookup: %d snapshot group(s) returned, selecting newest",
+            len(snapshots),
+        )
+
+    newest: Optional[Dict[str, Any]] = None
+    newest_moment: Optional[datetime] = None
+    # restic emits oldest-first, so the last usable row is the best guess left
+    # if no timestamp can be read at all.
+    fallback: Optional[Dict[str, Any]] = None
+
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict):
+            continue
+        fallback = snapshot
+        moment = _parse_snapshot_time(snapshot.get("time"))
+        if moment is None:
+            continue
+        # >= keeps restic's own ordering as the tie-break for identical stamps.
+        if newest_moment is None or moment >= newest_moment:
+            newest, newest_moment = snapshot, moment
+
+    if newest is not None:
+        return newest
+    if fallback is not None:
+        logger.warning(
+            "parent lookup: no snapshot carried a readable 'time'; "
+            "falling back to the last row restic returned"
+        )
+    return fallback
+
+
 @log_call
 async def restic_latest_snapshot_id(
     repo_path: str,
@@ -367,7 +454,9 @@ async def restic_latest_snapshot_id(
     lock held by a concurrent backup or by a stale lock file.
 
     The repo belongs to exactly one job, so the newest snapshot in it is by
-    definition this job's parent — no tag filter needed.
+    definition this job's parent — no tag filter needed. Which row that is
+    must be decided by timestamp (:func:`_newest_snapshot`), never by position:
+    the response carries one row per (host, paths) group, oldest first.
     """
     env = _get_restic_env(repo_path, password)
     try:
@@ -407,7 +496,10 @@ async def restic_latest_snapshot_id(
         )
     if not snapshots:
         return None
-    snap_id = snapshots[0].get("id")
+    newest = _newest_snapshot(snapshots)
+    if newest is None:
+        raise ResticError("snapshots command returned no usable snapshot record")
+    snap_id = newest.get("id")
     if not isinstance(snap_id, str):
         raise ResticError("snapshots command returned snapshot without a string ID")
     return snap_id

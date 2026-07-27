@@ -887,6 +887,136 @@ async def test_latest_snapshot_id_uses_latest_flag_without_tag():
     assert args_list[latest_idx + 1] == "1"
 
 
+async def test_latest_snapshot_id_picks_the_newest_across_groups():
+    """`--latest 1` is the newest snapshot of *each* (host, paths) group, oldest
+    group first — not the newest snapshot in the repository.
+
+    A repo grows a second group whenever a job's source_label/source_subpath is
+    edited, a job is recreated over an adopted repo with a different source, or
+    someone runs `restic backup` by hand from a shell (that snapshot carries the
+    machine's own hostname instead of the pinned `billa-gates`). Taking [0] then
+    hands `restic backup` the newest snapshot of the *stale* group, and a parent
+    whose tree does not match the source makes restic re-read and re-hash every
+    file in it — every run, for as long as the stale group survives retention.
+    """
+    from app.services.restic import restic_latest_snapshot_id
+
+    stale = "a" * 64
+    newest = "b" * 64
+    out = json.dumps(
+        [
+            {
+                "id": stale,
+                "time": "2026-05-01T01:00:00.000000000Z",
+                "hostname": "billa-gates",
+                "paths": ["/sources/documents/photos"],
+            },
+            {
+                "id": newest,
+                "time": "2026-05-02T01:00:00.000000000Z",
+                "hostname": "billa-gates",
+                "paths": ["/sources/documents"],
+            },
+        ]
+    )
+    proc = _make_process(0, stdout=out)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await restic_latest_snapshot_id(REPO, PASSWORD)
+
+    assert result == newest
+
+
+async def test_latest_snapshot_id_orders_by_instant_not_by_string():
+    """restic stamps each snapshot with the *local* offset of the machine that
+    wrote it (`…-07:00` under the TZ the README recommends), so lexicographic
+    order is not chronological order across a DST change: 01:10-08:00 is forty
+    minutes *after* 01:30-07:00 while sorting before it. The parent has to be
+    chosen by instant, not by comparing the raw strings.
+    """
+    from app.services.restic import restic_latest_snapshot_id
+
+    earlier = "c" * 64  # 2026-11-01 08:30Z, but the higher string
+    later = "d" * 64  # 2026-11-01 09:10Z, but the lower string
+    out = json.dumps(
+        [
+            {
+                "id": earlier,
+                "time": "2026-11-01T01:30:00.000000000-07:00",
+                "hostname": "billa-gates",
+                "paths": ["/sources/documents"],
+            },
+            {
+                "id": later,
+                "time": "2026-11-01T01:10:00.000000000-08:00",
+                "hostname": "other-host",
+                "paths": ["/sources/documents"],
+            },
+        ]
+    )
+    proc = _make_process(0, stdout=out)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await restic_latest_snapshot_id(REPO, PASSWORD)
+
+    assert result == later
+
+
+async def test_latest_snapshot_id_reads_a_timestamp_without_an_offset_as_utc():
+    """A naive timestamp beside an aware one must not blow up the lookup:
+    comparing offset-naive and offset-aware datetimes raises TypeError, and an
+    exception here does not mean a slow backup, it means no backup — run_backup
+    treats a failed parent lookup as fatal. Naive values are read as UTC, the
+    same convention app/api/schemas/base.py applies to stored timestamps.
+    """
+    from app.services.restic import restic_latest_snapshot_id
+
+    aware = "e" * 64
+    naive_and_newer = "f" * 64
+    out = json.dumps(
+        [
+            {
+                "id": aware,
+                "time": "2026-05-02T01:00:00.000000000Z",
+                "hostname": "billa-gates",
+                "paths": ["/sources/documents"],
+            },
+            {
+                "id": naive_and_newer,
+                "time": "2026-05-03T00:00:00",
+                "hostname": "billa-gates",
+                "paths": ["/sources/documents/photos"],
+            },
+        ]
+    )
+    proc = _make_process(0, stdout=out)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await restic_latest_snapshot_id(REPO, PASSWORD)
+
+    assert result == naive_and_newer
+
+
+async def test_latest_snapshot_id_falls_back_to_the_last_row_when_times_are_unusable():
+    """If restic ever changes its timestamp format, the lookup must still return
+    a parent rather than failing the run. restic emits rows oldest first, so the
+    last one is the best remaining guess — and it is never worse than the [0]
+    this replaced.
+    """
+    from app.services.restic import restic_latest_snapshot_id
+
+    first = "1" * 64
+    last = "2" * 64
+    out = json.dumps(
+        [
+            {"id": first, "time": "not-a-timestamp", "hostname": "billa-gates"},
+            {"id": last, "hostname": "billa-gates"},
+        ]
+    )
+    proc = _make_process(0, stdout=out)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await restic_latest_snapshot_id(REPO, PASSWORD)
+
+    assert result == last
+
+
 # ── restic_backup --parent flag ──────────────────────────────────────────────
 
 

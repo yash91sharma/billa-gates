@@ -33,7 +33,12 @@ import pytest
 
 from app.services import repository
 from app.services.backup_runner import _extract_failed_items
-from app.services.restic import _BackupOutputCollector, _format_progress
+from app.services.restic import (
+    _BackupOutputCollector,
+    _format_progress,
+    _newest_snapshot,
+    _parse_snapshot_time,
+)
 from app.services.snapshot_listing import _normalize
 
 FIXTURES = Path(__file__).parent / "fixtures" / "restic_0_19_1"
@@ -311,8 +316,13 @@ def test_normalize_survives_a_pre_0_17_record_without_a_summary():
 def test_latest_flag_groups_by_host_and_paths_returning_one_per_group():
     """`--latest 1` is not "the newest snapshot" — it is the newest *per
     host+paths group* unless --group-by says otherwise. 0.19.0 broke this and
-    0.19.1 restored it; `restic_latest_snapshot_id` takes [0], so the recording
-    documents what that index actually means."""
+    0.19.1 restored it.
+
+    The parent lookup therefore picks by timestamp rather than by position
+    (`_newest_snapshot`); this recording only has one group, so it pins the
+    agreement between selector and reality, and
+    tests/test_restic.py stages the multi-group case the recording cannot.
+    """
     latest = read_json("snapshots_latest.json")
     all_snaps = read_json("snapshots.json")
 
@@ -320,6 +330,16 @@ def test_latest_flag_groups_by_host_and_paths_returning_one_per_group():
     assert len({(s["hostname"], tuple(s["paths"])) for s in all_snaps}) == 1
     assert len(latest) == 1
     assert latest[0]["time"] == max(s["time"] for s in all_snaps)
+
+    # The real selector, over the real bytes: same answer restic itself gives.
+    chosen = _newest_snapshot(latest)
+    assert chosen is not None
+    assert chosen["id"] == latest[0]["id"]
+    assert _parse_snapshot_time(chosen["time"]) is not None, (
+        "restic's timestamp format must stay parseable — the parent lookup "
+        "orders by instant, and an unparseable stamp silently degrades it to "
+        "restic's row order"
+    )
 
 
 def test_cat_config_reports_repository_format_version_2():
