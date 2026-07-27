@@ -143,8 +143,21 @@ export default function RunDetail() {
       <div className="text-sm">
         <span className="text-muted-foreground mr-2">Prune:</span>
         <RunStatusBadge status={run.prune_status} />
-        {run.prune_status === 'failed' && run.prune_error_output && (
-          <pre className="mt-2 bg-destructive/10 text-destructive rounded-sm p-2 text-xs">
+        {/* Rendered for any status, not just `failed`: a partial backup
+            withholds `restic forget` and lands as prune_status=skipped — the
+            same value a job with no retention policy gets — so the runner's
+            explanation is the only thing separating "held back, repo is
+            growing" from "nothing configured". Styled as a note unless the
+            step actually failed; a red block for a deliberate decision reads
+            as a fault. */}
+        {run.prune_error_output && (
+          <pre
+            className={`mt-2 rounded-sm p-2 text-xs whitespace-pre-wrap ${
+              run.prune_status === 'failed'
+                ? 'bg-destructive/10 text-destructive'
+                : 'bg-muted text-muted-foreground'
+            }`}
+          >
             {run.prune_error_output}
           </pre>
         )}

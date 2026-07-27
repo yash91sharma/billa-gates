@@ -333,6 +333,29 @@ describe('RunDetail', () => {
       renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
       await waitFor(() => expect(screen.getByText('skipped')).toBeInTheDocument())
     })
+
+    // A partial backup withholds `restic forget` so an incomplete snapshot
+    // cannot push a complete one out of the policy. That lands as
+    // prune_status=skipped — the same value a job with no retention policy
+    // gets — so the explanation the runner writes has to be rendered, or the
+    // operator reads a withheld policy as "nothing configured" and never
+    // learns the repository has stopped shrinking.
+    it('shows prune_error_output on a skipped retention, not only a failed one', async () => {
+      vi.mocked(api.getRun).mockResolvedValue(
+        makeRun({
+          status: 'warning',
+          prune_status: 'skipped',
+          prune_error_output:
+            'Retention (restic forget) was not applied because this backup was partial',
+        })
+      )
+      renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
+      await waitFor(() =>
+        expect(
+          screen.getByText(/was not applied because this backup was partial/i)
+        ).toBeInTheDocument()
+      )
+    })
   })
 
   describe('kind discriminator (gaps.md H1)', () => {

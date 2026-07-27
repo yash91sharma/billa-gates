@@ -972,11 +972,18 @@ async def test_step5_backup_timeout_marks_failed(engine):
 # ── Step 5: rc=3 partial backup → warning ────────────────────────────────────
 
 
-async def test_step5_backup_rc3_marks_warning_and_runs_prune_and_sync(engine):
+async def test_step5_backup_rc3_marks_warning_and_skips_retention(engine):
     """restic exit code 3 (partial backup, snapshot still created) must be
-    recorded as `warning` — not `failed` — and must still run prune (Step 8)
-    and snapshot sync (Step 9), otherwise the snapshot will exist in the
-    repo but be invisible to the UI and never pruned."""
+    recorded as `warning` — not `failed` — and must NOT run `restic forget`.
+
+    A partial snapshot is missing exactly the files restic could not read. Let
+    it count toward the retention policy and it evicts a complete snapshot in
+    its place: with `--keep-last 3` and a source that has started throwing read
+    errors (a failing disk, a permission change, a file held open over SMB),
+    three runs are enough to leave nothing but partial snapshots, and the last
+    copy of those files is gone from the repository. The snapshot is still
+    written and still visible — only the deletion is withheld, until a backup
+    that reads everything succeeds."""
     await _setup_job(engine, retain_keep_last=5)
     run_id = str(uuid.uuid4())
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -1022,9 +1029,18 @@ async def test_step5_backup_rc3_marks_warning_and_runs_prune_and_sync(engine):
 
     run = await _get_run(engine, run_id)
     assert run.status == RunStatus.warning
-    assert forget_called["v"] is True, (
-        "forget must run on rc=3 so retention applies to the new snapshot"
+    assert forget_called["v"] is False, (
+        "forget must not run on rc=3 — an incomplete snapshot must never be "
+        "allowed to push a complete one out of the retention policy"
     )
+    from app.db.models import PruneStatus
+
+    assert run.prune_status == PruneStatus.skipped
+    assert run.prune_error_output is not None, (
+        "a skipped retention has to say why, or the operator reads it as "
+        "'no policy configured' and never learns the repo is growing"
+    )
+    assert "partial" in run.prune_error_output.lower()
     # snapshot_id is taken from the JSON summary, not from a post-backup
     # `restic snapshots` reconcile (which was dropped — see gaps.md C4-Alt).
     assert run.snapshot_id == "b" * 64
@@ -1758,8 +1774,12 @@ async def test_step8_forget_failure_notification_names_retention(engine):
     )
 
 
-async def test_step8_partial_backup_and_forget_failure_reports_both(engine):
-    """rc=3 *and* a failed forget: one warning run naming both causes."""
+async def test_step8_partial_backup_push_names_the_withheld_retention(engine):
+    """A partial backup has two consequences and the push must name both: files
+    were unreadable, *and* retention did not run this time. Reporting only the
+    read failure leaves the operator unaware that the repository has stopped
+    shrinking; reporting it as a retention *failure* would send them hunting a
+    stale lock that isn't there."""
     from app.db.models import (
         AppSettings,
         BackupRun,
@@ -1787,30 +1807,44 @@ async def test_step8_partial_backup_and_forget_failure_reports_both(engine):
         )
         await s.commit()
 
+    forget_called = {"v": False}
+
+    async def fake_forget(*args, **kwargs):
+        forget_called["v"] = True
+        return (0, "", "")
+
     with (
         patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
         patch(
             "app.services.restic.restic_backup",
             return_value=(3, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
-        patch("app.services.restic.restic_forget", return_value=(1, "", "locked")),
+        patch("app.services.restic.restic_forget", side_effect=fake_forget),
         patch("app.services.backup_runner.send_notification") as mock_notify,
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
     run = await _get_run(engine, run_id)
     assert run.status == RunStatus.warning
-    assert run.prune_status == PruneStatus.failed
+    assert run.prune_status == PruneStatus.skipped
+    assert forget_called["v"] is False
     body = mock_notify.call_args[0][3].lower()
     assert "could not be read" in body
     assert "retention" in body
+    assert "failed" not in body, (
+        "retention was withheld on purpose, not broken — saying 'failed' sends "
+        "the operator looking for a stale lock that does not exist"
+    )
 
 
-async def test_step8_partial_backup_alone_still_reports_the_read_failure(engine):
-    """The rc=3-only message must keep its original wording."""
+async def test_step8_partial_backup_without_retention_reports_only_the_read_failure(
+    engine,
+):
+    """With no retention policy there is nothing to withhold, so the rc=3-only
+    message must keep its original wording and say nothing about retention."""
     from app.db.models import AppSettings, BackupRun, RunStatus, TriggeredBy
 
-    await _setup_job(engine, retain_keep_last=7)
+    await _setup_job(engine)
     run_id = str(uuid.uuid4())
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -1881,6 +1915,52 @@ async def test_step8_clean_run_is_still_success(engine):
     run = await _get_run(engine, run_id)
     assert run.status == RunStatus.success
     assert run.prune_status == PruneStatus.passed
+
+
+async def test_step8_clean_backup_still_applies_retention(engine):
+    """The withholding is scoped to partial backups and nothing else. Skipping
+    `restic forget` on a clean run would stop retention permanently and let the
+    repository grow until the destination fills — the failure this whole step
+    exists to prevent."""
+    from app.db.models import BackupRun, PruneStatus, RunStatus, TriggeredBy
+
+    await _setup_job(engine, retain_keep_last=7)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    forget_called = {"v": False}
+
+    async def fake_forget(*args, **kwargs):
+        forget_called["v"] = True
+        return (0, "", "")
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_forget", side_effect=fake_forget),
+        patch("app.services.backup_runner.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert forget_called["v"] is True
+    assert run.prune_status == PruneStatus.passed
+    assert run.prune_error_output is None
 
 
 # ── Step 9: snapshot reconciliation ──────────────────────────────────────────

@@ -206,9 +206,12 @@ def _backup_run_commands(
                 env=env,
                 runs=True,
                 condition=(
-                    "Runs after a successful backup only; a failure here makes "
-                    "the run a warning, because retention that stops applying "
-                    "lets the repository grow without bound."
+                    "Runs after a backup that read everything. A partial backup "
+                    "(some files unreadable) holds it back, so an incomplete "
+                    "snapshot cannot push a complete one out of the policy — "
+                    "that run says so on its page. A failure here makes the run "
+                    "a warning, because retention that stops applying lets the "
+                    "repository grow without bound."
                 ),
             )
         )

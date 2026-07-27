@@ -866,6 +866,21 @@ _MAX_REPORTED_FAILED_ITEMS: int = 50
 # the fatal and the exit_error line arrive last.
 _MAX_STDERR_TAIL_CHARS: int = 4000
 
+# Written to BackupRun.prune_error_output when a partial backup withholds
+# retention. `prune_status=skipped` alone is ambiguous — it is the same value a
+# job with no retention policy gets — so without this note an operator reads a
+# withheld policy as "nothing configured" and never learns the repository has
+# stopped shrinking. The wording has to explain the trade rather than sound like
+# a fault: nothing broke here.
+RETENTION_SKIPPED_PARTIAL_NOTE: str = (
+    "Retention (restic forget) was not applied because this backup was partial: "
+    "some files could not be read, and an incomplete snapshot must not be "
+    "allowed to push a complete one out of the retention policy. The snapshot "
+    "itself was saved and nothing was deleted. Retention runs again after a "
+    "backup that reads everything — until then this repository keeps growing, "
+    "so fix the unreadable items above."
+)
+
 
 def _extract_failed_items(
     *streams: str, limit: int = _FAILED_ITEM_PARSE_LIMIT
@@ -1464,8 +1479,10 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
 
         backup_success: bool = False
         # rc=3 means restic ran but some files couldn't be read; the snapshot
-        # was still saved. We treat it as success-with-warnings: prune + sync
-        # still run, but the final status is `warning` (not `success`).
+        # was still saved. We treat it as success-with-warnings: the stats and
+        # the snapshot are recorded, the final status is `warning` (not
+        # `success`), and `restic forget` is withheld — see
+        # RETENTION_SKIPPED_PARTIAL_NOTE.
         backup_warning: bool = False
         # `restic forget` *is* the retention policy — the only thing that drops
         # old snapshots. Its usual failure causes (stale lock, permissions,
@@ -1475,6 +1492,11 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         # months later. The snapshot *was* written, so the run is not `failed`
         # either — it is a `warning`.
         retention_failed: bool = False
+        # Set when a partial backup withheld retention. Distinct from
+        # `retention_failed` on purpose: nothing broke, the policy was held back
+        # deliberately, and telling the operator "forget failed" would send them
+        # hunting a stale lock that does not exist.
+        retention_skipped_partial: bool = False
         # Carried out of the backup step so the completion push can say how
         # many items failed, not just that something did.
         failed_item_count: int = 0
@@ -1650,7 +1672,31 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
             # When no retention is set, forget would be a no-op and prune
             # without forget cannot reclaim anything (no snapshots removed),
             # so we skip the whole step.
-            if retention_kwargs:
+            if retention_kwargs and backup_warning:
+                # A partial snapshot is missing precisely the files restic could
+                # not read. Counting it toward the policy deletes a complete
+                # snapshot to make room for an incomplete one: with --keep-last 3
+                # against a source that has started failing (bad sectors, a
+                # permission change, a handle held open over SMB), three runs
+                # leave nothing but partials and the last good copy of those
+                # files is gone from the repository. Withholding instead trades
+                # that silent, irreversible loss for repository growth, which is
+                # visible — every such run is already a `warning`, and the note
+                # below says so on the run page.
+                retention_skipped_partial = True
+                logger.warning(
+                    f"job_id={job_id} run_id={current_run_id} step=forget "
+                    f"skipped reason=partial_backup"
+                )
+                async with factory() as s:
+                    partial_run: BackupRun | None = await s.get(
+                        BackupRun, str(current_run_id)
+                    )
+                    if partial_run:
+                        partial_run.prune_status = PruneStatus.skipped
+                        partial_run.prune_error_output = RETENTION_SKIPPED_PARTIAL_NOTE
+                        await s.commit()
+            elif retention_kwargs:
                 logger.info(
                     f"job_id={job_id} run_id={current_run_id} step=forget "
                     f"applying_retention"
@@ -1780,6 +1826,12 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     reasons.append(
                         "retention (restic forget) failed — old snapshots were "
                         "not removed, so the repository will keep growing"
+                    )
+                if retention_skipped_partial:
+                    reasons.append(
+                        "retention was held back so an incomplete snapshot "
+                        "could not push a complete one out of the policy — "
+                        "the repository keeps growing until a clean backup runs"
                     )
                 warn_msg: str = (
                     f"Duration: {final_run.duration_seconds}s — {'; '.join(reasons)}."
