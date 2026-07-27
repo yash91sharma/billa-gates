@@ -143,7 +143,8 @@ async def test_test_ntfy_empty_topic_returns_422(client: AsyncClient) -> None:
 
 
 async def test_list_sources_and_destinations(client: AsyncClient) -> None:
-    """GET /mounts/sources and /mounts/destinations return scanned subdirs."""
+    """GET /mounts/sources and /mounts/destinations return the scanned mount
+    directory names."""
 
     def fake_scandir(path: str):
         if path == "/sources":
@@ -160,13 +161,6 @@ async def test_list_sources_and_destinations(client: AsyncClient) -> None:
         dsts = await client.get("/api/mounts/destinations")
         assert dsts.status_code == 200
         assert set(dsts.json()) == {"main", "archive"}
-
-
-async def test_list_source_subdirs_404_when_label_missing(client: AsyncClient) -> None:
-    """GET /mounts/sources/{label}/subdirs returns 404 if the mount is absent."""
-    with patch("os.path.isdir", return_value=False):
-        resp = await client.get("/api/mounts/sources/no-such-label/subdirs")
-    assert resp.status_code == 404
 
 
 # ── Destination rename ───────────────────────────────────────────────────────

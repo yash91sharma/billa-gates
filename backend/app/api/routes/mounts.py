@@ -56,22 +56,6 @@ async def list_sources() -> List[str]:
     return await fs.run_probe(_list_dirs, SOURCES_ROOT, default=[])
 
 
-# ── GET /api/mounts/sources/{label}/subdirs ───────────────────────────────────
-
-
-@router.get("/sources/{label}/subdirs", response_model=List[str])
-@log_call
-async def list_source_subdirs(label: str) -> List[str]:
-    """Return immediate subdirectory names within a specific source mount.
-
-    Returns 404 if the source mount directory does not exist.
-    """
-    path = os.path.join(SOURCES_ROOT, label)
-    if not await fs.run_probe(os.path.isdir, path, default=False):
-        raise HTTPException(status_code=404, detail=f"Source mount '{label}' not found")
-    return await fs.run_probe(_list_dirs, path, default=[])
-
-
 # ── GET /api/mounts/destinations ─────────────────────────────────────────────
 
 

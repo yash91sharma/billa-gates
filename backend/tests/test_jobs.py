@@ -70,37 +70,17 @@ async def test_create_job_invalid_destination_label(client):
     assert resp.status_code == 422
 
 
-async def test_create_job_invalid_source_subpath_with_slash(client):
-    payload = make_job_payload(source_subpath="photos/2024")
-    resp = await client.post("/api/jobs", json=payload)
-    assert resp.status_code == 422
-
-
 # ── path traversal hardening ─────────────────────────────────────────────────
-# Labels and source_subpath become single path components under /sources and
+# The labels and the job name become single path components under /sources and
 # /destinations. "." and ".." are the only traversal vectors left once "/" is
-# rejected: subpath ".." resolves /sources/<label>/.. to /sources, silently
-# backing up every mounted source instead of the intended one.
-
-
-async def test_create_job_invalid_source_subpath_dotdot(client):
-    # The detail assertion pins the 422 on schema validation — the mounts
-    # check also 422s when /sources is absent (as in tests), which would
-    # otherwise let this test pass without any subpath validation at all.
-    payload = make_job_payload(source_subpath="..")
-    resp = await client.post("/api/jobs", json=payload)
-    assert resp.status_code == 422
-    assert "source_subpath" in resp.json()["detail"]
-
-
-async def test_create_job_invalid_source_subpath_dot(client):
-    payload = make_job_payload(source_subpath=".")
-    resp = await client.post("/api/jobs", json=payload)
-    assert resp.status_code == 422
-    assert "source_subpath" in resp.json()["detail"]
+# rejected: a source_label of ".." resolves /sources/.. to the container root,
+# and a name of ".." points the repository at /destinations itself.
 
 
 async def test_create_job_invalid_source_label_dot(client):
+    # The detail assertion pins the 422 on schema validation — the mounts
+    # check also 422s when /sources is absent (as in tests), which would
+    # otherwise let this test pass without any label validation at all.
     payload = make_job_payload(source_label=".")
     resp = await client.post("/api/jobs", json=payload)
     assert resp.status_code == 422
@@ -135,12 +115,14 @@ async def test_create_job_label_allows_dots_hyphens_underscores_spaces(client):
     assert resp.status_code == 201
 
 
-async def test_update_job_invalid_source_subpath_dotdot(client):
+async def test_update_job_invalid_source_label_dotdot(client):
+    """source_label is editable, so the traversal whitelist has to hold on PUT
+    too — not just at creation."""
     with patch("os.path.isdir", return_value=True):
         created = (await client.post("/api/jobs", json=make_job_payload())).json()
-    resp = await client.put(f"/api/jobs/{created['id']}", json={"source_subpath": ".."})
+    resp = await client.put(f"/api/jobs/{created['id']}", json={"source_label": ".."})
     assert resp.status_code == 422
-    assert "source_subpath" in resp.json()["detail"]
+    assert "source_label" in resp.json()["detail"]
 
 
 async def test_create_job_interval_too_short(client):
@@ -221,17 +203,16 @@ async def test_create_job_source_sentinel_missing(client):
     assert "documents" in detail
 
 
-async def test_create_job_source_sentinel_checked_at_subpath(client):
-    """A job with source_subpath backs up /sources/<label>/<subpath>, so the
-    sentinel has to be verified there. A sentinel at the mount root alone must
-    not let the job be created — every run would then be free to snapshot an
-    empty subfolder and let retention forget the real history."""
-    payload = make_job_payload(source_subpath="photos")
-    probe_calls: list[tuple[str, str | None]] = []
+async def test_create_job_source_sentinel_is_probed_at_the_mount_root(client):
+    """A job backs up the whole mount, so the sentinel is verified at
+    /sources/<label> — and the 422 has to name that exact path, which is the
+    same one every run verifies and hands to `restic backup`."""
+    payload = make_job_payload()
+    probe_calls: list[tuple[str, ...]] = []
 
-    def sentinel(label: str, subpath: str | None = None) -> bool:
-        probe_calls.append((label, subpath))
-        return False  # present at the mount root, absent in the subfolder
+    def sentinel(*args: str) -> bool:
+        probe_calls.append(args)
+        return False
 
     with (
         patch("os.path.isdir", return_value=True),
@@ -243,30 +224,10 @@ async def test_create_job_source_sentinel_checked_at_subpath(client):
         resp = await client.post("/api/jobs", json=payload)
 
     assert resp.status_code == 422
-    assert probe_calls == [("documents", "photos")]
+    assert probe_calls == [("documents",)]
     detail = resp.json()["detail"]
     assert ".billa_gates_check" in detail
-    assert "/sources/documents/photos" in detail
-
-
-async def test_create_job_succeeds_when_subpath_sentinel_present(client):
-    """Mirror case: sentinel inside the subfolder → creation goes through."""
-    payload = make_job_payload(source_subpath="photos")
-
-    def sentinel(label: str, subpath: str | None = None) -> bool:
-        return (label, subpath) == ("documents", "photos")
-
-    with (
-        patch("os.path.isdir", return_value=True),
-        patch(
-            "app.services.backup_runner.check_mount_file_exists",
-            side_effect=sentinel,
-        ),
-    ):
-        resp = await client.post("/api/jobs", json=payload)
-
-    assert resp.status_code == 201
-    assert resp.json()["source_subpath"] == "photos"
+    assert "/sources/documents" in detail
 
 
 async def test_create_job_destination_sentinel_missing(client):
@@ -451,33 +412,22 @@ async def test_create_job_duplicate_source_destination(client):
     assert resp2.status_code == 409
 
 
-async def test_create_job_same_labels_different_subpaths_allowed(client):
-    """Per design doc §6: duplicate key is (source_label, source_subpath,
-    destination_label). Different subpaths → different jobs.
+async def test_create_job_same_labels_rejected_even_under_a_different_name(client):
+    """The duplicate key is (source_label, destination_label) — nothing narrower.
 
-    Distinct names because (destination_label, name) is the repo address.
+    A job's source is a whole mount, so a second job over the same mount to the
+    same drive is backing the same bytes up twice. Giving it another name only
+    changes which repository directory it writes to; it does not make it a
+    different backup. This pair used to be allowed when the two jobs pointed at
+    different subfolders of the mount, which is the feature that was removed.
     """
     with patch("os.path.isdir", return_value=True):
         resp1 = await client.post(
-            "/api/jobs",
-            json=make_job_payload(source_subpath="photos", name="Photos backup"),
+            "/api/jobs", json=make_job_payload(name="Photos backup")
         )
         assert resp1.status_code == 201
         resp2 = await client.post(
-            "/api/jobs",
-            json=make_job_payload(source_subpath="videos", name="Videos backup"),
-        )
-    assert resp2.status_code == 201
-
-
-async def test_create_job_duplicate_same_subpath_rejected(client):
-    with patch("os.path.isdir", return_value=True):
-        resp1 = await client.post(
-            "/api/jobs", json=make_job_payload(source_subpath="photos")
-        )
-        assert resp1.status_code == 201
-        resp2 = await client.post(
-            "/api/jobs", json=make_job_payload(source_subpath="photos")
+            "/api/jobs", json=make_job_payload(name="Videos backup")
         )
     assert resp2.status_code == 409
 
@@ -793,25 +743,22 @@ async def test_update_job_password_absent_preserves_stored_value(client, engine)
 
 async def test_update_job_clears_nullable_fields(client):
     """The edit form sends cleared fields as explicit nulls; PUT must apply
-    them. Silently keeping the old values means e.g. a cleared source_subpath
-    keeps backing up only the subfolder while the user believes the whole
-    mount is protected."""
+    them. Silently keeping the old values means e.g. a cleared retention count
+    keeps forgetting snapshots while the user believes the policy is off."""
     with patch("os.path.isdir", return_value=True):
         created = (
             await client.post(
                 "/api/jobs",
                 json=make_job_payload(
-                    source_subpath="photos",
                     retain_keep_last=5,
                     tags=["daily"],
                     timeout_hours=12,
                 ),
             )
         ).json()
-    assert created["source_subpath"] == "photos"
+    assert created["retain_keep_last"] == 5
 
     update = make_job_payload(
-        source_subpath=None,
         retain_keep_last=None,
         tags=None,
         timeout_hours=None,
@@ -821,7 +768,6 @@ async def test_update_job_clears_nullable_fields(client):
         resp = await client.put(f"/api/jobs/{created['id']}", json=update)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["source_subpath"] is None
     assert data["retain_keep_last"] is None
     assert data["tags"] is None
     assert data["timeout_hours"] is None
@@ -883,7 +829,6 @@ async def test_update_job_partial_payload_keeps_omitted_fields(client):
             await client.post(
                 "/api/jobs",
                 json=make_job_payload(
-                    source_subpath="photos",
                     retain_keep_last=5,
                     tags=["daily"],
                     timeout_hours=12,
@@ -900,7 +845,6 @@ async def test_update_job_partial_payload_keeps_omitted_fields(client):
     data = resp.json()
     assert data["schedule_value"] == "12h"
     assert data["name"] == "Test Backup"
-    assert data["source_subpath"] == "photos"
     assert data["retain_keep_last"] == 5
     assert data["tags"] == ["daily"]
     assert data["timeout_hours"] == 12

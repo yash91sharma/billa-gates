@@ -11,12 +11,12 @@ from pydantic_core.core_schema import ValidationInfo
 from app.api.schemas.base import UTCDateTime
 from app.db.models import CheckMode, CompressionMode, ScheduleType
 
-# name, the labels, and source_subpath are single path components concatenated
-# into /sources/<label>[/<subpath>] and /destinations/<label>/<name>. The
-# whitelist requires a leading word character (\w — unicode letters, digits,
-# underscore) so '.', '..', and hidden '.name' directories are rejected, then
-# allows word characters, spaces, inner dots, and hyphens. '/' is excluded
-# entirely, so a value can never traverse outside its mount root.
+# name and the two labels are single path components concatenated into
+# /sources/<label> and /destinations/<label>/<name>. The whitelist requires a
+# leading word character (\w — unicode letters, digits, underscore) so '.',
+# '..', and hidden '.name' directories are rejected, then allows word
+# characters, spaces, inner dots, and hyphens. '/' is excluded entirely, so a
+# value can never traverse outside the root it is joined to.
 #
 # `name` is included because it names the job's repository directory — it is
 # not a free-text label. That also rules out punctuation like the em-dash in
@@ -69,12 +69,13 @@ def _validate_keep_within(value: str, field_name: str) -> str:
 
 
 def _validate_label(value: str, field_name: str) -> str:
-    """Validate a mount label or subpath as one safe path component.
+    """Validate a mount label or job name as one safe path component.
 
     Rejects the path-traversal vectors ('/', '.', '..') outright: a
-    source_subpath of '..' would resolve /sources/<label>/.. to /sources and
-    silently back up every mounted source. The remaining whitelist keeps any
-    reasonable directory name working (unicode letters and digits included).
+    source_label of '..' would resolve /sources/.. to the container root and
+    silently back up the filesystem, and a name of '..' would point the
+    repository at /destinations. The remaining whitelist keeps any reasonable
+    directory name working (unicode letters and digits included).
     """
     if not _PATH_COMPONENT_RE.fullmatch(value):
         raise ValueError(
@@ -133,7 +134,6 @@ class JobCreate(BaseModel):
     # --- Core identity ---
     name: str = Field(max_length=128)
     source_label: str
-    source_subpath: Optional[str] = None
     destination_label: str
     restic_password: str
     schedule_type: ScheduleType
@@ -205,11 +205,6 @@ class JobCreate(BaseModel):
     def validate_destination_label(cls, v: str) -> str:
         return _validate_label(v, "destination_label")
 
-    @field_validator("source_subpath")
-    @classmethod
-    def validate_source_subpath(cls, v: Optional[str]) -> Optional[str]:
-        return v if v is None else _validate_label(v, "source_subpath")
-
     @model_validator(mode="after")
     def validate_schedule(self) -> "JobCreate":
         """Validate schedule_value against the chosen schedule_type."""
@@ -234,7 +229,6 @@ class JobUpdate(BaseModel):
 
     name: Optional[str] = Field(None, max_length=128)
     source_label: Optional[str] = None
-    source_subpath: Optional[str] = None
     destination_label: Optional[str] = None
     restic_password: Optional[str] = None
     schedule_type: Optional[ScheduleType] = None
@@ -303,11 +297,6 @@ class JobUpdate(BaseModel):
     def validate_destination_label(cls, v: Optional[str]) -> Optional[str]:
         return v if v is None else _validate_label(v, "destination_label")
 
-    @field_validator("source_subpath")
-    @classmethod
-    def validate_source_subpath(cls, v: Optional[str]) -> Optional[str]:
-        return v if v is None else _validate_label(v, "source_subpath")
-
 
 class RunSummarySchema(BaseModel):
     """Compact run record — excludes large output text fields."""
@@ -368,7 +357,6 @@ class JobResponse(BaseModel):
     id: str
     name: str
     source_label: str
-    source_subpath: Optional[str] = None
     destination_label: str
     restic_password: None = None
     schedule_type: str

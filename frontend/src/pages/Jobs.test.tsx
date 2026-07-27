@@ -11,7 +11,6 @@ const makeJob = (overrides: Partial<BackupJob> = {}): BackupJob => ({
   id: 'job-1',
   name: 'Test Job',
   source_label: 'documents',
-  source_subpath: null,
   destination_label: 'main',
   restic_password: null,
   schedule_type: 'interval',
@@ -336,9 +335,7 @@ describe('Jobs', () => {
           status: 409,
           data: {
             detail: {
-              message:
-                'A job with the same source label, source subpath, ' +
-                'and destination label already exists',
+              message: 'A job with the same source label and destination label already exists',
               conflicting_job_id: 'job-9',
               conflicting_job_name: 'Existing Job',
             },

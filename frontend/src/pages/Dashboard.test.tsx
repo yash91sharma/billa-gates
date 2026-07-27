@@ -40,7 +40,6 @@ const makeJob = (overrides: Partial<BackupJob> = {}): BackupJob => ({
   id: 'job-1',
   name: 'Test Job',
   source_label: 'documents',
-  source_subpath: null,
   destination_label: 'main',
   restic_password: null,
   schedule_type: 'interval',

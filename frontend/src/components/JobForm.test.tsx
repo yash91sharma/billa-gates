@@ -7,7 +7,6 @@ const baseJob: BackupJob = {
   id: 'job-uuid',
   name: 'My Documents',
   source_label: 'documents',
-  source_subpath: null,
   destination_label: 'main',
   restic_password: null,
   schedule_type: 'interval',
@@ -200,7 +199,7 @@ describe('JobForm', () => {
       }
     })
 
-    it('points the sentinel hint at the source mount when no subfolder is set', async () => {
+    it('points the sentinel hint at the source mount', async () => {
       const user = userEvent.setup()
       render(
         <JobForm onSubmit={vi.fn()} sourceMounts={['documents']} destinationMounts={['main']} />
@@ -209,79 +208,23 @@ describe('JobForm', () => {
       expect(screen.getByText('/sources/documents')).toBeInTheDocument()
     })
 
-    it('points the sentinel hint at the subfolder once one is set', async () => {
-      // The folder actually backed up is /sources/<label>/<subfolder>, so that
-      // is where `.billa_gates_check` has to live — a sentinel at the mount
-      // root does not cover it, and the backend refuses the job without one.
-      const user = userEvent.setup()
+    it('offers no subfolder field — a job backs up a whole mount', () => {
+      // The form is the only place a subfolder was ever entered, so its absence
+      // is what makes /sources/<label> the only reachable source path. The
+      // matcher is the loose one the deleted tests used: a field renamed rather
+      // than removed would still be caught here.
       render(<JobForm onSubmit={vi.fn()} sourceMounts={['nas']} destinationMounts={['main']} />)
-      await user.selectOptions(screen.getByLabelText(/source/i), 'nas')
-      await user.type(screen.getByLabelText(/subfolder|subpath/i), 'photos')
-      expect(screen.getByText('/sources/nas/photos')).toBeInTheDocument()
+      expect(screen.queryByLabelText(/subfolder|subpath/i)).toBeNull()
     })
 
-    it('includes source_subpath in the onSubmit payload when filled', async () => {
-      const onSubmit = vi.fn()
-      const user = userEvent.setup()
-      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
-      await user.type(screen.getByLabelText(/subfolder|subpath/i), 'photos')
-      await user.type(screen.getByLabelText(/name/i), 'Test Job')
-      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ source_subpath: 'photos' }))
-    })
-
-    it('sends source_subpath=null when left blank', async () => {
+    it('sends no source_subpath key in the onSubmit payload', async () => {
       const onSubmit = vi.fn()
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
       await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ source_subpath: null }))
-    })
-
-    it('rejects a subpath containing "/"', async () => {
-      const onSubmit = vi.fn()
-      const user = userEvent.setup()
-      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
-      await user.type(screen.getByLabelText(/subfolder|subpath/i), 'a/b')
-      await user.type(screen.getByLabelText(/name/i), 'Test Job')
-      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      expect(screen.getByText(/subpath.*must not contain|cannot contain/i)).toBeInTheDocument()
-      expect(onSubmit).not.toHaveBeenCalled()
-    })
-
-    it('rejects a subpath of ".." (path traversal to the sources root)', async () => {
-      const onSubmit = vi.fn()
-      const user = userEvent.setup()
-      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
-      await user.type(screen.getByLabelText(/subfolder|subpath/i), '..')
-      await user.type(screen.getByLabelText(/name/i), 'Test Job')
-      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      expect(screen.getByText(/subpath.*must not contain|cannot contain/i)).toBeInTheDocument()
-      expect(onSubmit).not.toHaveBeenCalled()
-    })
-
-    it('rejects a subpath of "." (resolves to the mount itself)', async () => {
-      const onSubmit = vi.fn()
-      const user = userEvent.setup()
-      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
-      await user.type(screen.getByLabelText(/subfolder|subpath/i), '.')
-      await user.type(screen.getByLabelText(/name/i), 'Test Job')
-      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      expect(screen.getByText(/subpath.*must not contain|cannot contain/i)).toBeInTheDocument()
-      expect(onSubmit).not.toHaveBeenCalled()
-    })
-
-    it('accepts a normal subpath with dots, hyphens, and spaces', async () => {
-      const onSubmit = vi.fn()
-      const user = userEvent.setup()
-      render(<JobForm onSubmit={onSubmit} sourceMounts={['meh1']} destinationMounts={['main']} />)
-      await user.type(screen.getByLabelText(/subfolder|subpath/i), 'photos 2024.v2-final')
-      await user.type(screen.getByLabelText(/name/i), 'Test Job')
-      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      expect(onSubmit).toHaveBeenCalledWith(
-        expect.objectContaining({ source_subpath: 'photos 2024.v2-final' })
-      )
+      expect(onSubmit).toHaveBeenCalled()
+      expect(onSubmit.mock.calls[0][0]).not.toHaveProperty('source_subpath')
     })
 
     it('sends the password under the restic_password key the backend expects', async () => {
@@ -426,24 +369,6 @@ describe('JobForm', () => {
         />
       )
       expect(screen.getAllByText('/destinations/main/photos').length).toBeGreaterThan(0)
-    })
-  })
-
-  describe('edit mode — source_subpath round-trip', () => {
-    it('seeds the subpath input from the existing job and submits the same value when unchanged', async () => {
-      const onSubmit = vi.fn()
-      const user = userEvent.setup()
-      render(
-        <JobForm
-          job={{ ...baseJob, source_subpath: 'photos' }}
-          onSubmit={onSubmit}
-          sourceMounts={['documents']}
-          destinationMounts={['main']}
-        />
-      )
-      expect((screen.getByLabelText(/subfolder|subpath/i) as HTMLInputElement).value).toBe('photos')
-      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
-      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ source_subpath: 'photos' }))
     })
   })
 
@@ -868,7 +793,6 @@ describe('JobForm', () => {
     }> = [
       { label: /^name$/i, optional: false, describes: /name|identify|dashboard/i },
       { label: /^source$/i, optional: false, describes: /mount|read-only|folder/i },
-      { label: /^subfolder$/i, optional: true, describes: /subfolder|one level|slash/i },
       { label: /^destination$/i, optional: false, describes: /destination|repo|permanent/i },
       { label: /^password$/i, optional: false, describes: /encryption|password|rotate/i },
       { label: /^enabled$/i, optional: false, describes: /scheduler|schedule|manual/i },
@@ -921,7 +845,7 @@ describe('JobForm', () => {
     it('every help tooltip text includes an explicit Example: snippet (for fields that have one)', async () => {
       await renderAndExpandAll()
       // Sanity: at least the obvious example-bearing fields advertise an example.
-      const exampleFields = [/^name$/i, /^source$/i, /^subfolder$/i, /^keep last$/i, /^tags$/i]
+      const exampleFields = [/^name$/i, /^source$/i, /^keep last$/i, /^tags$/i]
       for (const re of exampleFields) {
         expect(screen.getByLabelText(re)).toHaveAccessibleDescription(/example/i)
       }

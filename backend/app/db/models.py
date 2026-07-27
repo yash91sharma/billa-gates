@@ -127,7 +127,6 @@ class BackupJob(Base):
     )
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     source_label: Mapped[str] = mapped_column(String(64), nullable=False)
-    source_subpath: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     destination_label: Mapped[str] = mapped_column(String(64), nullable=False)
     restic_password: Mapped[str] = mapped_column(String, nullable=False)
     schedule_type: Mapped[ScheduleType] = mapped_column(

@@ -17,14 +17,11 @@ function parseLines(text: string): string[] | null {
 }
 
 // Mirrors the backend whitelist (app/api/schemas/jobs.py::_validate_label).
-// A subpath is a single path component under the source mount: '/' would
-// nest deeper, and '.' / '..' would resolve to the mount itself or escape to
-// the sources root — the backend rejects all of these with a 422.
-//
-// The job name is validated against the same pattern: it names the repository
-// directory at /destinations/<destination>/<name>, so it is a path component
-// too, not free text.
-const SUBPATH_RE = /^[\p{L}\p{N}_][\p{L}\p{N}_ .-]*$/u
+// The job name is a path component, not free text: it names the repository
+// directory at /destinations/<destination>/<name>. '/' would nest deeper and
+// '.' / '..' would point at the destination root itself — the backend rejects
+// all of these with a 422.
+const PATH_COMPONENT_RE = /^[\p{L}\p{N}_][\p{L}\p{N}_ .-]*$/u
 
 // Limits restic itself imposes (verified against restic 0.19.1). Offering a
 // value it rejects turns every future run into a failure — and a rejected
@@ -61,15 +58,8 @@ const HELP: Record<string, FieldHelp> = {
   source: {
     label: 'Source',
     description:
-      'Mounted folder to back up. Sources come from /sources/<label> in docker-compose and are mounted read-only. IMPORTANT: The folder this job actually backs up must contain a .billa_gates_check file at its root — the mount root, or the subfolder below if you set one — or else the backup will fail.',
+      'Mounted folder to back up. Sources come from /sources/<label> in docker-compose and are mounted read-only. The whole mount is backed up. IMPORTANT: it must contain a .billa_gates_check file at its root, or else the backup will fail.',
     example: 'documents',
-  },
-  subfolder: {
-    label: 'Subfolder',
-    optional: true,
-    description:
-      'Back up a single direct subfolder of the source mount instead of the whole mount. No slashes — one level only. The subfolder needs its own .billa_gates_check file: a sentinel at the mount root proves the mount is up but says nothing about the subfolder, which could be empty or gone.',
-    example: 'photos',
   },
   destination: {
     label: 'Destination',
@@ -271,7 +261,6 @@ export default function JobForm({
   // Basic fields
   const [name, setName] = useState(job?.name ?? '')
   const [sourceLabel, setSourceLabel] = useState(job?.source_label ?? '')
-  const [sourceSubpath, setSourceSubpath] = useState(job?.source_subpath ?? '')
   const [destinationLabel, setDestinationLabel] = useState(job?.destination_label ?? '')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
@@ -335,18 +324,10 @@ export default function JobForm({
 
     // Presence is enforced natively via `required`; this guards the separate
     // property that the name is a usable single path component.
-    if (name && !SUBPATH_RE.test(name)) {
+    if (name && !PATH_COMPONENT_RE.test(name)) {
       setSubmitError(
         'name must not contain "/", "." or ".." — it names the repository folder on the ' +
           'destination drive (letters, digits, underscores, spaces, dots, and hyphens)'
-      )
-      return
-    }
-
-    if (sourceSubpath && !SUBPATH_RE.test(sourceSubpath)) {
-      setSubmitError(
-        'source_subpath must not contain "/", "." or ".." — use a single folder name ' +
-          '(letters, digits, underscores, spaces, dots, and hyphens)'
       )
       return
     }
@@ -407,7 +388,6 @@ export default function JobForm({
       await onSubmit({
         name,
         source_label: sourceLabel,
-        source_subpath: sourceSubpath || null,
         destination_label: destinationLabel,
         restic_password: password || undefined,
         enabled,
@@ -547,27 +527,9 @@ export default function JobForm({
                 {sourceLabel && (
                   <p className="text-muted-foreground text-xs mt-1">
                     ⚠️ The folder this job backs up must contain a <code>.billa_gates_check</code>{' '}
-                    file at its root:{' '}
-                    <code>
-                      {sourceSubpath
-                        ? `/sources/${sourceLabel}/${sourceSubpath}`
-                        : `/sources/${sourceLabel}`}
-                    </code>
+                    file at its root: <code>{`/sources/${sourceLabel}`}</code>
                   </p>
                 )}
-              </div>
-
-              <div>
-                <FieldLabel htmlFor="source-subpath" help={HELP.subfolder} />
-                <input
-                  id="source-subpath"
-                  type="text"
-                  value={sourceSubpath}
-                  onChange={(e) => setSourceSubpath(e.target.value)}
-                  placeholder="e.g. photos"
-                  aria-describedby={helpId('source-subpath')}
-                  className={inputCls}
-                />
               </div>
 
               <div>

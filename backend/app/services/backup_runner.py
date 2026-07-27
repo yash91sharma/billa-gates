@@ -88,35 +88,28 @@ def _session_factory() -> async_sessionmaker[AsyncSession]:
 
 
 @log_call
-def build_source_path(source_label: str, source_subpath: Optional[str] = None) -> str:
-    """Return the path a run actually reads: ``/sources/<label>[/<subpath>]``.
+def build_source_path(source_label: str) -> str:
+    """Return the path a run actually reads: ``/sources/<label>``.
 
-    Single source of truth for the effective backup source, so the path the
-    sentinel is checked at can never drift from the path handed to restic.
+    A job backs up a whole mount, so the label is the entire address. Single
+    source of truth for the backup source all the same, so the path the sentinel
+    is checked at can never drift from the path handed to restic.
     """
-    if source_subpath:
-        return os.path.join(SOURCES_ROOT, source_label, source_subpath)
     return os.path.join(SOURCES_ROOT, source_label)
 
 
 @log_call
-def check_mount_file_exists(
-    source_label: str, source_subpath: Optional[str] = None
-) -> bool:
-    """Verify that the effective backup source contains the sentinel check file.
+def check_mount_file_exists(source_label: str) -> bool:
+    """Verify that the backup source contains the sentinel check file.
 
-    Checks for .billa_gates_check at the root of the directory that is actually
-    backed up — the mount root, or the subfolder when the job sets
-    `source_subpath`.
-
-    Checking only the mount root is not enough for a subpath job: the sentinel
-    would prove the mount is live while saying nothing about the subfolder. An
-    inner share that dropped, or a folder that was moved, leaves an empty
-    directory that restic turns into a 0-file snapshot — and `restic forget`
-    then prunes the real history against it.
+    Checks for .billa_gates_check at the root of the mount, which is the
+    directory that is actually backed up. The sentinel is what tells a live
+    drive apart from an empty mountpoint left behind by a detached one — the
+    directory exists either way, and restic would turn the empty one into a
+    0-file snapshot that `restic forget` then prunes the real history against.
     """
     check_file_path = os.path.join(
-        build_source_path(source_label, source_subpath), ".billa_gates_check"
+        build_source_path(source_label), ".billa_gates_check"
     )
     return os.path.exists(check_file_path)
 
@@ -408,17 +401,15 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         logger.debug(f"job_id={job_id} run_id={run_id} step=verify_mount")
         # Resolved before the check so the path proven live below is byte-for-byte
         # the path handed to `restic backup` further down.
-        source_path: str = build_source_path(job.source_label, job.source_subpath)
+        source_path: str = build_source_path(job.source_label)
         if not await fs.run_probe(
             check_mount_file_exists,
             job.source_label,
-            job.source_subpath,
             default=False,
         ):
             logger.error(
                 f"job_id={job_id} run_id={run_id} step=verify_mount "
-                f"error=mount_check_failed source_label={job.source_label} "
-                f"source_subpath={job.source_subpath}"
+                f"error=mount_check_failed source_label={job.source_label}"
             )
             await _abort(
                 f"Mount check failed: '.billa_gates_check' file was not found "
@@ -585,8 +576,8 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
 
         # Look up the latest snapshot for this job so restic can do an
         # incremental rescan instead of re-reading every source file. Without
-        # an explicit --parent, any change to host or paths (e.g.
-        # source_subpath edit) makes restic treat the next backup as a fresh
+        # an explicit --parent, any change to host or paths (e.g. a
+        # source_label edit) makes restic treat the next backup as a fresh
         # first run (gaps.md C5). Returns None on genuine first run.
         parent_lookup_success = True
         parent_snapshot_id: Optional[str] = None

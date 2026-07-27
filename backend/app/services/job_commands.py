@@ -117,9 +117,7 @@ def _backup_run_commands(
     job: BackupJob, repo_path: str, env: Dict[str, str], *, auto_unlock: bool
 ) -> List[Dict[str, Any]]:
     """The pipeline in run_backup order (app/services/backup_runner.py)."""
-    source_path: str = backup_runner.build_source_path(
-        job.source_label, job.source_subpath
-    )
+    source_path: str = backup_runner.build_source_path(job.source_label)
     unlock_description = (
         "Removes lock files left behind by a run that was killed mid-write. "
         "Snapshots and their data are not touched."

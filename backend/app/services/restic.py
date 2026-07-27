@@ -178,7 +178,7 @@ def build_backup_args(
     ]
 
     # Explicit --parent lets restic skip the full-tree rescan even when host
-    # or paths have changed; without it, any source_subpath change makes the
+    # or paths have changed; without it, any source path change makes the
     # next backup re-read every file from disk (gaps.md C5). Omit on the
     # genuine first run — passing a bogus --parent would fail the backup.
     if parent_snapshot_id:
@@ -248,7 +248,7 @@ def build_forget_args(**retention_flags: Any) -> List[str]:
     --group-by '' puts every snapshot in the repo into one retention group,
     so the policy applies across any historical path or host change. The
     original --group-by paths kept old-path snapshots forever whenever a
-    job's source_subpath changed (gaps.md C3).
+    job's source path changed (gaps.md C3).
 
     Deliberately unfiltered: the repo holds exactly one job's snapshots.
     Scoping by a per-job tag would strand every snapshot taken before the
@@ -510,8 +510,8 @@ def _newest_snapshot(snapshots: List[Any]) -> Optional[Dict[str, Any]]:
     **`--latest 1` is not "the newest snapshot".** restic applies it per
     `(host, paths)` group and returns the groups oldest-first, so a repository
     that has ever held more than one source path or hostname comes back with
-    several rows. That happens whenever a job's source_label/source_subpath is
-    edited, a job is recreated over an adopted repo with a different source, or
+    several rows. That happens whenever a job's source_label is edited, a job
+    is recreated over an adopted repo with a different source, or
     somebody runs `restic backup` by hand from a shell — that snapshot carries
     the machine's own hostname instead of the `--host billa-gates` this app
     pins. Taking `[0]` therefore passed `--parent` the newest snapshot of the

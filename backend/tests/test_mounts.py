@@ -58,42 +58,6 @@ async def test_list_sources_filters_files(client, tmp_path):
     assert "afile.txt" not in labels
 
 
-# ── GET /api/mounts/sources/{label}/subdirs ───────────────────────────────────
-
-
-async def test_get_subdirs_success(client, tmp_path):
-    sources = tmp_path / "sources"
-    (sources / "documents" / "photos").mkdir(parents=True)
-    (sources / "documents" / "work").mkdir()
-
-    with patch("app.api.routes.mounts.SOURCES_ROOT", str(sources)):
-        resp = await client.get("/api/mounts/sources/documents/subdirs")
-    assert resp.status_code == 200
-    labels = resp.json()
-    assert "photos" in labels
-    assert "work" in labels
-
-
-async def test_get_subdirs_not_found(client, tmp_path):
-    sources = tmp_path / "sources"
-    sources.mkdir()
-
-    with patch("app.api.routes.mounts.SOURCES_ROOT", str(sources)):
-        resp = await client.get("/api/mounts/sources/nonexistent/subdirs")
-    assert resp.status_code == 404
-
-
-async def test_get_subdirs_only_one_level(client, tmp_path):
-    sources = tmp_path / "sources"
-    (sources / "documents" / "deep" / "nested").mkdir(parents=True)
-
-    with patch("app.api.routes.mounts.SOURCES_ROOT", str(sources)):
-        resp = await client.get("/api/mounts/sources/documents/subdirs")
-    labels = resp.json()
-    assert "deep" in labels
-    assert "nested" not in labels
-
-
 # ── GET /api/mounts/destinations ─────────────────────────────────────────────
 
 

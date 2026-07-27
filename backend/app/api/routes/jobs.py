@@ -155,7 +155,6 @@ async def _build_job_response(
 async def _validate_mounts(
     source_label: str,
     destination_label: str,
-    source_subpath: str | None = None,
 ) -> None:
     """Raise HTTP 422 if either mount directory does not exist, or if its
     `.billa_gates_check` sentinel file is missing.
@@ -170,9 +169,9 @@ async def _validate_mounts(
     container's ephemeral layer. Job creation reads the source and initializes
     the destination repo, so both sentinels are required here.
 
-    The source sentinel is required at the *effective* source path
-    (`/sources/<label>[/<subpath>]`) — the same path each run verifies — so a
-    subpath job cannot be created against a folder that will fail every run.
+    The source sentinel is required at `/sources/<label>` — the same path each
+    run verifies — so a job cannot be created against a mount that will fail
+    every run.
     """
     if not await fs.run_probe(
         os.path.isdir, f"{_SOURCES_ROOT}/{source_label}", default=False
@@ -184,10 +183,9 @@ async def _validate_mounts(
     if not await fs.run_probe(
         backup_runner.check_mount_file_exists,
         source_label,
-        source_subpath,
         default=False,
     ):
-        source_path = backup_runner.build_source_path(source_label, source_subpath)
+        source_path = backup_runner.build_source_path(source_label)
         raise HTTPException(
             status_code=422,
             detail=(
@@ -225,18 +223,20 @@ async def _validate_mounts(
 @log_call
 async def _check_duplicate(
     source_label: str,
-    source_subpath: str | None,
     destination_label: str,
     session: AsyncSession,
     exclude_id: str | None = None,
 ) -> None:
     """Raise 409 if another job already uses the same (source_label,
-    source_subpath, destination_label) tuple — per design doc §6."""
+    destination_label) pair — per design doc §6.
+
+    A job backs up a whole mount, so this pair is the entire description of what
+    a job copies and where it puts it. A second job over it is the same bytes
+    twice; a different job `name` only picks another repository directory on the
+    same drive.
+    """
     stmt = select(BackupJob).where(
         BackupJob.source_label == source_label,
-        BackupJob.source_subpath.is_(source_subpath)
-        if source_subpath is None
-        else BackupJob.source_subpath == source_subpath,
         BackupJob.destination_label == destination_label,
     )
     if exclude_id:
@@ -248,8 +248,8 @@ async def _check_duplicate(
             status_code=409,
             detail={
                 "message": (
-                    "A job with the same source label, source subpath, "
-                    "and destination label already exists"
+                    "A job with the same source label and destination label "
+                    "already exists"
                 ),
                 "conflicting_job_id": existing.id,
                 "conflicting_job_name": existing.name,
@@ -407,12 +407,8 @@ async def create_job(
     behind, and it is the reason name/destination_label/restic_password are
     immutable afterwards: together they address the repo.
     """
-    await _validate_mounts(
-        body.source_label, body.destination_label, body.source_subpath
-    )
-    await _check_duplicate(
-        body.source_label, body.source_subpath, body.destination_label, session
-    )
+    await _validate_mounts(body.source_label, body.destination_label)
+    await _check_duplicate(body.source_label, body.destination_label, session)
     await _check_duplicate_name(body.name, body.destination_label, session)
 
     await _provision_repository(body.name, body.destination_label, body.restic_password)
@@ -548,7 +544,6 @@ async def update_job(
     # misleading 422).
     await _check_duplicate(
         update_data.get("source_label", job.source_label),
-        update_data.get("source_subpath", job.source_subpath),
         update_data.get("destination_label", job.destination_label),
         session,
         exclude_id=job_id,

@@ -24,7 +24,6 @@ export interface BackupJob {
   id: string
   name: string
   source_label: string
-  source_subpath: string | null
   destination_label: string
   restic_password: null
   schedule_type: ScheduleType

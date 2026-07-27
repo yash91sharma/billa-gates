@@ -2589,40 +2589,6 @@ async def test_step6_source_path_uses_source_label(engine):
     assert captured["source_path"] == "/sources/documents"
 
 
-async def test_step6_source_subpath_appended_to_source_path(engine):
-    await _setup_job(engine, source_label="documents", source_subpath="photos")
-    run_id = str(uuid.uuid4())
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    from app.db.models import BackupRun, RunStatus, TriggeredBy
-
-    async with factory() as s:
-        run = BackupRun(
-            id=run_id,
-            job_id=str(JOB_ID),
-            status=RunStatus.running,
-            triggered_by=TriggeredBy.manual,
-            started_at=datetime.now(timezone.utc),
-        )
-        s.add(run)
-        await s.commit()
-
-    captured = {}
-
-    async def fake_backup(repo, password, source_path, timeout_seconds, **kwargs):
-        captured["source_path"] = source_path
-        return (0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY)
-
-    with (
-        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
-        patch("app.services.restic.restic_backup", side_effect=fake_backup),
-        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.run_notifications.send_notification"),
-    ):
-        await run_backup(JOB_ID, uuid.UUID(run_id))
-
-    assert captured["source_path"] == "/sources/documents/photos"
-
-
 async def test_step6_repo_path_uses_destination_label(engine):
     await _setup_job(engine, destination_label="offsite")
     run_id = str(uuid.uuid4())
@@ -3601,7 +3567,7 @@ async def test_run_backup_hung_mount_check_fails_run_promptly(engine):
         s.add(run)
         await s.commit()
 
-    def hung_check(label: str, subpath: str | None = None) -> bool:
+    def hung_check(label: str) -> bool:
         _time.sleep(1.0)  # simulates stat() stuck on a dead SMB mount
         return True
 
@@ -3633,17 +3599,18 @@ async def test_run_backup_hung_mount_check_fails_run_promptly(engine):
     assert cat_config_called is False
 
 
-# ── Sentinel lives at the *effective* backup source path ─────────────────────
+# ── Sentinel lives at the backup source path ─────────────────────────────────
 #
-# A job with source_subpath backs up /sources/<label>/<subpath>, so that is the
-# path whose liveness has to be proven. A sentinel at the mount root says the
-# mount is up but nothing about the subfolder: an inner share that dropped, or
-# a folder that was moved, leaves an empty directory that restic happily turns
-# into a 0-file snapshot — and then `restic forget` prunes the real history.
+# A job backs up the whole mount, so /sources/<label> is the path whose liveness
+# has to be proven — and it is the same path handed to `restic backup`. An
+# empty mountpoint left behind by a detached drive is a directory like any
+# other: restic turns it into a 0-file snapshot, and then `restic forget`
+# prunes the real history against it.
 
 
-def test_sentinel_without_subpath_is_checked_at_the_mount_root(tmp_path):
-    """No subpath configured → the mount root is the backup source, unchanged."""
+def test_sentinel_is_checked_at_the_mount_root(tmp_path):
+    """The mount root is the backup source, so that is where the sentinel has
+    to be — a directory that merely exists proves nothing."""
     (tmp_path / "documents").mkdir()
 
     with patch("app.services.backup_runner.SOURCES_ROOT", str(tmp_path)):
@@ -3652,35 +3619,20 @@ def test_sentinel_without_subpath_is_checked_at_the_mount_root(tmp_path):
         assert REAL_CHECK_MOUNT_FILE_EXISTS("documents") is True
 
 
-def test_sentinel_with_subpath_is_checked_inside_the_subpath(tmp_path):
-    """A sentinel at the mount root must NOT satisfy a subpath job — that is
-    exactly the case where an emptied subfolder silently passes the check."""
-    (tmp_path / "documents" / "photos").mkdir(parents=True)
-    (tmp_path / "documents" / ".billa_gates_check").touch()  # root only
-
+def test_sentinel_with_missing_mount_directory_is_false(tmp_path):
+    """The mount directory itself is gone (unmounted, renamed): no sentinel,
+    no run — and no exception out of the probe."""
     with patch("app.services.backup_runner.SOURCES_ROOT", str(tmp_path)):
-        assert REAL_CHECK_MOUNT_FILE_EXISTS("documents", "photos") is False
-
-        (tmp_path / "documents" / "photos" / ".billa_gates_check").touch()
-        assert REAL_CHECK_MOUNT_FILE_EXISTS("documents", "photos") is True
+        assert REAL_CHECK_MOUNT_FILE_EXISTS("gone") is False
 
 
-def test_sentinel_with_missing_subpath_directory_is_false(tmp_path):
-    """The subfolder itself is gone (renamed/moved): no sentinel, no run."""
-    (tmp_path / "documents").mkdir()
-    (tmp_path / "documents" / ".billa_gates_check").touch()
-
-    with patch("app.services.backup_runner.SOURCES_ROOT", str(tmp_path)):
-        assert REAL_CHECK_MOUNT_FILE_EXISTS("documents", "gone") is False
-
-
-async def test_run_backup_probes_sentinel_at_the_subpath_and_aborts(engine):
-    """run_backup must hand the job's source_subpath to the sentinel probe and
-    abort before restic when the subfolder's sentinel is missing. The error has
-    to name the path that was actually checked."""
+async def test_run_backup_probes_sentinel_at_the_mount_root_and_aborts(engine):
+    """run_backup must probe the sentinel at the job's source mount and abort
+    before restic when it is missing. The error has to name the path that was
+    actually checked."""
     from app.db.models import AppSettings, BackupRun, RunStatus, TriggeredBy
 
-    await _setup_job(engine, source_label="documents", source_subpath="photos")
+    await _setup_job(engine, source_label="documents")
     run_id = str(uuid.uuid4())
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -3699,12 +3651,12 @@ async def test_run_backup_probes_sentinel_at_the_subpath_and_aborts(engine):
         )
         await s.commit()
 
-    probe_calls: list[tuple[str, str | None]] = []
+    probe_calls: list[tuple[str, ...]] = []
     restic_called = False
 
-    def sentinel(label: str, subpath: str | None = None) -> bool:
-        probe_calls.append((label, subpath))
-        return False  # sentinel exists at the mount root only
+    def sentinel(*args: str) -> bool:
+        probe_calls.append(args)
+        return False  # drive detached: the mountpoint is there, the file is not
 
     async def fake_cat_config(*args, **kwargs):
         nonlocal restic_called
@@ -3727,26 +3679,26 @@ async def test_run_backup_probes_sentinel_at_the_subpath_and_aborts(engine):
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
-    assert probe_calls == [("documents", "photos")], (
-        "the sentinel must be probed at the effective source path, not the mount root"
+    assert probe_calls == [("documents",)], (
+        "the sentinel must be probed at the source mount, with the label alone"
     )
     run = await _get_run(engine, run_id)
     assert run.status == RunStatus.failed
     assert run.error_output is not None
     assert "Mount check failed" in run.error_output
     assert ".billa_gates_check" in run.error_output
-    assert "/sources/documents/photos" in run.error_output
+    assert "/sources/documents" in run.error_output
     assert restic_called is False
     assert mock_notify.call_count == 1
     assert "Mount check failed" in mock_notify.call_args[0][3]
 
 
-async def test_run_backup_proceeds_when_subpath_sentinel_is_present(engine):
-    """The mirror case: sentinel present inside the subfolder → the run goes
-    ahead and restic backs up exactly the path that was verified."""
+async def test_run_backup_backs_up_the_path_it_verified(engine):
+    """The mirror case: sentinel present → the run goes ahead, and restic backs
+    up byte-for-byte the path the probe proved live."""
     from app.db.models import BackupRun, RunStatus, TriggeredBy
 
-    await _setup_job(engine, source_label="documents", source_subpath="photos")
+    await _setup_job(engine, source_label="documents")
     run_id = str(uuid.uuid4())
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -3764,8 +3716,8 @@ async def test_run_backup_proceeds_when_subpath_sentinel_is_present(engine):
 
     backed_up_paths: list[str] = []
 
-    def sentinel(label: str, subpath: str | None = None) -> bool:
-        return (label, subpath) == ("documents", "photos")
+    def sentinel(*args: str) -> bool:
+        return args == ("documents",)
 
     async def fake_backup(repo_path, password, source_path, *args, **kwargs):
         backed_up_paths.append(source_path)
@@ -3784,7 +3736,7 @@ async def test_run_backup_proceeds_when_subpath_sentinel_is_present(engine):
 
     run = await _get_run(engine, run_id)
     assert run.status == RunStatus.success
-    assert backed_up_paths == ["/sources/documents/photos"], (
+    assert backed_up_paths == ["/sources/documents"], (
         "restic must back up the same path the sentinel check verified"
     )
 
@@ -4480,7 +4432,7 @@ async def test_backup_is_invoked_with_exactly_one_source_path(engine):
     `backup_success = True` on rc=3 would then be reachable with nothing backed
     up.
     """
-    await _setup_job(engine, source_subpath="reports")
+    await _setup_job(engine, source_label="reports")
     run_id = str(uuid.uuid4())
     factory = async_sessionmaker(engine, expire_on_commit=False)
     from app.db.models import BackupRun, RunStatus, TriggeredBy
@@ -4514,7 +4466,7 @@ async def test_backup_is_invoked_with_exactly_one_source_path(engine):
 
     source_path = captured["source_path"]
     assert isinstance(source_path, str), "one path, not a list of them"
-    assert source_path == "/sources/documents/reports"
+    assert source_path == "/sources/reports"
     # No kwarg smuggles a second path in either.
     assert "source_paths" not in captured["kwargs"]
 

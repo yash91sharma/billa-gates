@@ -332,7 +332,9 @@ async def test_backup_timeout_kills_process():
     assert "timed out" in stderr.lower()
 
 
-async def test_backup_source_path_with_subpath():
+async def test_backup_passes_the_source_path_through_to_argv():
+    """The source path the caller resolved is what restic is told to back up —
+    the wrapper neither rebuilds nor rewrites it."""
     proc = _make_process(0, stdout=BACKUP_SUMMARY)
     captured = {}
 
@@ -344,11 +346,11 @@ async def test_backup_source_path_with_subpath():
         await restic_backup(
             REPO,
             PASSWORD,
-            "/sources/documents/photos",
+            "/sources/documents",
             timeout_seconds=3600,
         )
 
-    assert "/sources/documents/photos" in captured["args"]
+    assert "/sources/documents" in captured["args"]
 
 
 async def test_backup_exclude_patterns_flag():
@@ -861,8 +863,8 @@ async def test_latest_snapshot_id_picks_the_newest_across_groups():
     """`--latest 1` is the newest snapshot of *each* (host, paths) group, oldest
     group first — not the newest snapshot in the repository.
 
-    A repo grows a second group whenever a job's source_label/source_subpath is
-    edited, a job is recreated over an adopted repo with a different source, or
+    A repo grows a second group whenever a job's source_label is edited, a job
+    is recreated over an adopted repo with a different source, or
     someone runs `restic backup` by hand from a shell (that snapshot carries the
     machine's own hostname instead of the pinned `billa-gates`). Taking [0] then
     hands `restic backup` the newest snapshot of the *stale* group, and a parent
@@ -1315,7 +1317,7 @@ async def test_backup_includes_pinned_host_flag():
 async def test_forget_uses_empty_group_by_and_no_tag_filter():
     """`restic forget` must use --group-by '' (a single group across all paths
     and hosts). The old --group-by paths silently kept old-path snapshots
-    forever whenever a job's source_subpath changed (gaps.md C3); --group-by ''
+    forever whenever a job's source path changed (gaps.md C3); --group-by ''
     is what fixes that, and it does so without any tag filter.
 
     It must NOT filter by tag: retention has to reach every snapshot in the

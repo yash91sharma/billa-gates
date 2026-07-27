@@ -11,8 +11,8 @@ Each test walks a distinct critical user journey:
   deleted; scheduler is mocked but observed for register/remove calls).
 - Destination-label immutability after creation.
 - Restic password immutability after the first successful run.
-- Source-subpath uniqueness — different subpaths under the same label and
-  destination must coexist (design doc §6).
+- Source/destination uniqueness — a second job over the same label pair is
+  refused and leaves the first intact (design doc §6).
 """
 
 from unittest.mock import MagicMock, patch
@@ -147,19 +147,19 @@ async def test_job_name_immutable_from_creation(client: AsyncClient) -> None:
         assert "name" in resp.text.lower()
 
 
-async def test_two_jobs_with_same_labels_different_subpaths_coexist(
+async def test_second_job_over_the_same_labels_is_refused(
     client: AsyncClient,
 ) -> None:
-    """Per design doc §6: duplicate key is (source_label, source_subpath,
-    destination_label). Two jobs with same labels but different subpaths
-    must both succeed."""
+    """Per design doc §6: the duplicate key is (source_label,
+    destination_label). A job backs up a whole mount, so a second job over the
+    same pair copies the same bytes twice however it is named — and the refusal
+    must leave the first job intact."""
     with patch("os.path.isdir", return_value=True):
         first = await client.post(
             "/api/jobs",
             json=make_job_payload(
                 name="Photos backup",
                 source_label="documents",
-                source_subpath="photos",
             ),
         )
         assert first.status_code == 201
@@ -169,12 +169,13 @@ async def test_two_jobs_with_same_labels_different_subpaths_coexist(
             json=make_job_payload(
                 name="Videos backup",
                 source_label="documents",
-                source_subpath="videos",
             ),
         )
-        assert second.status_code == 201
+        assert second.status_code == 409
+        detail = second.json()["detail"]
+        assert detail["conflicting_job_name"] == "Photos backup"
 
         list_resp = await client.get("/api/jobs")
         assert list_resp.status_code == 200
         names = {j["name"] for j in list_resp.json()}
-        assert names == {"Photos backup", "Videos backup"}
+        assert names == {"Photos backup"}

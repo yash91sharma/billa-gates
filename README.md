@@ -70,20 +70,17 @@ services:
 Billa-Gates won't run against a folder missing a sentinel file (`.billa_gates_check`) at its root:
 
 ```bash
-touch /path/to/back/up/.billa_gates_check         # each source mount
-touch /path/to/back/up/photos/.billa_gates_check  # each subfolder a job backs up
-touch /path/to/backup/drive/.billa_gates_check    # each destination
+touch /path/to/back/up/.billa_gates_check       # each source mount
+touch /path/to/backup/drive/.billa_gates_check  # each destination
 ```
 
-- **Sources** are mounted read-only under `/sources/{label}` and become selectable in the UI.
-- If a job sets a **Subfolder**, the folder it backs up is `/sources/{label}/{subfolder}` — that is its effective backup path, and it needs its own sentinel file. A sentinel at the mount root does not cover it.
+- **Sources** are mounted read-only under `/sources/{label}` and become selectable in the UI. A job backs up the whole mount, so the sentinel goes at its root.
 - **Destinations** are backup drives mounted under `/destinations/{label}`. Each job gets its own restic repository on that drive at `/destinations/{label}/{job name}`, created when you create the job.
 
-| Job configuration                     | Effective backup path | Sentinel file                            |
-| ------------------------------------- | --------------------- | ---------------------------------------- |
-| Source `documents`, no subfolder      | `/sources/documents`  | `/sources/documents/.billa_gates_check`  |
-| Source `nas` + subfolder `photos`     | `/sources/nas/photos` | `/sources/nas/photos/.billa_gates_check` |
-| Destination `main` (any job using it) | `/destinations/main`  | `/destinations/main/.billa_gates_check`  |
+| Job configuration                     | Effective backup path | Sentinel file                           |
+| ------------------------------------- | --------------------- | --------------------------------------- |
+| Source `documents`                    | `/sources/documents`  | `/sources/documents/.billa_gates_check` |
+| Destination `main` (any job using it) | `/destinations/main`  | `/destinations/main/.billa_gates_check` |
 
 - Create the file once, on the underlying drive/share — not on a temporary mountpoint.
 - If a run fails with a missing-sentinel error, it usually means the mount actually dropped. Check the mount before recreating the file.

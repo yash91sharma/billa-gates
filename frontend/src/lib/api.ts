@@ -89,8 +89,6 @@ export const cancelRun = async (id: string): Promise<void> => {
 
 // ── Mounts ────────────────────────────────────────────────────────────────────
 export const listSourceMounts = () => request<string[]>('/mounts/sources')
-export const getSourceSubdirs = (label: string) =>
-  request<string[]>(`/mounts/sources/${label}/subdirs`)
 export const listDestinationMounts = () => request<string[]>('/mounts/destinations')
 export const renameDestination = (old_label: string, new_label: string) =>
   request<RenameDestinationResult>('/mounts/destinations/rename', {

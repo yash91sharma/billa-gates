@@ -38,7 +38,6 @@ const job: BackupJob = {
   id: 'job-1',
   name: 'Documents Backup',
   source_label: 'documents',
-  source_subpath: null,
   destination_label: 'main',
   restic_password: null,
   schedule_type: 'interval',

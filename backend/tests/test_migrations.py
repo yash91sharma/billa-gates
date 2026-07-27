@@ -47,7 +47,6 @@ async def test_migration_creates_all_tables():
             "id",
             "name",
             "source_label",
-            "source_subpath",
             "destination_label",
             "restic_password",
             "schedule_type",
@@ -300,6 +299,66 @@ async def test_migration_002_preserves_jobs_and_unique_constraint():
                 sa.text("SELECT name, compression FROM backup_jobs")
             ).all()
         assert rows == [("Photos", "max")], "002 lost pre-existing job rows"
+
+        # The unique constraint must have survived the table rebuild.
+        with pytest.raises(sa.exc.IntegrityError):
+            with engine.begin() as conn:
+                conn.execute(
+                    sa.text(insert_job), {"id": str(_uuid.uuid4()), "name": "Photos"}
+                )
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_migration_003_drops_source_subpath_and_preserves_jobs():
+    """003 removes backup_jobs.source_subpath.
+
+    SQLite cannot drop a column in place, so — like 002 — this rebuilds the
+    table. The copy must carry the existing rows and the (destination_label,
+    name) uniqueness across: a silent constraint loss there would let two jobs
+    address the same repository directory.
+
+    The column itself must actually be gone, not merely unused: the ORM/migration
+    parity guard below compares the two column sets by equality, and a leftover
+    column would also let a stale client's `source_subpath` reach the DB.
+    """
+    import uuid as _uuid
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db_url = f"sqlite:///{db_path}"
+
+        cfg = Config(Path(__file__).parent.parent / "alembic.ini")
+        cfg.set_main_option("sqlalchemy.url", db_url)
+        # Stop at 002 — the last revision where the column still exists — seed
+        # a job, then upgrade across 003.
+        command.upgrade(cfg, "002")
+
+        engine = sa.create_engine(db_url, echo=False)
+        insert_job = (
+            "INSERT INTO backup_jobs (id, name, source_label, destination_label, "
+            "restic_password, schedule_type, schedule_value, enabled, "
+            "exclude_caches, one_file_system, no_scan, check_enabled, "
+            "compression, created_at, updated_at) "
+            "VALUES (:id, :name, 'src', 'main', 'pw', 'interval', '1h', "
+            "1, 0, 0, 0, 0, 'max', '2026-01-01', '2026-01-01')"
+        )
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(insert_job), {"id": str(_uuid.uuid4()), "name": "Photos"}
+            )
+        engine.dispose()
+
+        command.upgrade(cfg, "head")
+
+        engine = sa.create_engine(db_url, echo=False)
+        inspector = inspect(engine)
+        job_cols = {col["name"] for col in inspector.get_columns("backup_jobs")}
+        assert "source_subpath" not in job_cols, "003 did not drop source_subpath"
+
+        with engine.begin() as conn:
+            rows = conn.execute(sa.text("SELECT name FROM backup_jobs")).all()
+        assert rows == [("Photos",)], "003 lost pre-existing job rows"
 
         # The unique constraint must have survived the table rebuild.
         with pytest.raises(sa.exc.IntegrityError):

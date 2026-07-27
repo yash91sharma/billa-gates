@@ -73,7 +73,6 @@ def _make_job(**overrides: Any) -> BackupJob:
         id="job-1",
         name="Photos",
         source_label="pictures",
-        source_subpath=None,
         destination_label="main",
         restic_password=PASSWORD,
         schedule_type=ScheduleType.interval,
@@ -91,7 +90,6 @@ def _by_step(commands: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
 # Every option a job can turn into a `restic backup` flag, set at once, so a
 # flag dropped from either the builder or the preview shows up as a diff.
 FULL_OPTIONS: Dict[str, Any] = dict(
-    source_subpath="2024",
     exclude_patterns=["*.tmp", "node_modules"],
     exclude_caches=True,
     exclude_if_present=[".nobackup"],
@@ -234,7 +232,7 @@ async def test_backup_step_argv_is_what_restic_backup_execs():
         await restic_backup(
             repository.build_repo_path(job.destination_label, job.name),
             job.restic_password,
-            backup_runner.build_source_path(job.source_label, job.source_subpath),
+            backup_runner.build_source_path(job.source_label),
             60,
             parent_snapshot_id=job_commands.PARENT_SNAPSHOT_PLACEHOLDER,
             **backup_runner.build_backup_kwargs(job),
@@ -291,12 +289,12 @@ async def test_steps_are_listed_in_pipeline_order():
 # ── the preview follows the job's own configuration ──────────────────────────
 
 
-async def test_backup_command_uses_the_effective_source_path():
-    job = _make_job(source_label="pictures", source_subpath="2024/raw")
+async def test_backup_command_uses_the_source_path_the_runner_builds():
+    job = _make_job(source_label="pictures")
     step = _by_step(job_commands.build_job_commands(job))["backup"]
 
-    assert step["argv"][-1] == backup_runner.build_source_path("pictures", "2024/raw")
-    assert "/sources/pictures/2024/raw" in step["command"]
+    assert step["argv"][-1] == backup_runner.build_source_path("pictures")
+    assert "/sources/pictures" in step["command"]
 
 
 async def test_backup_command_carries_every_configured_option():
@@ -469,9 +467,7 @@ async def test_run_backup_uses_the_options_and_retention_the_preview_shows(engin
         await backup_runner.run_backup(job_id, uuid.UUID(run_id))
 
     backup_args, backup_kwargs = captured["backup"]
-    assert backup_args[2] == backup_runner.build_source_path(
-        job.source_label, job.source_subpath
-    )
+    assert backup_args[2] == backup_runner.build_source_path(job.source_label)
     options = {
         k: v
         for k, v in backup_kwargs.items()
