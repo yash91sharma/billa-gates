@@ -945,27 +945,52 @@ def _extract_failed_items(
     return items
 
 
+def _at_least_suffix(count: int) -> str:
+    """`+` when parsing stopped at the limit, so a count reads as "at least N".
+
+    Shared by every place that prints one of these counts: the number is only
+    ever a floor once `_extract_failed_items` has hit `_FAILED_ITEM_PARSE_LIMIT`,
+    and a bare "200 items" would read as the whole truth.
+    """
+    return "+" if count >= _FAILED_ITEM_PARSE_LIMIT else ""
+
+
+def _render_failed_items(failed_items: List[str]) -> List[str]:
+    """The item lines allowed into `BackupRun.error_output`: at most
+    `_MAX_REPORTED_FAILED_ITEMS`, followed by an honest "... and N more".
+
+    **Every formatter must build its list through here.** They used to cap
+    independently — the rc=3 path at this limit, the rc!=0 path not at all — so
+    one flood of unreadable files wrote a few KiB into the run row if the backup
+    half-succeeded and ~1.8 MiB if it failed outright, from the same source and
+    the same parse limit. `error_output` is read on every run-detail fetch, so
+    the bound has to hold whichever way the run ended, and one renderer is what
+    keeps the two paths from drifting apart again.
+    """
+    shown: List[str] = failed_items[:_MAX_REPORTED_FAILED_ITEMS]
+    lines: List[str] = list(shown)
+    hidden: int = len(failed_items) - len(shown)
+    if hidden > 0:
+        lines.append(f"... and {hidden}{_at_least_suffix(len(failed_items))} more")
+    return lines
+
+
 def _format_partial_backup_error(failed_items: List[str], stderr: str) -> str:
     """Build the user-visible `error_output` for an rc=3 (partial) backup.
 
     The contract this enforces: the field is never uninformative. When restic
-    named the items, they are listed (capped, with an honest count of what was
-    not shown). When it did not, the retained stderr tail goes in verbatim
-    rather than leaving the operator with a sentence they cannot act on.
+    named the items, they are listed (capped by `_render_failed_items`, with an
+    honest count of what was not shown). When it did not, the retained stderr
+    tail goes in verbatim rather than leaving the operator with a sentence they
+    cannot act on.
     """
     count: int = len(failed_items)
     if count:
-        # `+` because parsing stopped at the limit — there may be more.
-        at_least: str = "+" if count >= _FAILED_ITEM_PARSE_LIMIT else ""
         parts: List[str] = [
-            f"Partial backup: {count}{at_least} item(s) could not be read; "
-            f"the snapshot was still saved."
+            f"Partial backup: {count}{_at_least_suffix(count)} item(s) could "
+            f"not be read; the snapshot was still saved."
         ]
-        shown: List[str] = failed_items[:_MAX_REPORTED_FAILED_ITEMS]
-        parts.extend(shown)
-        hidden: int = count - len(shown)
-        if hidden > 0:
-            parts.append(f"... and {hidden}{at_least} more")
+        parts.extend(_render_failed_items(failed_items))
         return "\n".join(parts)
 
     parts = [
@@ -1013,6 +1038,10 @@ def _format_backup_error(rc: int, json_errors: List[str], stderr: str) -> str:
     which stderr (usually a single post-mortem fatal) does not. Order is
     chosen so the operator sees the high-level summary first, then the
     granular per-file context (gaps.md H5).
+
+    The item list goes through `_render_failed_items` — the same renderer the
+    partial-backup path uses. This one used to print every parsed item instead,
+    so the two paths bounded the same DB column differently.
     """
     parts: List[str] = [f"Backup failed (restic exit code {rc})."]
     if stderr.strip():
@@ -1021,7 +1050,7 @@ def _format_backup_error(rc: int, json_errors: List[str], stderr: str) -> str:
     if json_errors:
         parts.append("")
         parts.append("Per-file errors:")
-        parts.extend(json_errors)
+        parts.extend(_render_failed_items(json_errors))
     return "\n".join(parts)
 
 

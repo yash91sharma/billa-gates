@@ -4829,3 +4829,80 @@ def test_format_backup_error_includes_stderr_and_per_file_errors():
     assert "/sources/x: denied" in out
     # Summary first, granular context after.
     assert out.index("Fatal: repo locked") < out.index("/sources/x: denied")
+
+
+_ITEM_PREFIX = "/sources/Docs/"
+
+
+def _item_lines(rendered: str) -> list[str]:
+    """The per-item lines a formatter actually wrote."""
+    return [ln for ln in rendered.splitlines() if ln.startswith(_ITEM_PREFIX)]
+
+
+def _flood(count: int, line_chars: int = 0) -> list[str]:
+    pad = "d" * line_chars
+    return [f"{_ITEM_PREFIX}{pad}/f{i}: permission denied" for i in range(count)]
+
+
+def test_format_backup_error_caps_the_item_list():
+    """The rc!=0 path used to render every parsed item while the rc=3 path
+    stopped at 50, so one flood of unreadable files wrote a few KiB into the run
+    row if the backup half-succeeded and ~1.8 MiB if it failed outright.
+    `error_output` is loaded on every run-detail fetch; the bound has to hold
+    whichever way the run ended."""
+    from app.services.backup_runner import (
+        _MAX_REPORTED_FAILED_ITEMS,
+        _format_backup_error,
+    )
+
+    out = _format_backup_error(1, _flood(200), "Fatal: nope")
+
+    assert len(_item_lines(out)) == _MAX_REPORTED_FAILED_ITEMS
+    assert f"... and {200 - _MAX_REPORTED_FAILED_ITEMS}" in out, (
+        "the operator has to be told the list was truncated, and by how much"
+    )
+
+
+def test_both_error_formatters_cap_the_item_list_identically():
+    """The anti-drift guard. Two formatters each holding their own opinion about
+    the limit is exactly how the asymmetry appeared; they now share one
+    renderer, and this fails the moment either grows a second one."""
+    from app.services.backup_runner import (
+        _format_backup_error,
+        _format_partial_backup_error,
+    )
+
+    items = _flood(200)
+    assert _item_lines(_format_backup_error(1, items, "Fatal: nope")) == _item_lines(
+        _format_partial_backup_error(items, "Fatal: nope")
+    )
+
+
+def test_error_output_stays_small_enough_to_load_on_every_fetch():
+    """Ceiling check against the worst input the pipeline can hand these: the
+    parse limit's worth of items, each already truncated upstream to the
+    collector's per-line cap. Before the shared renderer the rc!=0 path came out
+    at ~1.8 MiB here."""
+    from app.services.backup_runner import (
+        _FAILED_ITEM_PARSE_LIMIT,
+        _MAX_REPORTED_FAILED_ITEMS,
+        _format_backup_error,
+        _format_partial_backup_error,
+    )
+    from app.services.restic import (
+        _MAX_RETAINED_LINE_CHARS,
+        _MAX_RETAINED_OUTPUT_CHARS,
+    )
+
+    items = _flood(_FAILED_ITEM_PARSE_LIMIT, line_chars=_MAX_RETAINED_LINE_CHARS)
+    stderr = "x" * _MAX_RETAINED_OUTPUT_CHARS
+
+    # What the row can hold: the capped item block, plus the stderr the restic
+    # collector already bounds, plus headlines.
+    ceiling = (
+        _MAX_REPORTED_FAILED_ITEMS * (_MAX_RETAINED_LINE_CHARS + 128)
+        + _MAX_RETAINED_OUTPUT_CHARS
+        + 1024
+    )
+    assert len(_format_backup_error(1, items, stderr)) <= ceiling
+    assert len(_format_partial_backup_error(items, stderr)) <= ceiling
