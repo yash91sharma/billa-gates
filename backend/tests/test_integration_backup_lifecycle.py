@@ -120,7 +120,7 @@ async def test_full_backup_lifecycle_success(client: AsyncClient) -> None:
             new=AsyncMock(return_value=(0, "ok", "")),
         ),
         patch(
-            "app.services.backup_runner.send_notification",
+            "app.services.run_notifications.send_notification",
             new=AsyncMock(return_value=None),
         ),
     ):
@@ -220,7 +220,7 @@ async def test_full_backup_lifecycle_failure(client: AsyncClient) -> None:
             new=AsyncMock(return_value=[]),
         ),
         patch(
-            "app.services.backup_runner.send_notification",
+            "app.services.run_notifications.send_notification",
             new=AsyncMock(return_value=None),
         ),
     ):
@@ -267,7 +267,7 @@ async def test_full_backup_lifecycle_with_verification(client: AsyncClient) -> N
             new=AsyncMock(return_value=(0, "no errors found", "")),
         ),
         patch(
-            "app.services.backup_runner.send_notification",
+            "app.services.run_notifications.send_notification",
             new=AsyncMock(return_value=None),
         ),
     ):

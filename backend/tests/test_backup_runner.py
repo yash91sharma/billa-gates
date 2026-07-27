@@ -148,7 +148,7 @@ async def test_step4_repo_exists_proceeds(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -194,7 +194,7 @@ async def test_step4_repo_not_found_fails_and_never_inits(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -293,7 +293,9 @@ async def test_step4_init_failure_sends_notification(engine):
             "app.services.restic.restic_cat_config",
             return_value=(12, "", "Fatal: wrong password"),
         ),
-        patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
+        patch(
+            "app.services.run_notifications.send_notification", side_effect=fake_notify
+        ),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -341,7 +343,7 @@ async def test_step4_rc11_stale_lock_unlocks_and_retries(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -516,7 +518,7 @@ async def test_auto_unlock_called_before_backup_when_enabled(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -567,7 +569,7 @@ async def test_auto_unlock_skipped_when_disabled(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -605,7 +607,7 @@ async def test_auto_unlock_failure_does_not_fail_the_run(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -652,7 +654,7 @@ async def test_backup_passes_parent_when_prior_snapshot_exists(engine):
         ),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -691,7 +693,7 @@ async def test_backup_omits_parent_on_first_run(engine):
         patch("app.services.restic.restic_latest_snapshot_id", return_value=None),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -748,7 +750,7 @@ async def test_backup_rc11_triggers_unlock_and_retry(engine):
         patch("app.services.restic.restic_unlock", side_effect=fake_unlock),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -798,7 +800,7 @@ async def test_backup_rc11_retry_capped_at_one(engine):
             return_value=(0, "removed locks", ""),
         ),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -834,7 +836,7 @@ async def test_step5_backup_failure_marks_run_failed(engine):
             "app.services.restic.restic_backup",
             return_value=(1, "", "fatal: source not found", None),
         ),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -885,7 +887,7 @@ async def test_step5_backup_failure_surfaces_json_errors_from_stdout(engine):
             "app.services.restic.restic_backup",
             return_value=(1, json_errors_stdout, fatal_stderr, None),
         ),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -927,7 +929,7 @@ async def test_step5_backup_failure_without_json_errors_still_surfaces_stderr(en
             "app.services.restic.restic_backup",
             return_value=(1, "", stderr_msg, None),
         ),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -960,7 +962,7 @@ async def test_step5_backup_timeout_marks_failed(engine):
     with (
         patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
         patch("app.services.restic.restic_backup", side_effect=slow_backup),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1023,7 +1025,7 @@ async def test_step5_backup_rc3_marks_warning_and_skips_retention(engine):
             return_value=(3, rc3_stdout, "", rc3_summary),
         ),
         patch("app.services.restic.restic_forget", side_effect=fake_forget),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1088,7 +1090,7 @@ async def test_step5_backup_rc3_without_retention_skips_forget_and_prune(engine)
         ),
         patch("app.services.restic.restic_forget", side_effect=fake_forget),
         patch("app.services.restic.restic_prune", side_effect=fake_prune),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1168,7 +1170,7 @@ async def _run_rc3(engine, *, stdout: str, stderr: str, run_id: str) -> None:
             return_value=(3, stdout, stderr, BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_forget", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1271,7 +1273,7 @@ async def test_step5_rc3_error_output_is_never_uninformative(engine):
 async def test_step5_rc3_failed_item_list_is_capped(engine):
     """A share that denies a million files must not write a million lines into
     the run row — error_output is read on every run-detail fetch."""
-    from app.services.backup_runner import _MAX_REPORTED_FAILED_ITEMS
+    from app.services.run_output import MAX_REPORTED_FAILED_ITEMS
 
     await _setup_job(engine, retain_keep_last=5)
     run_id = str(uuid.uuid4())
@@ -1292,7 +1294,7 @@ async def test_step5_rc3_failed_item_list_is_capped(engine):
 
     run = await _get_run(engine, run_id)
     listed = [ln for ln in run.error_output.splitlines() if ln.startswith("/sources/")]
-    assert len(listed) == _MAX_REPORTED_FAILED_ITEMS
+    assert len(listed) == MAX_REPORTED_FAILED_ITEMS
     assert "more" in run.error_output, "the user must be told the list was truncated"
     assert len(run.error_output) < 20_000
 
@@ -1327,7 +1329,7 @@ async def test_step5_rc3_notification_names_the_count(engine):
             return_value=(3, json.dumps(BACKUP_SUMMARY), RC3_STDERR, BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_forget", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification") as mock_notify,
+        patch("app.services.run_notifications.send_notification") as mock_notify,
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1393,7 +1395,7 @@ async def test_run_history_trimmed_to_keep_last_runs(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1457,7 +1459,7 @@ async def test_run_history_keeps_newest_runs(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1507,7 +1509,7 @@ async def test_step7_stats_populated_from_summary(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1562,7 +1564,7 @@ async def test_step7_backup_output_drops_status_lines(engine):
             return_value=(0, stdout, "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1619,7 +1621,7 @@ async def test_step8_forget_and_prune_skipped_when_no_retention(engine):
         ),
         patch("app.services.restic.restic_forget", side_effect=fake_forget),
         patch("app.services.restic.restic_prune", side_effect=fake_prune),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1668,7 +1670,7 @@ async def test_step8_forget_called_when_retention_set(engine):
         ),
         patch("app.services.restic.restic_forget", side_effect=fake_forget),
         patch("app.services.restic.restic_prune", side_effect=fake_prune),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1711,7 +1713,7 @@ async def test_step8_forget_failure_marks_run_warning(engine):
             "app.services.restic.restic_forget",
             return_value=(1, "", "disk full"),
         ),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1760,7 +1762,7 @@ async def test_step8_forget_failure_notification_names_retention(engine):
             "app.services.restic.restic_forget",
             return_value=(1, "", "repository is already locked"),
         ),
-        patch("app.services.backup_runner.send_notification") as mock_notify,
+        patch("app.services.run_notifications.send_notification") as mock_notify,
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1820,7 +1822,7 @@ async def test_step8_partial_backup_push_names_the_withheld_retention(engine):
             return_value=(3, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_forget", side_effect=fake_forget),
-        patch("app.services.backup_runner.send_notification") as mock_notify,
+        patch("app.services.run_notifications.send_notification") as mock_notify,
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1870,7 +1872,7 @@ async def test_step8_partial_backup_without_retention_reports_only_the_read_fail
             return_value=(3, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_forget", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification") as mock_notify,
+        patch("app.services.run_notifications.send_notification") as mock_notify,
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1908,7 +1910,7 @@ async def test_step8_clean_run_is_still_success(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_forget", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -1953,7 +1955,7 @@ async def test_step8_clean_backup_still_applies_retention(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_forget", side_effect=fake_forget),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -2000,7 +2002,7 @@ async def test_step9_snapshot_listing_cache_invalidated_after_successful_backup(
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -2040,7 +2042,7 @@ async def test_step10_success_status_and_duration(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -2075,7 +2077,7 @@ async def test_step10_check_status_skipped_when_check_disabled(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -2193,7 +2195,7 @@ async def testactive_jobs_cleared_after_completion(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -2263,7 +2265,9 @@ async def test_step3_notification_sent_on_start(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
+        patch(
+            "app.services.run_notifications.send_notification", side_effect=fake_notify
+        ),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -2300,7 +2304,9 @@ async def test_notification_skipped_when_topic_empty(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
+        patch(
+            "app.services.run_notifications.send_notification", side_effect=fake_notify
+        ),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -2576,7 +2582,7 @@ async def test_step6_source_path_uses_source_label(engine):
         patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -2610,7 +2616,7 @@ async def test_step6_source_subpath_appended_to_source_path(engine):
         patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -2647,7 +2653,7 @@ async def test_step6_repo_path_uses_destination_label(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -2698,7 +2704,9 @@ async def test_step11_failure_notification_sent(engine):
             "app.services.restic.restic_backup",
             return_value=(1, "", "fatal: disk full", None),
         ),
-        patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
+        patch(
+            "app.services.run_notifications.send_notification", side_effect=fake_notify
+        ),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -2744,7 +2752,9 @@ async def test_notify_on_success_false_skips_success_notification(engine):
             return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
+        patch(
+            "app.services.run_notifications.send_notification", side_effect=fake_notify
+        ),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -2793,7 +2803,9 @@ async def test_step11_warning_notification_sent(engine):
             return_value=(3, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
+        patch(
+            "app.services.run_notifications.send_notification", side_effect=fake_notify
+        ),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -2842,7 +2854,9 @@ async def test_notify_on_warning_false_skips_warning_notification(engine):
             return_value=(3, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
         ),
         patch("app.services.restic.restic_prune", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
+        patch(
+            "app.services.run_notifications.send_notification", side_effect=fake_notify
+        ),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -2887,7 +2901,9 @@ async def test_notify_on_failure_false_skips_failure_notification(engine):
             "app.services.restic.restic_backup",
             return_value=(1, "", "fatal: error", None),
         ),
-        patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
+        patch(
+            "app.services.run_notifications.send_notification", side_effect=fake_notify
+        ),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -3253,7 +3269,7 @@ async def test_run_backup_unhandled_exception_finalizes_run_to_failed(engine):
             "app.services.restic.restic_cat_config",
             side_effect=RuntimeError("simulated subprocess failure"),
         ),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -3313,7 +3329,7 @@ async def test_run_backup_start_notification_failure_does_not_crash_runner(engin
         ),
         patch("app.services.restic.restic_forget", return_value=(0, "", "")),
         patch(
-            "app.services.backup_runner.send_notification",
+            "app.services.run_notifications.send_notification",
             side_effect=RuntimeError("ntfy server down"),
         ),
     ):
@@ -3364,7 +3380,7 @@ async def test_run_backup_handles_cat_config_timeout(engine):
             return_value=(-1, "", "cat config timed out"),
         ),
         patch("app.services.restic.restic_init", side_effect=fake_init),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -3472,7 +3488,7 @@ async def test_run_backup_mount_check_fails(engine):
         patch("app.services.backup_runner.check_mount_file_exists", return_value=False),
         patch("app.services.restic.restic_cat_config", side_effect=fake_cat_config),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
-        patch("app.services.backup_runner.send_notification") as mock_notify,
+        patch("app.services.run_notifications.send_notification") as mock_notify,
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -3539,7 +3555,7 @@ async def test_run_backup_destination_mount_check_fails(engine):
         ),
         patch("app.services.restic.restic_cat_config", side_effect=fake_cat_config),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
-        patch("app.services.backup_runner.send_notification") as mock_notify,
+        patch("app.services.run_notifications.send_notification") as mock_notify,
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -3604,7 +3620,7 @@ async def test_run_backup_hung_mount_check_fails_run_promptly(engine):
         ),
         patch("app.core.fs.FS_PROBE_TIMEOUT_SECONDS", 0.2),
         patch("app.services.restic.restic_cat_config", side_effect=fake_cat_config),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
     elapsed = _time.monotonic() - start
@@ -3707,7 +3723,7 @@ async def test_run_backup_probes_sentinel_at_the_subpath_and_aborts(engine):
         ),
         patch("app.services.restic.restic_cat_config", side_effect=fake_cat_config),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
-        patch("app.services.backup_runner.send_notification") as mock_notify,
+        patch("app.services.run_notifications.send_notification") as mock_notify,
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -3762,7 +3778,7 @@ async def test_run_backup_proceeds_when_subpath_sentinel_is_present(engine):
         ),
         patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -3811,7 +3827,7 @@ async def test_run_backup_persists_progress_snapshots_while_running(engine):
     with (
         patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -3861,7 +3877,7 @@ async def test_run_backup_fails_on_parent_lookup_failure(engine):
             side_effect=ResticError("snapshots command timed out after 60 seconds"),
         ),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -4011,7 +4027,7 @@ async def _run_repo_missing_pipeline(engine, run_id):
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
         patch("app.services.restic.restic_unlock", return_value=(0, "", "")),
         patch("app.services.restic.restic_forget", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -4129,7 +4145,9 @@ async def test_step4_repo_missing_with_history_sends_failure_notification(engine
             return_value=(10, "", "Fatal: unable to open config file"),
         ),
         patch("app.services.restic.restic_init", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
+        patch(
+            "app.services.run_notifications.send_notification", side_effect=fake_notify
+        ),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -4181,7 +4199,7 @@ async def test_run_prune_destination_sentinel_missing_fails_and_notifies(engine)
             return_value=False,
         ),
         patch("app.services.restic.restic_prune", side_effect=fake_prune),
-        patch("app.services.backup_runner.send_notification") as mock_notify,
+        patch("app.services.run_notifications.send_notification") as mock_notify,
     ):
         await run_prune(JOB_ID, uuid.UUID(run_id))
 
@@ -4270,7 +4288,7 @@ async def test_run_check_destination_sentinel_missing_fails_and_notifies(engine)
             return_value=False,
         ),
         patch("app.services.restic.restic_check", side_effect=fake_check),
-        patch("app.services.backup_runner.send_notification") as mock_notify,
+        patch("app.services.run_notifications.send_notification") as mock_notify,
     ):
         await run_check(JOB_ID, uuid.UUID(run_id), "structural", None, None)
 
@@ -4363,7 +4381,7 @@ async def _run_with_backup_rc(engine, rc, *, stdout="", stderr="", summary=None)
         ),
         patch("app.services.restic.restic_forget", return_value=(0, "", "")),
         patch("app.services.restic.restic_unlock", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -4436,7 +4454,7 @@ async def test_forget_rc3_marks_retention_failed(engine):
             "app.services.restic.restic_forget",
             return_value=(3, "", "unable to remove snapshot abc123: stale lock"),
         ),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -4490,7 +4508,7 @@ async def test_backup_is_invoked_with_exactly_one_source_path(engine):
         patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
         patch("app.services.restic.restic_forget", return_value=(0, "", "")),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await run_backup(JOB_ID, uuid.UUID(run_id))
 
@@ -4633,7 +4651,9 @@ async def _run_check_with(engine, rc, *, notify_on_verification=True):
 
     with (
         patch("app.services.restic.restic_check", return_value=(rc, "", "boom")),
-        patch("app.services.backup_runner.send_notification", side_effect=fake_notify),
+        patch(
+            "app.services.run_notifications.send_notification", side_effect=fake_notify
+        ),
     ):
         await run_check(JOB_ID, uuid.UUID(run_id), "structural", None, None)
 
@@ -4696,213 +4716,3 @@ async def test_run_check_unhandled_exception_finalizes_run_to_failed(engine):
     assert run.finished_at is not None
     assert run.duration_seconds is not None
     assert run.prune_status == PruneStatus.skipped
-
-
-# ── Output parsers: robustness against whatever restic actually writes ────────
-#
-# These run over untrusted subprocess output on every run. A crash here happens
-# *after* the backup has already succeeded, so it would turn a good run into a
-# failed one — and a truncated final line is entirely normal when a process is
-# killed mid-write.
-
-
-@pytest.mark.parametrize(
-    "line",
-    (
-        "not json at all",
-        '{"unterminated',
-        "[]",
-        '"a bare string"',
-        "null",
-        "{}",
-    ),
-)
-def test_extract_failed_items_skips_unparseable_lines(line):
-    from app.services.backup_runner import _extract_failed_items
-
-    assert _extract_failed_items(line) == []
-
-
-def test_extract_failed_items_ignores_non_error_message_types():
-    """status and summary lines share the stream with error lines; only errors
-    name a failed item."""
-    from app.services.backup_runner import _extract_failed_items
-
-    stream = "\n".join(
-        [
-            json.dumps({"message_type": "status", "percent_done": 0.5}),
-            json.dumps({"message_type": "summary", "files_new": 1}),
-            json.dumps({"message_type": "verbose_status", "item": "/x"}),
-        ]
-    )
-    assert _extract_failed_items(stream) == []
-
-
-def test_extract_failed_items_skips_error_lines_with_neither_item_nor_message():
-    """An error line carrying no path and no text tells the operator nothing —
-    listing it as a failed item would inflate the count with blanks."""
-    from app.services.backup_runner import _extract_failed_items
-
-    stream = json.dumps({"message_type": "error", "error": {}, "item": ""})
-    assert _extract_failed_items(stream) == []
-
-
-def test_extract_failed_items_handles_a_non_dict_error_value():
-    """`error` is restic's field; if it is ever a bare string the parser must
-    still surface it rather than raising."""
-    from app.services.backup_runner import _extract_failed_items
-
-    stream = json.dumps(
-        {"message_type": "error", "error": "permission denied", "item": "/sources/x"}
-    )
-    items = _extract_failed_items(stream)
-    assert len(items) == 1
-    assert "permission denied" in items[0]
-
-
-def test_extract_failed_items_merges_phases_for_one_item():
-    """Scanner and archiver both report an unreadable directory. One entry, both
-    phases — counting events would report two failures for one folder."""
-    from app.services.backup_runner import _extract_failed_items
-
-    items = _extract_failed_items(RC3_STDERR_DOUBLE_REPORTED)
-    assert len(items) == 1
-
-
-def test_extract_failed_items_respects_the_parse_limit():
-    """A share that denies a million files must not write a million lines into
-    the run row — error_output is read on every run-detail fetch."""
-    from app.services.backup_runner import (
-        _FAILED_ITEM_PARSE_LIMIT,
-        _extract_failed_items,
-    )
-
-    stream = "\n".join(
-        json.dumps(
-            {
-                "message_type": "error",
-                "error": {"message": "permission denied"},
-                "item": f"/sources/x/file-{i}",
-                "during": "archival",
-            }
-        )
-        for i in range(_FAILED_ITEM_PARSE_LIMIT * 3)
-    )
-    assert len(_extract_failed_items(stream)) <= _FAILED_ITEM_PARSE_LIMIT
-
-
-def test_filter_backup_output_keeps_unparseable_lines():
-    """Non-JSON diagnostics are often the only clue about a weird run, so they
-    are kept verbatim rather than dropped with the progress noise."""
-    from app.services.backup_runner import _filter_backup_output
-
-    out = _filter_backup_output(
-        "\n".join(
-            [
-                "Fatal: something restic printed as plain text",
-                '{"truncated json',
-                json.dumps({"message_type": "status", "percent_done": 0.5}),
-                json.dumps({"message_type": "summary", "files_new": 1}),
-            ]
-        )
-    )
-
-    assert "Fatal: something restic printed as plain text" in out
-    assert '{"truncated json' in out
-    assert "status" not in out, "progress lines must be stripped"
-    assert "summary" in out, "the summary is the run's receipt"
-
-
-def test_format_backup_error_always_names_the_exit_code():
-    """Whatever else is missing, the operator gets the code to search for."""
-    from app.services.backup_runner import _format_backup_error
-
-    assert "exit code 130" in _format_backup_error(130, [], "")
-    assert "exit code 1" in _format_backup_error(1, [], "")
-
-
-def test_format_backup_error_includes_stderr_and_per_file_errors():
-    from app.services.backup_runner import _format_backup_error
-
-    out = _format_backup_error(1, ["/sources/x: denied"], "Fatal: repo locked")
-    assert "Fatal: repo locked" in out
-    assert "/sources/x: denied" in out
-    # Summary first, granular context after.
-    assert out.index("Fatal: repo locked") < out.index("/sources/x: denied")
-
-
-_ITEM_PREFIX = "/sources/Docs/"
-
-
-def _item_lines(rendered: str) -> list[str]:
-    """The per-item lines a formatter actually wrote."""
-    return [ln for ln in rendered.splitlines() if ln.startswith(_ITEM_PREFIX)]
-
-
-def _flood(count: int, line_chars: int = 0) -> list[str]:
-    pad = "d" * line_chars
-    return [f"{_ITEM_PREFIX}{pad}/f{i}: permission denied" for i in range(count)]
-
-
-def test_format_backup_error_caps_the_item_list():
-    """The rc!=0 path used to render every parsed item while the rc=3 path
-    stopped at 50, so one flood of unreadable files wrote a few KiB into the run
-    row if the backup half-succeeded and ~1.8 MiB if it failed outright.
-    `error_output` is loaded on every run-detail fetch; the bound has to hold
-    whichever way the run ended."""
-    from app.services.backup_runner import (
-        _MAX_REPORTED_FAILED_ITEMS,
-        _format_backup_error,
-    )
-
-    out = _format_backup_error(1, _flood(200), "Fatal: nope")
-
-    assert len(_item_lines(out)) == _MAX_REPORTED_FAILED_ITEMS
-    assert f"... and {200 - _MAX_REPORTED_FAILED_ITEMS}" in out, (
-        "the operator has to be told the list was truncated, and by how much"
-    )
-
-
-def test_both_error_formatters_cap_the_item_list_identically():
-    """The anti-drift guard. Two formatters each holding their own opinion about
-    the limit is exactly how the asymmetry appeared; they now share one
-    renderer, and this fails the moment either grows a second one."""
-    from app.services.backup_runner import (
-        _format_backup_error,
-        _format_partial_backup_error,
-    )
-
-    items = _flood(200)
-    assert _item_lines(_format_backup_error(1, items, "Fatal: nope")) == _item_lines(
-        _format_partial_backup_error(items, "Fatal: nope")
-    )
-
-
-def test_error_output_stays_small_enough_to_load_on_every_fetch():
-    """Ceiling check against the worst input the pipeline can hand these: the
-    parse limit's worth of items, each already truncated upstream to the
-    collector's per-line cap. Before the shared renderer the rc!=0 path came out
-    at ~1.8 MiB here."""
-    from app.services.backup_runner import (
-        _FAILED_ITEM_PARSE_LIMIT,
-        _MAX_REPORTED_FAILED_ITEMS,
-        _format_backup_error,
-        _format_partial_backup_error,
-    )
-    from app.services.restic import (
-        _MAX_RETAINED_LINE_CHARS,
-        _MAX_RETAINED_OUTPUT_CHARS,
-    )
-
-    items = _flood(_FAILED_ITEM_PARSE_LIMIT, line_chars=_MAX_RETAINED_LINE_CHARS)
-    stderr = "x" * _MAX_RETAINED_OUTPUT_CHARS
-
-    # What the row can hold: the capped item block, plus the stderr the restic
-    # collector already bounds, plus headlines.
-    ceiling = (
-        _MAX_REPORTED_FAILED_ITEMS * (_MAX_RETAINED_LINE_CHARS + 128)
-        + _MAX_RETAINED_OUTPUT_CHARS
-        + 1024
-    )
-    assert len(_format_backup_error(1, items, stderr)) <= ceiling
-    assert len(_format_partial_backup_error(items, stderr)) <= ceiling

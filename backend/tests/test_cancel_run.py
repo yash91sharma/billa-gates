@@ -223,7 +223,7 @@ async def test_run_backup_finalizes_as_canceled_when_flag_set(engine):
     and confirm the row ends up status=canceled, reason=user_canceled.
     """
     from app.db.models import BackupRun, RunReason, RunStatus
-    from app.services import backup_runner, process_registry
+    from app.services import backup_runner, process_registry, run_notifications
 
     job_id = await _create_job_row(engine)
     run_id = await _create_running_run(engine, job_id)
@@ -256,7 +256,7 @@ async def test_run_backup_finalizes_as_canceled_when_flag_set(engine):
             side_effect=fake_latest_snap,
         ),
         patch.object(backup_runner.restic, "restic_backup", side_effect=fake_backup),
-        patch.object(backup_runner, "_try_notify", new=AsyncMock()),
+        patch.object(run_notifications, "_try_notify", new=AsyncMock()),
     ):
         await backup_runner.run_backup(uuid.UUID(job_id), uuid.UUID(run_id))
 
@@ -273,7 +273,7 @@ async def test_run_backup_finalizes_as_canceled_when_flag_set(engine):
 async def test_run_backup_canceled_skips_forget_and_check(engine):
     """When cancel arrives during backup, the runner must not attempt forget,
     prune, or check afterwards (otherwise we'd corrupt half-baked state)."""
-    from app.services import backup_runner, process_registry
+    from app.services import backup_runner, process_registry, run_notifications
 
     job_id = await _create_job_row(engine, check_enabled=False)
     run_id = await _create_running_run(engine, job_id)
@@ -304,7 +304,7 @@ async def test_run_backup_canceled_skips_forget_and_check(engine):
         patch.object(backup_runner.restic, "restic_backup", side_effect=fake_backup),
         patch.object(backup_runner.restic, "restic_forget", forget_mock),
         patch.object(backup_runner.restic, "restic_check", check_mock),
-        patch.object(backup_runner, "_try_notify", new=AsyncMock()),
+        patch.object(run_notifications, "_try_notify", new=AsyncMock()),
     ):
         await backup_runner.run_backup(uuid.UUID(job_id), uuid.UUID(run_id))
 
@@ -315,7 +315,7 @@ async def test_run_backup_canceled_skips_forget_and_check(engine):
 async def test_run_backup_canceled_sends_canceled_notification(engine):
     """Canceling a run should produce an ntfy notification with a clear title."""
     from app.db.models import AppSettings
-    from app.services import backup_runner, process_registry
+    from app.services import backup_runner, process_registry, run_notifications
 
     # Configure ntfy on the settings row so notifications actually fire.
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -359,7 +359,7 @@ async def test_run_backup_canceled_sends_canceled_notification(engine):
             side_effect=fake_latest_snap,
         ),
         patch.object(backup_runner.restic, "restic_backup", side_effect=fake_backup),
-        patch.object(backup_runner, "_try_notify", notify_mock),
+        patch.object(run_notifications, "_try_notify", notify_mock),
     ):
         await backup_runner.run_backup(uuid.UUID(job_id), uuid.UUID(run_id))
 
@@ -584,7 +584,7 @@ async def test_run_prune_finalizes_as_canceled_when_flag_set(engine):
     """A canceled prune must be recorded as canceled/user_canceled — not as a
     failed run with the SIGTERM'd process's stderr as the error."""
     from app.db.models import BackupRun, RunKind, RunReason, RunStatus
-    from app.services import backup_runner, process_registry
+    from app.services import backup_runner, process_registry, run_notifications
 
     job_id = await _create_job_row(engine)
     run_id = await _create_running_kind_run(engine, job_id, RunKind.prune)
@@ -598,7 +598,7 @@ async def test_run_prune_finalizes_as_canceled_when_flag_set(engine):
 
     with (
         patch.object(backup_runner.restic, "restic_prune", side_effect=fake_prune),
-        patch.object(backup_runner, "_try_notify", new=AsyncMock()),
+        patch.object(run_notifications, "_try_notify", new=AsyncMock()),
     ):
         await backup_runner.run_prune(uuid.UUID(job_id), uuid.UUID(run_id))
 
@@ -618,7 +618,7 @@ async def test_run_prune_canceled_before_start_skips_restic(engine):
     """Cancel arriving before the subprocess spawns must prevent the (possibly
     hours-long) prune from running at all."""
     from app.db.models import BackupRun, RunKind, RunReason, RunStatus
-    from app.services import backup_runner, process_registry
+    from app.services import backup_runner, process_registry, run_notifications
 
     job_id = await _create_job_row(engine)
     run_id = await _create_running_kind_run(engine, job_id, RunKind.prune)
@@ -629,7 +629,7 @@ async def test_run_prune_canceled_before_start_skips_restic(engine):
     prune_mock = AsyncMock(return_value=(0, "", ""))
     with (
         patch.object(backup_runner.restic, "restic_prune", prune_mock),
-        patch.object(backup_runner, "_try_notify", new=AsyncMock()),
+        patch.object(run_notifications, "_try_notify", new=AsyncMock()),
     ):
         await backup_runner.run_prune(uuid.UUID(job_id), uuid.UUID(run_id))
 
@@ -646,7 +646,7 @@ async def test_run_check_finalizes_as_canceled_when_flag_set(engine):
     """A canceled integrity check must be recorded as canceled/user_canceled,
     with check_status left as skipped rather than failed."""
     from app.db.models import BackupRun, CheckStatus, RunKind, RunReason, RunStatus
-    from app.services import backup_runner, process_registry
+    from app.services import backup_runner, process_registry, run_notifications
 
     job_id = await _create_job_row(engine)
     run_id = await _create_running_kind_run(engine, job_id, RunKind.check)
@@ -659,7 +659,7 @@ async def test_run_check_finalizes_as_canceled_when_flag_set(engine):
 
     with (
         patch.object(backup_runner.restic, "restic_check", side_effect=fake_check),
-        patch.object(backup_runner, "_try_notify", new=AsyncMock()),
+        patch.object(run_notifications, "_try_notify", new=AsyncMock()),
     ):
         await backup_runner.run_check(
             uuid.UUID(job_id), uuid.UUID(run_id), "structural", None, None
@@ -680,7 +680,7 @@ async def test_run_check_canceled_sends_warning_notification(engine):
     """Cancel of a check mirrors the backup-cancel notification behavior:
     a notify_on_warning message naming the cancellation."""
     from app.db.models import AppSettings, RunKind
-    from app.services import backup_runner, process_registry
+    from app.services import backup_runner, process_registry, run_notifications
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as s:
@@ -706,7 +706,7 @@ async def test_run_check_canceled_sends_warning_notification(engine):
     notify_mock = AsyncMock()
     with (
         patch.object(backup_runner.restic, "restic_check", side_effect=fake_check),
-        patch.object(backup_runner, "_try_notify", notify_mock),
+        patch.object(run_notifications, "_try_notify", notify_mock),
     ):
         await backup_runner.run_check(
             uuid.UUID(job_id), uuid.UUID(run_id), "structural", None, None
@@ -805,7 +805,7 @@ async def _cancel_when_called(run_id: str, result):
 async def test_cancel_during_cat_config_stops_before_the_backup(engine):
     """Stop clicked while the init-check is talking to the repo: the backup must
     never be launched."""
-    from app.services import backup_runner, process_registry
+    from app.services import backup_runner, process_registry, run_notifications
 
     job_id = await _create_job_row(engine, check_enabled=False)
     run_id = await _create_running_run(engine, job_id)
@@ -832,7 +832,7 @@ async def test_cancel_during_cat_config_stops_before_the_backup(engine):
         ),
         patch.object(backup_runner.restic, "restic_backup", backup_mock),
         patch.object(backup_runner.restic, "restic_forget", forget_mock),
-        patch.object(backup_runner, "_try_notify", new=AsyncMock()),
+        patch.object(run_notifications, "_try_notify", new=AsyncMock()),
     ):
         await backup_runner.run_backup(uuid.UUID(job_id), uuid.UUID(run_id))
 
@@ -846,7 +846,7 @@ async def test_cancel_during_cat_config_stops_before_the_backup(engine):
 async def test_cancel_during_the_parent_lookup_stops_before_the_backup(engine):
     """The `--parent` lookup is a separate restic call before the backup; a Stop
     landing there must not fall through into a full backup."""
-    from app.services import backup_runner, process_registry
+    from app.services import backup_runner, process_registry, run_notifications
 
     job_id = await _create_job_row(engine, check_enabled=False)
     run_id = await _create_running_run(engine, job_id)
@@ -872,7 +872,7 @@ async def test_cancel_during_the_parent_lookup_stops_before_the_backup(engine):
         ),
         patch.object(backup_runner.restic, "restic_backup", backup_mock),
         patch.object(backup_runner.restic, "restic_forget", AsyncMock()),
-        patch.object(backup_runner, "_try_notify", new=AsyncMock()),
+        patch.object(run_notifications, "_try_notify", new=AsyncMock()),
     ):
         await backup_runner.run_backup(uuid.UUID(job_id), uuid.UUID(run_id))
 
@@ -884,7 +884,7 @@ async def test_cancel_during_the_parent_lookup_stops_before_the_backup(engine):
 async def test_cancel_during_forget_still_finalizes_as_canceled(engine):
     """The backup completed and the snapshot exists, but Stop arrived during
     retention. The run is canceled, and no further step (check) runs."""
-    from app.services import backup_runner, process_registry
+    from app.services import backup_runner, process_registry, run_notifications
 
     job_id = await _create_job_row(engine, check_enabled=True, retain_keep_last=7)
     run_id = await _create_running_run(engine, job_id)
@@ -916,7 +916,7 @@ async def test_cancel_during_forget_still_finalizes_as_canceled(engine):
             side_effect=await _cancel_when_called(run_id, (0, "", "")),
         ),
         patch.object(backup_runner.restic, "restic_check", check_mock),
-        patch.object(backup_runner, "_try_notify", new=AsyncMock()),
+        patch.object(run_notifications, "_try_notify", new=AsyncMock()),
     ):
         await backup_runner.run_backup(uuid.UUID(job_id), uuid.UUID(run_id))
 
@@ -928,7 +928,7 @@ async def test_cancel_during_forget_still_finalizes_as_canceled(engine):
 async def test_cancel_after_a_stale_lock_retry_does_not_start_a_second_backup(engine):
     """rc=11 triggers unlock-and-retry-once. If the user cancels in that window,
     the retry must not fire — otherwise Stop starts a *new* restic backup."""
-    from app.services import backup_runner, process_registry
+    from app.services import backup_runner, process_registry, run_notifications
 
     job_id = await _create_job_row(engine, check_enabled=False)
     run_id = await _create_running_run(engine, job_id)
@@ -964,7 +964,7 @@ async def test_cancel_after_a_stale_lock_retry_does_not_start_a_second_backup(en
         ),
         patch.object(backup_runner.restic, "restic_backup", side_effect=backup_rc11),
         patch.object(backup_runner.restic, "restic_forget", AsyncMock()),
-        patch.object(backup_runner, "_try_notify", new=AsyncMock()),
+        patch.object(run_notifications, "_try_notify", new=AsyncMock()),
     ):
         await backup_runner.run_backup(uuid.UUID(job_id), uuid.UUID(run_id))
 
@@ -977,7 +977,7 @@ async def test_unlock_exception_during_lock_retry_does_not_crash_the_run(engine)
     """The stale-lock recovery wraps `restic_unlock` in its own try/except: an
     exception there must be logged and the run failed cleanly, not propagated
     out of the pipeline where it would leave the row stuck at `running`."""
-    from app.services import backup_runner, process_registry
+    from app.services import backup_runner, process_registry, run_notifications
 
     job_id = await _create_job_row(engine, check_enabled=False)
     run_id = await _create_running_run(engine, job_id)
@@ -1011,7 +1011,7 @@ async def test_unlock_exception_during_lock_retry_does_not_crash_the_run(engine)
             backup_runner.restic, "restic_backup", side_effect=backup_side_effect
         ),
         patch.object(backup_runner.restic, "restic_forget", AsyncMock()),
-        patch.object(backup_runner, "_try_notify", new=AsyncMock()),
+        patch.object(run_notifications, "_try_notify", new=AsyncMock()),
     ):
         await backup_runner.run_backup(uuid.UUID(job_id), uuid.UUID(run_id))
 

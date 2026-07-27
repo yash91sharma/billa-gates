@@ -32,13 +32,13 @@ from typing import Any, Dict, List
 import pytest
 
 from app.services import repository
-from app.services.backup_runner import _extract_failed_items
 from app.services.restic import (
     _BackupOutputCollector,
     _format_progress,
     _newest_snapshot,
     _parse_snapshot_time,
 )
+from app.services.run_output import extract_failed_items
 from app.services.snapshot_listing import _normalize
 
 FIXTURES = Path(__file__).parent / "fixtures" / "restic_0_19_1"
@@ -127,7 +127,7 @@ def test_all_source_paths_missing_is_a_fatal_not_a_partial_backup():
     assert not [o for o in jsonl(stderr) if o.get("message_type") == "summary"]
 
 
-# ── The stream split that `_extract_failed_items` depends on ──────────────────
+# ── The stream split that `extract_failed_items` depends on ──────────────────
 
 
 def test_partial_backup_puts_error_lines_on_stderr_and_summary_on_stdout():
@@ -146,7 +146,7 @@ def test_partial_backup_puts_error_lines_on_stderr_and_summary_on_stdout():
 def test_extract_failed_items_parses_the_real_stderr():
     """Run the real parser over recorded bytes: it must name the path, and it
     must collapse the duplicate the scanner and archiver both report."""
-    items = _extract_failed_items(read("backup_rc3.stderr"), read("backup_rc3.stdout"))
+    items = extract_failed_items(read("backup_rc3.stderr"), read("backup_rc3.stdout"))
 
     assert len(items) == 1, f"duplicate scan/archival report not collapsed: {items}"
     assert "/sources/partial/secret" in items[0]
@@ -155,7 +155,7 @@ def test_extract_failed_items_parses_the_real_stderr():
 
 def test_recorded_error_line_shape_is_what_the_parser_expects():
     """If restic moved the path out of `item` or nested the message differently,
-    _extract_failed_items would silently yield nothing useful."""
+    extract_failed_items would silently yield nothing useful."""
     errors = [
         o for o in jsonl(read("backup_rc3.stderr")) if o["message_type"] == "error"
     ]
@@ -434,12 +434,12 @@ def test_hand_written_partial_backup_stderr_matches_the_recorded_shape(fixture_n
 
 
 def test_hand_written_rc3_fixture_is_parsed_the_same_way_as_the_recording():
-    """The fixture and the real capture must drive `_extract_failed_items` to the
+    """The fixture and the real capture must drive `extract_failed_items` to the
     same conclusion — one named item, deduplicated."""
     from tests.test_backup_runner import RC3_STDERR_DOUBLE_REPORTED
 
-    from_fixture = _extract_failed_items(RC3_STDERR_DOUBLE_REPORTED)
-    from_recording = _extract_failed_items(read("backup_rc3.stderr"))
+    from_fixture = extract_failed_items(RC3_STDERR_DOUBLE_REPORTED)
+    from_recording = extract_failed_items(read("backup_rc3.stderr"))
 
     assert len(from_fixture) == len(from_recording) == 1
     assert "permission denied" in from_fixture[0]

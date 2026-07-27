@@ -464,7 +464,7 @@ async def test_run_backup_uses_the_options_and_retention_the_preview_shows(engin
         patch("app.services.restic.restic_unlock", return_value=(0, "", "")),
         patch("app.services.restic.restic_backup", side_effect=fake_backup),
         patch("app.services.restic.restic_forget", side_effect=fake_forget),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await backup_runner.run_backup(job_id, uuid.UUID(run_id))
 
@@ -590,7 +590,7 @@ async def test_a_backup_run_spawns_exactly_the_commands_the_preview_lists(engine
     with (
         patch("app.services.restic.restic_latest_snapshot_id", REAL_LATEST_SNAPSHOT_ID),
         patch("asyncio.create_subprocess_exec", side_effect=_recording_spawn(recorded)),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await backup_runner.run_backup(job_uuid, uuid.UUID(run_id))
 
@@ -609,7 +609,7 @@ async def test_a_backup_run_without_retention_spawns_what_that_preview_lists(eng
     with (
         patch("app.services.restic.restic_latest_snapshot_id", REAL_LATEST_SNAPSHOT_ID),
         patch("asyncio.create_subprocess_exec", side_effect=_recording_spawn(recorded)),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await backup_runner.run_backup(job_uuid, uuid.UUID(run_id))
 
@@ -630,7 +630,7 @@ async def test_the_on_demand_actions_spawn_exactly_the_commands_the_preview_list
 
     with (
         patch("asyncio.create_subprocess_exec", side_effect=_recording_spawn(recorded)),
-        patch("app.services.backup_runner.send_notification"),
+        patch("app.services.run_notifications.send_notification"),
     ):
         await backup_runner.run_prune(
             job_uuid, uuid.UUID(await _seed_run(engine, job_uuid))
