@@ -359,6 +359,36 @@ describe('Jobs', () => {
       expect(screen.getByRole('form')).toBeInTheDocument()
     })
 
+    it('blocks the page with a working dialog while the create is in flight', async () => {
+      // POST /api/jobs validates both mount sentinels and runs `restic init`
+      // before it answers, so the click is followed by seconds of nothing.
+      // The page must say it is working — and stop accepting input — until
+      // the request settles.
+      const user = userEvent.setup()
+      let resolveCreate!: (job: BackupJob) => void
+      vi.mocked(api.createJob).mockReturnValue(
+        new Promise<BackupJob>((resolve) => {
+          resolveCreate = resolve
+        })
+      )
+      renderWithProviders(<Jobs />)
+      await waitFor(() => screen.getByRole('button', { name: /create.*job|new.*job/i }))
+      await user.click(screen.getByRole('button', { name: /create.*job|new.*job/i }))
+      const form = await screen.findByRole('form')
+      await user.type(within(form).getByLabelText(/name/i), 'Test Job')
+      const submit = within(form).getByRole('button', { name: /save|create|submit/i })
+      await user.click(submit)
+
+      const dialog = await screen.findByRole('dialog')
+      expect(dialog).toHaveTextContent(/creating/i)
+      expect(submit).toBeDisabled()
+      expect(within(form).getByLabelText(/name/i)).toBeDisabled()
+
+      resolveCreate(makeJob())
+      // The form closes on success, taking the indicator with it.
+      await waitFor(() => expect(screen.queryByRole('form')).not.toBeInTheDocument())
+    })
+
     it('populates source and destination dropdowns from the mounts API', async () => {
       const user = userEvent.setup()
       renderWithProviders(<Jobs />)

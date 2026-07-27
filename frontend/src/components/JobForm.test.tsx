@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { BackupJob } from '../lib/types'
 import JobForm from './JobForm'
@@ -490,6 +490,159 @@ describe('JobForm', () => {
         />
       )
       expect(screen.queryByText(/changing.*source/i)).not.toBeInTheDocument()
+    })
+  })
+
+  describe('submit in flight', () => {
+    // Creating a job is not instant: the backend checks both mount sentinels
+    // and runs `restic init` on the destination drive before it answers. With
+    // no busy state the page just sat there for those seconds, which reads as
+    // "my click did nothing" and invites a second click that would try to
+    // create the job twice.
+
+    function deferred() {
+      let resolve!: () => void
+      let reject!: (reason: unknown) => void
+      const promise = new Promise<void>((res, rej) => {
+        resolve = () => res()
+        reject = rej
+      })
+      return { promise, resolve, reject }
+    }
+
+    // The submit button is inside the region Radix hides from the
+    // accessibility tree while the modal is open, so it has to be looked up
+    // before the click (or with `hidden: true`) — which is itself the proof
+    // that the page behind the dialog is out of reach.
+    async function submitForm(onSubmit: () => Promise<void>, job?: BackupJob) {
+      const user = userEvent.setup()
+      render(
+        <JobForm job={job} onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />
+      )
+      if (!job) await user.type(screen.getByLabelText(/name/i), 'Test Job')
+      const submit = screen.getByRole('button', { name: /save|create|submit/i })
+      await user.click(submit)
+      return { user, submit }
+    }
+
+    it('shows a blocking dialog naming what the backend is doing', async () => {
+      const d = deferred()
+      await submitForm(vi.fn(() => d.promise))
+
+      const dialog = await screen.findByRole('dialog')
+      expect(dialog).toHaveTextContent(/creating/i)
+      // The wait is the repository being initialised on the destination —
+      // saying so is what turns a frozen page into an explained one.
+      expect(dialog).toHaveTextContent(/repositor/i)
+
+      d.resolve()
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    })
+
+    it('disables every field while the create is in flight', async () => {
+      // The payload was captured at submit, so anything typed afterwards is
+      // silently discarded — the form must not accept it in the first place.
+      const d = deferred()
+      await submitForm(vi.fn(() => d.promise))
+
+      await waitFor(() => expect(screen.getByLabelText(/^name/i)).toBeDisabled())
+      expect(screen.getByLabelText(/^source$/i)).toBeDisabled()
+      expect(screen.getByLabelText(/^tags/i)).toBeDisabled()
+
+      d.resolve()
+      await waitFor(() => expect(screen.getByLabelText(/^source$/i)).toBeEnabled())
+      expect(screen.getByLabelText(/^tags/i)).toBeEnabled()
+    })
+
+    it('cannot be dismissed while the create is still in flight', async () => {
+      // Closing it would hand back a page that still cannot do anything —
+      // the request is what has to finish, not the dialog.
+      const d = deferred()
+      const { user } = await submitForm(vi.fn(() => d.promise))
+
+      const dialog = await screen.findByRole('dialog')
+      expect(within(dialog).queryByRole('button', { name: /close/i })).not.toBeInTheDocument()
+      await user.keyboard('{Escape}')
+      expect(screen.getByRole('dialog')).toBeInTheDocument()
+
+      d.resolve()
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    })
+
+    it('disables the submit button and relabels it while the create is in flight', async () => {
+      const d = deferred()
+      const { submit } = await submitForm(vi.fn(() => d.promise))
+
+      await waitFor(() => expect(submit).toBeDisabled())
+      expect(submit).toHaveTextContent(/creating/i)
+
+      d.resolve()
+      await waitFor(() => expect(submit).toBeEnabled())
+      expect(submit).toHaveTextContent(/^Create$/)
+    })
+
+    it('marks the form busy for assistive tech while the create is in flight', async () => {
+      const d = deferred()
+      await submitForm(vi.fn(() => d.promise))
+
+      const form = screen.getByRole('form', { hidden: true })
+      await waitFor(() => expect(form).toHaveAttribute('aria-busy', 'true'))
+
+      d.resolve()
+      await waitFor(() => expect(form).toHaveAttribute('aria-busy', 'false'))
+    })
+
+    it('puts the page behind the dialog out of reach while the create is in flight', async () => {
+      const d = deferred()
+      const onSubmit = vi.fn(() => d.promise)
+      const { user, submit } = await submitForm(onSubmit)
+      await screen.findByRole('dialog')
+
+      // The modal turns off pointer events for everything behind it, so the
+      // second click that would create the job twice cannot even be
+      // delivered — the rejection here is the guarantee, not a test artifact.
+      await expect(user.click(submit)).rejects.toThrow(/pointer-events/i)
+      expect(onSubmit).toHaveBeenCalledTimes(1)
+
+      // The keyboard path (Enter inside a field) bypasses the button
+      // entirely, so handleSubmit keeps its own re-entrancy guard.
+      fireEvent.submit(screen.getByRole('form', { hidden: true }))
+      expect(onSubmit).toHaveBeenCalledTimes(1)
+
+      d.resolve()
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    })
+
+    it('clears the working state when the create fails so the user can retry', async () => {
+      const d = deferred()
+      const onSubmit = vi.fn(() => d.promise)
+      const { user } = await submitForm(onSubmit)
+
+      d.reject(Object.assign(new Error('boom'), { status: 422 }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+      await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
+      expect(onSubmit).toHaveBeenCalledTimes(2)
+    })
+
+    it('labels the in-flight state as saving when editing an existing job', async () => {
+      const d = deferred()
+      await submitForm(
+        vi.fn(() => d.promise),
+        baseJob
+      )
+
+      expect(await screen.findByRole('dialog')).toHaveTextContent(/saving/i)
+
+      d.resolve()
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    })
+
+    it('leaves no dialog and no disabled fields before anything is submitted', () => {
+      render(<JobForm onSubmit={vi.fn()} sourceMounts={['m']} destinationMounts={['d']} />)
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      expect(screen.getByRole('form')).toHaveAttribute('aria-busy', 'false')
+      expect(screen.getByLabelText(/^source$/i)).toBeEnabled()
     })
   })
 

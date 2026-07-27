@@ -366,6 +366,40 @@ test('Jobs - create form open', async () => {
   await page.screenshot({ path: `${OUT}/Jobs--create-form.png` })
 })
 
+test('Jobs - create in flight', async () => {
+  // POST /api/jobs runs `restic init` on the destination drive before it
+  // answers, so this state is on screen for seconds on every create. Held
+  // pending here to capture what the user actually sees while waiting:
+  // the modal, the dimmed/blurred page behind it, and the message.
+  vi.mocked(api.createJob).mockReturnValue(new Promise<BackupJob>(() => {}))
+  const result = renderPage('/jobs', <Jobs />)
+  cleanup = result.unmount
+  const user = userEvent.setup()
+  await waitFor(() => {
+    if (!result.container.querySelector('#job-name')) {
+      const open = Array.from(result.container.querySelectorAll('button')).find((b) =>
+        /create.*job|new.*job/i.test(b.textContent ?? '')
+      )
+      if (!open) throw new Error('create-job button not found')
+      open.click()
+      throw new Error('form not open yet')
+    }
+  })
+  await user.type(result.container.querySelector('#job-name') as HTMLInputElement, 'Photos Daily')
+
+  const form = result.container.querySelector('form') as HTMLFormElement
+  const submit = form.querySelector('button[type="submit"]') as HTMLButtonElement
+  await user.click(submit)
+
+  await waitFor(() => {
+    if (!document.querySelector('[role="dialog"]')) throw new Error('working dialog not shown yet')
+  })
+  // Let the overlay fade and the modal zoom in finish, or the shot catches a
+  // half-transparent dialog over an unblurred page.
+  await new Promise((r) => setTimeout(r, 300))
+  await page.screenshot({ path: `${OUT}/Jobs--create-in-flight.png` })
+})
+
 test('JobDetail - populated', async () => {
   const result = renderPage('/jobs/:id', <JobDetail />)
   cleanup = result.unmount
