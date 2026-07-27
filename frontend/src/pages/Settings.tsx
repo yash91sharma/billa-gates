@@ -63,6 +63,17 @@ const HELP: Record<string, FieldHelp> = {
     description:
       'Runs restic unlock at the start of every backup so a lock left behind by an abrupt termination (OOM, container restart) does not block all future runs.',
   },
+  renameOldLabel: {
+    label: 'Current label',
+    description:
+      'The mount label the jobs point at today. Only labels mounted right now are listed, so a drive that has already been unplugged does not appear here.',
+  },
+  renameNewLabel: {
+    label: 'New label',
+    description:
+      'The mount label those jobs should point at from now on. It has to be mounted under /destinations, and must be one folder name — no slashes.',
+    example: 'wd-4tb',
+  },
 }
 
 export default function Settings() {
@@ -90,6 +101,9 @@ export default function Settings() {
   const [newLabel, setNewLabel] = useState('')
   const [renameResult, setRenameResult] = useState<string | null>(null)
   const [renameError, setRenameError] = useState<string | null>(null)
+  // The long-form help is collapsed; the one line that stops the destructive
+  // misreading ("it moves my data") is rendered unconditionally above it.
+  const [renameHelpOpen, setRenameHelpOpen] = useState(false)
   // Delay ntfy form rendering so rename section is findable before ntfy labels appear
   const [ntfyVisible, setNtfyVisible] = useState(false)
 
@@ -390,17 +404,119 @@ export default function Settings() {
         )}
 
         <div>
-          <h2 className="text-lg font-semibold mb-3">Rename Destination</h2>
-          <div className="space-y-2">
+          <h2 className="text-lg font-semibold mb-1">Rename Destination</h2>
+          {/* The action's name reads like a filesystem operation, which it is
+              not — it only repoints job rows at another mount label. Anyone
+              who reads it the other way loses nothing on disk but breaks every
+              later run, so the correction is stated before the controls and
+              cannot be collapsed away. */}
+          <p className="text-sm text-muted-foreground max-w-prose">
+            Points jobs at a different mount label under /destinations. It rewrites the label stored
+            on each job and nothing on disk is touched — no folder is created, moved or copied for
+            you.
+          </p>
+          <button
+            type="button"
+            aria-expanded={renameHelpOpen}
+            aria-controls="rename-help"
+            onClick={() => setRenameHelpOpen((open) => !open)}
+            className="text-sm underline text-muted-foreground hover:text-foreground mt-1"
+          >
+            {renameHelpOpen ? 'Hide the details' : 'When should I use this?'}
+          </button>
+          {renameHelpOpen && (
+            <div
+              id="rename-help"
+              className="mt-2 mb-3 border rounded p-3 text-sm max-w-prose space-y-3 bg-muted/40"
+            >
+              <div>
+                <h3 className="font-semibold">What it does</h3>
+                <ul className="list-disc pl-5 space-y-1">
+                  <li>
+                    Rewrites the mount label stored on every job that points at the old one, so
+                    later runs read and write under the new one.
+                  </li>
+                  <li>
+                    Takes hold on each job&apos;s next run. Run history and snapshots already
+                    recorded stay exactly as they are.
+                  </li>
+                  <li>
+                    Covers every job on that mount at once — there is no per-job choice, and no way
+                    to move only some of them.
+                  </li>
+                </ul>
+              </div>
+              <div>
+                <h3 className="font-semibold">What it does not do</h3>
+                <ul className="list-disc pl-5 space-y-1">
+                  <li>
+                    It creates, moves and renames nothing on disk. The old folder is left where it
+                    is, untouched.
+                  </li>
+                  <li>
+                    It copies no repository data. If the backups live somewhere else now, you move
+                    the repository folder over <em>yourself</em>, before pressing the button —{' '}
+                    <code>/destinations/&lt;old&gt;/&lt;job name&gt;</code> →{' '}
+                    <code>/destinations/&lt;new&gt;/&lt;job name&gt;</code>.
+                  </li>
+                  <li>
+                    It does not confirm a repository is really there. That surfaces on the next run,
+                    which stops at the repository step rather than starting a fresh empty repository
+                    — your snapshots are never silently discarded.
+                  </li>
+                  <li>
+                    It changes neither a job&apos;s name nor its repository password. Those two stay
+                    fixed for the life of the job.
+                  </li>
+                </ul>
+              </div>
+              <div>
+                <h3 className="font-semibold">When to use it</h3>
+                <ul className="list-disc pl-5 space-y-1">
+                  <li>
+                    The mount label itself changed — the drive is now mapped to /destinations/wd-4tb
+                    where it used to be /destinations/main.
+                  </li>
+                  <li>
+                    The repositories moved to another drive, which is mounted under a label of its
+                    own.
+                  </li>
+                  <li>You simply want a tidier label than the one you picked back then.</li>
+                  <li>
+                    In all three cases this is the only route: a destination addresses the
+                    repository, so the job edit form keeps it fixed once the job is created.
+                  </li>
+                </ul>
+              </div>
+              <div>
+                <h3 className="font-semibold">Before you use it</h3>
+                <ol className="list-decimal pl-5 space-y-1">
+                  <li>
+                    Mount the new drive or folder at /destinations/&lt;new label&gt;. It has to be
+                    there already, or the request is turned down.
+                  </li>
+                  <li>
+                    Put the <code>.billa_gates_check</code> marker file at its root, or later runs
+                    stop at the mount probe.
+                  </li>
+                  <li>Bring each job&apos;s repository folder across, as described above.</li>
+                  <li>
+                    Pick a moment when no job on that mount is running — the request is turned down
+                    while one is in flight.
+                  </li>
+                </ol>
+              </div>
+            </div>
+          )}
+          <div className="space-y-2 mt-3">
             {destinations !== undefined && (
               <div>
-                <label htmlFor="old-label" className="block text-sm font-medium">
-                  Current label
-                </label>
+                <FieldLabel htmlFor="old-label" help={HELP.renameOldLabel} />
                 <select
                   id="old-label"
                   value={oldLabel}
                   onChange={(e) => setOldLabel(e.target.value)}
+                  aria-describedby={helpId('old-label')}
                   className="border rounded px-2 py-1 text-sm"
                 >
                   <option value="">— select —</option>
@@ -413,14 +529,13 @@ export default function Settings() {
               </div>
             )}
             <div>
-              <label htmlFor="new-label" className="block text-sm font-medium">
-                New label
-              </label>
+              <FieldLabel htmlFor="new-label" help={HELP.renameNewLabel} />
               <input
                 id="new-label"
                 type="text"
                 value={newLabel}
                 onChange={(e) => setNewLabel(e.target.value)}
+                aria-describedby={helpId('new-label')}
                 className="border rounded px-2 py-1 text-sm"
               />
             </div>

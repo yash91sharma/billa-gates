@@ -311,6 +311,97 @@ describe('Settings', () => {
     })
   })
 
+  describe('rename destination help', () => {
+    // The action's name reads like a filesystem rename, which it is not: it
+    // only repoints job rows. Someone who believes it moves their repository
+    // fires it and every later run stops at the repository step. The page has
+    // to say so before the click, not after.
+    it('always shows that nothing on disk is touched', async () => {
+      renderWithProviders(<Settings />)
+      await waitFor(() =>
+        expect(screen.getByText(/nothing on disk is touched/i)).toBeInTheDocument()
+      )
+    })
+
+    it('keeps the long-form help collapsed behind a toggle', async () => {
+      renderWithProviders(<Settings />)
+      const toggle = await screen.findByRole('button', { name: /when should i use this/i })
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      expect(screen.queryByRole('heading', { name: 'What it does' })).not.toBeInTheDocument()
+    })
+
+    it('reveals what it does, what it does not do, and when to use it', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<Settings />)
+      const toggle = await screen.findByRole('button', { name: /when should i use this/i })
+      await user.click(toggle)
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      expect(screen.getByRole('heading', { name: 'What it does' })).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: 'What it does not do' })).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: 'When to use it' })).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: 'Before you use it' })).toBeInTheDocument()
+    })
+
+    it('says the repository data has to be moved by hand', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<Settings />)
+      await user.click(await screen.findByRole('button', { name: /when should i use this/i }))
+      expect(screen.getByText(/move the repository folder/i)).toBeInTheDocument()
+      expect(screen.getByText(/yourself/i)).toBeInTheDocument()
+    })
+
+    it('says the marker file must be present at the new mount', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<Settings />)
+      await user.click(await screen.findByRole('button', { name: /when should i use this/i }))
+      expect(screen.getByText(/\.billa_gates_check/)).toBeInTheDocument()
+    })
+
+    it('says the job form cannot change a destination, which is why this exists', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<Settings />)
+      await user.click(await screen.findByRole('button', { name: /when should i use this/i }))
+      expect(screen.getByText(/job edit form/i)).toBeInTheDocument()
+    })
+
+    it('collapses again when the toggle is clicked a second time', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<Settings />)
+      const toggle = await screen.findByRole('button', { name: /when should i use this/i })
+      await user.click(toggle)
+      await user.click(toggle)
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      expect(screen.queryByRole('heading', { name: 'What it does' })).not.toBeInTheDocument()
+    })
+
+    it('does not add a second control that reads as the Rename button', async () => {
+      // The disclosure sits next to the Rename button; if its name matched
+      // /rename/i every rename test would break on an ambiguous query.
+      renderWithProviders(<Settings />)
+      await waitFor(() => screen.getByRole('button', { name: /rename/i }))
+      expect(screen.getAllByRole('button', { name: /rename/i })).toHaveLength(1)
+    })
+
+    it('links the current-label field to help text via aria-describedby', async () => {
+      renderWithProviders(<Settings />)
+      // Exact labels here on purpose: the loose patterns the older rename
+      // tests use ("to") also match the ntfy Auth Token label once that form
+      // renders.
+      const select = await screen.findByLabelText('Current label')
+      const id = select.getAttribute('aria-describedby')
+      expect(id).toBeTruthy()
+      expect(document.getElementById(id!)?.textContent).toMatch(/mount|label/i)
+    })
+
+    it('links the new-label field to help text via aria-describedby', async () => {
+      renderWithProviders(<Settings />)
+      const input = await screen.findByLabelText('New label')
+      const id = input.getAttribute('aria-describedby')
+      expect(id).toBeTruthy()
+      expect(document.getElementById(id!)?.textContent).toMatch(/mount|label/i)
+    })
+  })
+
   describe('default job timeout', () => {
     it('shows default_job_timeout_hours field', async () => {
       renderWithProviders(<Settings />)
