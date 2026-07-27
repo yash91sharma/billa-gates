@@ -192,9 +192,47 @@ describe('RunDetail', () => {
         })
       )
       renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
-      await waitFor(() =>
-        expect(screen.getByText(/locked|repository.*lock|unlock/i)).toBeInTheDocument()
+      // Matched on the callout's own wording: the raw error is now rendered
+      // too (it always is), so a loose /locked/ query hits both elements.
+      await waitFor(() => expect(screen.getByText(/use the unlock button/i)).toBeInTheDocument())
+    })
+
+    // The callout used to *replace* the error output, gated on a bare
+    // `.includes('locked')`. Any failure whose text merely contains that
+    // substring — "connection blocked", a path under a folder named "locked" —
+    // was swapped for advice about a lock that was never taken, and the real
+    // error was rendered nowhere: for mount-check and init-check failures
+    // `backup_output` is empty, so this <pre> is the only place it appears.
+    it('renders the real error, with no lock callout, when the text merely contains "locked"', async () => {
+      vi.mocked(api.getRun).mockResolvedValue(
+        makeRun({
+          status: 'failed',
+          error_output: 'Fatal: connection blocked by firewall while reaching /destinations/main',
+        })
       )
+      renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
+
+      await waitFor(() =>
+        expect(screen.getByText(/connection blocked by firewall/i)).toBeInTheDocument()
+      )
+      expect(screen.queryByText(/use the unlock button/i)).not.toBeInTheDocument()
+    })
+
+    it('shows the callout alongside the error text on a genuine lock failure', async () => {
+      vi.mocked(api.getRun).mockResolvedValue(
+        makeRun({
+          status: 'failed',
+          error_output:
+            'Repository is locked and could not be unlocked: unable to create lock in ' +
+            'backend: repository is already locked exclusively by PID 1234',
+        })
+      )
+      renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
+
+      // The hint says what to do; the raw text is the evidence. Showing one
+      // instead of the other is what made this unactionable.
+      await waitFor(() => expect(screen.getByText(/use the unlock button/i)).toBeInTheDocument())
+      expect(screen.getByText(/locked exclusively by PID 1234/i)).toBeInTheDocument()
     })
   })
 

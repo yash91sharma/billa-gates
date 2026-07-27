@@ -5,6 +5,20 @@ import * as api from '../lib/api'
 import type { BackupRun } from '../lib/types'
 import { formatBytes } from '../lib/utils'
 
+// Restic's own lock failures, plus the sentence the runner writes on restic
+// exit code 11 ("Repository is locked and could not be unlocked: …").
+//
+// Deliberately narrow. This used to be a bare `.includes('locked')`, which
+// matches "connection blocked", a path under a folder named `locked/`, and
+// anything else containing those seven letters — and because the callout
+// *replaced* the error output, those runs showed advice about a lock nobody
+// took and hid the actual failure completely. The callout is now additive, so
+// the worst a miss can do is drop a hint; the error itself is always rendered.
+//
+// No `g` flag: a global regex keeps `lastIndex` between `.test()` calls and
+// would match every other render.
+const LOCKED_REPO_RE = /repository is (?:already )?locked|unable to create lock/i
+
 function shouldPoll(run: BackupRun): boolean {
   return run.status === 'running' || run.check_status === null
 }
@@ -110,7 +124,7 @@ export default function RunDetail() {
         </div>
       )}
 
-      {run.error_output?.includes('locked') && (
+      {run.error_output && LOCKED_REPO_RE.test(run.error_output) && (
         <div className="bg-warning/15 border border-warning/40 rounded-sm p-3 text-sm">
           The repository is locked. Use the unlock button to remove the lock.
         </div>
@@ -134,7 +148,11 @@ export default function RunDetail() {
         </pre>
       )}
 
-      {run.error_output && !run.error_output.includes('locked') && (
+      {/* Always rendered. The callout above is a hint, not a replacement: it
+          says what to do, this says what actually happened, and for a
+          mount-check or init-check failure there is no other place the text
+          appears (backup_output is empty on those runs). */}
+      {run.error_output && (
         <pre className="bg-destructive/10 text-destructive rounded-sm p-3 text-xs overflow-auto max-h-64">
           {run.error_output}
         </pre>
