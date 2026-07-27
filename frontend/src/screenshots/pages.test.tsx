@@ -13,7 +13,14 @@ import { afterEach, beforeEach, test, vi } from 'vitest'
 
 import Layout from '../components/Layout'
 import * as api from '../lib/api'
-import type { AppSettings, BackupJob, BackupRun, HealthStatus, Snapshot } from '../lib/types'
+import type {
+  AppSettings,
+  BackupJob,
+  BackupRun,
+  HealthStatus,
+  JobCommand,
+  Snapshot,
+} from '../lib/types'
 import Dashboard from '../pages/Dashboard'
 import JobDetail from '../pages/JobDetail'
 import Jobs from '../pages/Jobs'
@@ -116,6 +123,123 @@ const snapshot: Snapshot = {
   size_bytes: 1_073_741_824,
 }
 
+// The restic command preview, exactly as GET /api/jobs/{id}/commands returns
+// it — the page renders the server's strings verbatim.
+const resticEnv = {
+  RESTIC_REPOSITORY: '/destinations/main/Documents Backup',
+  RESTIC_PASSWORD: "<this job's repository password>",
+  RESTIC_CACHE_DIR: '/app/data/restic-cache',
+}
+
+const jobCommands: JobCommand[] = [
+  {
+    step: 'verify_repository',
+    title: 'Verify the repository',
+    description:
+      'Reads the repository config to prove the destination is reachable and the stored password opens it.',
+    group: 'backup_run',
+    runs: true,
+    condition: null,
+    env: resticEnv,
+    argv: ['restic', 'cat', 'config'],
+    command: 'restic cat config',
+  },
+  {
+    step: 'unlock',
+    title: 'Clear stale locks',
+    description: 'Removes lock files left behind by a run that was killed mid-write.',
+    group: 'backup_run',
+    runs: true,
+    condition: 'Runs on every backup because “Auto unlock” is on in Settings.',
+    env: resticEnv,
+    argv: ['restic', 'unlock'],
+    command: 'restic unlock',
+  },
+  {
+    step: 'backup',
+    title: 'Back up the source',
+    description:
+      'The backup itself: reads /sources/documents and writes a new snapshot to the repository.',
+    group: 'backup_run',
+    runs: true,
+    condition:
+      '<id-of-latest-snapshot> is resolved by the previous command; on the first backup --parent is left off.',
+    env: resticEnv,
+    argv: [],
+    command:
+      "restic backup --host billa-gates --parent '<id-of-latest-snapshot>' --exclude '*.tmp' --exclude-caches --compression auto --json /sources/documents",
+  },
+  {
+    step: 'retention',
+    title: 'Apply the retention policy',
+    description: 'Applies the retention policy by dropping snapshot references.',
+    group: 'backup_run',
+    runs: true,
+    condition: 'Runs after a successful backup only.',
+    env: resticEnv,
+    argv: [],
+    command: "restic forget --group-by '' --keep-last 10 --keep-daily 7 --keep-monthly 12",
+  },
+  {
+    step: 'prune',
+    title: 'Prune Old Files',
+    description:
+      'Deletes the data behind forgotten snapshots. This is the only thing that frees space on the destination drive.',
+    group: 'on_demand',
+    runs: true,
+    condition: 'Runs when you click “Prune Old Files”. Never scheduled.',
+    env: resticEnv,
+    argv: [],
+    command: 'restic prune',
+  },
+  {
+    step: 'check_structural',
+    title: 'Integrity Check — structural',
+    description: "Verifies that the repository's metadata is complete and consistent.",
+    group: 'on_demand',
+    runs: true,
+    condition:
+      "Runs when you click “Integrity Check” and leave the mode on Structural (the dialog's default).",
+    env: resticEnv,
+    argv: [],
+    command: 'restic check',
+  },
+  {
+    step: 'check_subset',
+    title: 'Integrity Check — subset',
+    description: 'Structural verification plus a re-read of a percentage of the pack data.',
+    group: 'on_demand',
+    runs: true,
+    condition:
+      'Runs when you pick Subset in the Integrity Check dialog; <percent> is the percentage you enter there.',
+    env: resticEnv,
+    argv: [],
+    command: 'restic check --read-data-subset=<percent>%',
+  },
+  {
+    step: 'check_full',
+    title: 'Integrity Check — full',
+    description: 'Structural verification plus a re-read of every pack file in the repository.',
+    group: 'on_demand',
+    runs: true,
+    condition: 'Runs when you pick Full in the Integrity Check dialog.',
+    env: resticEnv,
+    argv: [],
+    command: 'restic check --read-data',
+  },
+  {
+    step: 'unlock_manual',
+    title: 'Unlock',
+    description: "Removes stale restic locks from this job's repository.",
+    group: 'on_demand',
+    runs: true,
+    condition: 'Runs when you click “Unlock”.',
+    env: resticEnv,
+    argv: [],
+    command: 'restic unlock',
+  },
+]
+
 const settings: AppSettings = {
   id: 1,
   ntfy_server_url: 'https://ntfy.sh',
@@ -146,6 +270,7 @@ beforeEach(() => {
   vi.mocked(api.getJob).mockResolvedValue(job)
   vi.mocked(api.getJobRuns).mockResolvedValue([run])
   vi.mocked(api.getJobSnapshots).mockResolvedValue([snapshot])
+  vi.mocked(api.getJobCommands).mockResolvedValue(jobCommands)
   vi.mocked(api.getRecentRuns).mockResolvedValue([run])
   vi.mocked(api.getRun).mockResolvedValue(run)
   vi.mocked(api.getHealth).mockResolvedValue(health)
@@ -250,6 +375,30 @@ test('JobDetail - populated', async () => {
     }
   })
   await page.screenshot({ path: `${OUT}/JobDetail.png` })
+})
+
+test('JobDetail - commands tab', async () => {
+  // Taller than the shared 900px viewport: the tab lists the backup pipeline
+  // *and* the button-triggered commands, and a clipped shot would hide the
+  // separation that is the point of the layout.
+  await page.viewport(1280, 1900)
+  const result = renderPage('/jobs/:id', <JobDetail />)
+  cleanup = result.unmount
+  await waitFor(() => {
+    if (!result.container.textContent?.includes('Documents Backup')) {
+      throw new Error('job detail not ready')
+    }
+  })
+  const commandsTab = Array.from(result.container.querySelectorAll('[role="tab"]')).find(
+    (t) => t.textContent?.trim() === 'Commands'
+  ) as HTMLElement
+  await userEvent.click(commandsTab)
+  await waitFor(() => {
+    if (!result.container.textContent?.includes('restic cat config')) {
+      throw new Error('commands not ready')
+    }
+  })
+  await page.screenshot({ path: `${OUT}/JobDetail-commands.png` })
 })
 
 test('RunDetail - success', async () => {

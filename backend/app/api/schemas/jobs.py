@@ -412,6 +412,30 @@ class JobResponse(BaseModel):
     last_run: Optional[RunSummarySchema] = None
 
 
+class JobCommandResponse(BaseModel):
+    """One restic command a backup run of this job issues.
+
+    Assembled by app/services/job_commands.py from the same builders the
+    runner execs, so the page and the pipeline cannot disagree. `command` is
+    None when the job's configuration turns the step off entirely (no
+    retention policy, for instance) — the UI must then say the step does not
+    run rather than print a command that never executes.
+    """
+
+    step: str
+    title: str
+    description: str
+    # "backup_run" (issued by a backup run itself) or "on_demand" (issued only
+    # when the operator clicks Prune / Integrity Check / Unlock). The UI must
+    # keep the two apart — nothing in the second group ever runs on a schedule.
+    group: str
+    runs: bool
+    condition: Optional[str] = None
+    env: dict[str, str]
+    argv: List[str]
+    command: Optional[str] = None
+
+
 class JobCheckRequest(BaseModel):
     """Payload to trigger a manual integrity check."""
 

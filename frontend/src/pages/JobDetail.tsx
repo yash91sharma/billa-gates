@@ -6,7 +6,7 @@ import JobForm from '../components/JobForm'
 import RunStatusBadge from '../components/RunStatusBadge'
 import TriggeredByIcon from '../components/TriggeredByIcon'
 import * as api from '../lib/api'
-import type { BackupRun } from '../lib/types'
+import type { BackupRun, JobCommand } from '../lib/types'
 import { formatBytes, parseApiError, type ConflictingJob } from '../lib/utils'
 import {
   Dialog,
@@ -17,7 +17,7 @@ import {
 } from '../components/ui/dialog'
 import { TooltipProvider } from '../components/ui/tooltip'
 
-type Tab = 'runs' | 'snapshots' | 'settings'
+type Tab = 'runs' | 'snapshots' | 'commands' | 'settings'
 
 // Hover/focus help for the header actions. Each one says what the action does
 // *and* what it changes for this job's repository — the labels alone don't
@@ -43,6 +43,49 @@ const ACTION_HELP = {
 
 function shouldPoll(runs: BackupRun[]): boolean {
   return runs.some((r) => r.status === 'running' || r.check_status === null)
+}
+
+/** Renders the server's command strings verbatim.
+ *
+ * Nothing here re-assembles a command line from job fields: the whole value of
+ * this section is that it cannot disagree with the runner, and a second
+ * assembly site in the browser would break that on the first flag added.
+ */
+function CommandList({ commands }: { commands: JobCommand[] }) {
+  return (
+    <ol className="space-y-4">
+      {commands.map((c) => (
+        <li key={c.step} className="space-y-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h3 className="text-sm font-semibold">{c.title}</h3>
+            {!c.runs && (
+              // A step the job's own configuration turns off. Saying so beats
+              // printing a command line that never executes.
+              <span className="bg-muted text-muted-foreground rounded-sm px-2 py-0.5 text-xs">
+                does not run
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground">{c.description}</p>
+          {c.command === null ? (
+            <p className="text-xs text-muted-foreground italic">{c.condition}</p>
+          ) : (
+            <>
+              <pre className="bg-muted rounded-sm p-3 text-xs overflow-x-auto">
+                {/* The environment the subprocess is given. The password is a
+                  label, not the value — the API never returns it. */}
+                {Object.entries(c.env).map(([k, v]) => (
+                  <span key={k} className="block text-muted-foreground">{`${k}=${v}`}</span>
+                ))}
+                <code className="block">{c.command}</code>
+              </pre>
+              {c.condition && <p className="text-xs text-muted-foreground italic">{c.condition}</p>}
+            </>
+          )}
+        </li>
+      ))}
+    </ol>
+  )
 }
 
 export default function JobDetail() {
@@ -78,6 +121,14 @@ export default function JobDetail() {
   const { data: snapshots, error: snapshotsError } = useQuery({
     queryKey: ['jobSnapshots', id],
     queryFn: () => api.getJobSnapshots(id ?? ''),
+  })
+
+  // The exact restic commands a run of this job issues, rendered by the
+  // backend from the same builders the runner execs. Re-fetched (never
+  // re-derived here) so an edit is reflected the moment it is saved.
+  const { data: commands, error: commandsError } = useQuery({
+    queryKey: ['jobCommands', id],
+    queryFn: () => api.getJobCommands(id ?? ''),
   })
 
   // Mounts feed the source/destination dropdowns in the edit form. Fetched
@@ -117,6 +168,9 @@ export default function JobDetail() {
 
   // Kept clickable while already editing so the form can still be closed.
   const editDisabled = !!activeRun && !isEditing
+
+  const backupRunCommands = (commands ?? []).filter((c) => c.group === 'backup_run')
+  const onDemandCommands = (commands ?? []).filter((c) => c.group === 'on_demand')
 
   async function handleRunNow() {
     if (!job) return
@@ -319,6 +373,10 @@ export default function JobDetail() {
                   await api.updateJob(job.id, data)
                   // Pull a fresh copy so the header + tabs reflect the change.
                   await queryClient.invalidateQueries({ queryKey: ['job', id] })
+                  // The command preview is built from the job's own fields, so
+                  // a stale cache here would keep showing the old excludes and
+                  // retention — authoritative-looking and wrong.
+                  await queryClient.invalidateQueries({ queryKey: ['jobCommands', id] })
                   setIsEditing(false)
                 } catch (err: unknown) {
                   // The duplicate-job 409 nests an object in detail; parseApiError
@@ -353,6 +411,14 @@ export default function JobDetail() {
             className={`px-3 py-1 text-sm ${tab === 'snapshots' ? 'border-b-2 border-primary text-primary font-medium' : ''}`}
           >
             Snapshots
+          </button>
+          <button
+            role="tab"
+            aria-selected={tab === 'commands'}
+            onClick={() => setTab('commands')}
+            className={`px-3 py-1 text-sm ${tab === 'commands' ? 'border-b-2 border-primary text-primary font-medium' : ''}`}
+          >
+            Commands
           </button>
           <button
             role="tab"
@@ -463,6 +529,55 @@ export default function JobDetail() {
                   </li>
                 ))}
               </ul>
+            )}
+          </div>
+        )}
+
+        {tab === 'commands' && (
+          <div className="space-y-6">
+            <p className="text-xs text-muted-foreground">
+              The exact restic commands this job causes. They are generated by the same code that
+              runs them and are rebuilt from this job's current settings, so editing the job changes
+              what you see here.
+            </p>
+            {commandsError ? (
+              <div className="bg-warning/15 border border-warning/40 rounded-sm p-3 text-sm space-y-1">
+                <p>
+                  <strong>Could not load the commands for this job.</strong>
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {parseApiError(commandsError).message ?? 'The request failed.'}
+                </p>
+              </div>
+            ) : (
+              <>
+                <section aria-labelledby="commands-backup-run" className="space-y-3">
+                  <h2 id="commands-backup-run" className="text-base font-semibold">
+                    Backup run
+                  </h2>
+                  <p className="text-xs text-muted-foreground">
+                    What one backup run issues, in the order the runner issues them — this is what
+                    the schedule does, unattended.
+                  </p>
+                  <CommandList commands={backupRunCommands} />
+                </section>
+
+                {/* Kept visibly apart from the pipeline above: a backup and a
+                  button click are different promises, and listing `restic
+                  prune` among the backup steps would tell an operator their
+                  schedule reclaims disk space, which it never does. */}
+                <section aria-labelledby="commands-on-demand" className="space-y-3">
+                  <h2 id="commands-on-demand" className="text-base font-semibold">
+                    Only when you click a button
+                  </h2>
+                  <p className="text-xs text-muted-foreground">
+                    These are <strong>not part of a backup</strong> and they{' '}
+                    <strong>never run on a schedule</strong>. Each one happens only when you use the
+                    matching action at the top of this page.
+                  </p>
+                  <CommandList commands={onDemandCommands} />
+                </section>
+              </>
             )}
           </div>
         )}

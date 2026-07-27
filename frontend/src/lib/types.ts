@@ -91,6 +91,30 @@ export interface BackupRun {
   job_name?: string
 }
 
+/** One restic command a backup run of a job issues.
+ *
+ * Rendered server-side (app/services/job_commands.py) from the same builders
+ * the runner execs — never re-assembled in the browser, or the page would
+ * become a second source of truth and drift from what actually runs.
+ * `command` is null when the job's configuration turns the step off entirely
+ * (no retention policy, for instance); `condition` says when a step applies.
+ */
+export interface JobCommand {
+  step: string
+  title: string
+  description: string
+  /** `backup_run` — issued by a backup run itself, scheduled or manual.
+   *  `on_demand` — issued only when the operator clicks Prune, Integrity
+   *  Check or Unlock. The page must keep the two visibly apart: nothing in
+   *  the second group ever happens on a schedule. */
+  group: 'backup_run' | 'on_demand'
+  runs: boolean
+  condition: string | null
+  env: Record<string, string>
+  argv: string[]
+  command: string | null
+}
+
 export interface Snapshot {
   snapshot_id: string
   snapshot_time: string

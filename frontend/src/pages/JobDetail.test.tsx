@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import * as api from '../lib/api'
-import type { BackupJob, BackupRun, Snapshot } from '../lib/types'
+import type { BackupJob, BackupRun, JobCommand, Snapshot } from '../lib/types'
 import { renderWithProviders } from '../test/utils'
 import JobDetail from './JobDetail'
 
@@ -90,8 +90,79 @@ const makeSnapshot = (overrides: Partial<Snapshot> = {}): Snapshot => ({
   ...overrides,
 })
 
+// Shaped exactly like GET /api/jobs/{id}/commands: the backend renders these
+// from the same builders the runner execs, so the page's only job is to show
+// them verbatim.
+const RESTIC_ENV = {
+  RESTIC_REPOSITORY: '/destinations/main/My Documents',
+  RESTIC_PASSWORD: "<this job's repository password>",
+  RESTIC_CACHE_DIR: '/app/data/restic-cache',
+}
+
+const makeCommands = (overrides: Partial<JobCommand>[] = []): JobCommand[] => {
+  const base: JobCommand[] = [
+    {
+      step: 'verify_repository',
+      title: 'Verify the repository',
+      description: 'Reads the repository config to prove the destination is reachable.',
+      group: 'backup_run',
+      runs: true,
+      condition: null,
+      env: RESTIC_ENV,
+      argv: ['restic', 'cat', 'config'],
+      command: 'restic cat config',
+    },
+    {
+      step: 'backup',
+      title: 'Back up the source',
+      description: 'The backup itself.',
+      group: 'backup_run',
+      runs: true,
+      condition: '<id-of-latest-snapshot> is resolved by the previous command.',
+      env: RESTIC_ENV,
+      argv: ['restic', 'backup', '--host', 'billa-gates', '--json', '/sources/documents'],
+      command: 'restic backup --host billa-gates --json /sources/documents',
+    },
+    {
+      step: 'retention',
+      title: 'Apply the retention policy',
+      description: 'Applies the retention policy by dropping snapshot references.',
+      group: 'backup_run',
+      runs: false,
+      condition: 'Not run: this job has no retention policy configured.',
+      env: {},
+      argv: [],
+      command: null,
+    },
+    {
+      step: 'prune',
+      title: 'Prune Old Files',
+      description: 'Deletes the data behind forgotten snapshots.',
+      group: 'on_demand',
+      runs: true,
+      condition: 'Runs when you click “Prune Old Files”. Never scheduled.',
+      env: RESTIC_ENV,
+      argv: ['restic', 'prune'],
+      command: 'restic prune',
+    },
+    {
+      step: 'check_full',
+      title: 'Integrity Check — full',
+      description: 'Structural verification plus a re-read of every pack file.',
+      group: 'on_demand',
+      runs: true,
+      condition: 'Runs when you pick Full in the Integrity Check dialog.',
+      env: RESTIC_ENV,
+      argv: ['restic', 'check', '--read-data'],
+      command: 'restic check --read-data',
+    },
+  ]
+  return overrides.length ? base.map((c, i) => ({ ...c, ...(overrides[i] ?? {}) })) : base
+}
+
 beforeEach(() => {
   vi.mocked(api.getJob).mockResolvedValue(makeJob())
+  vi.mocked(api.getJobCommands).mockResolvedValue(makeCommands())
   vi.mocked(api.getJobRuns).mockResolvedValue([])
   vi.mocked(api.getJobSnapshots).mockResolvedValue([])
   vi.mocked(api.unlockJob).mockResolvedValue({ output: 'unlock successful' })
@@ -389,6 +460,178 @@ describe('JobDetail', () => {
         expect(
           screen.getByText(/RESTIC_PASSWORD|\$\{password\}|your.password/i)
         ).toBeInTheDocument()
+      )
+    })
+  })
+
+  describe('commands tab', () => {
+    const openCommands = async (user: ReturnType<typeof userEvent.setup>) => {
+      await waitFor(() => screen.getByRole('tab', { name: /commands/i }))
+      await user.click(screen.getByRole('tab', { name: /commands/i }))
+    }
+
+    it('fetches the commands for this job', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await openCommands(user)
+      await waitFor(() => expect(vi.mocked(api.getJobCommands)).toHaveBeenCalled())
+      // The page renders outside a <Route>, so useParams yields no id in
+      // jsdom — assert the commands query asks for the same job every other
+      // query on the page does.
+      expect(vi.mocked(api.getJobCommands).mock.calls[0]).toEqual(
+        vi.mocked(api.getJob).mock.calls[0]
+      )
+    })
+
+    it('shows each command exactly as the server rendered it', async () => {
+      // Verbatim, never re-assembled in the browser: a command line rebuilt
+      // here from job fields would be a second source of truth and would drift
+      // from what the runner execs — the whole reason this section exists.
+      const user = userEvent.setup()
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await openCommands(user)
+
+      await waitFor(() => expect(screen.getByText('restic cat config')).toBeInTheDocument())
+      expect(
+        screen.getByText('restic backup --host billa-gates --json /sources/documents')
+      ).toBeInTheDocument()
+      expect(screen.getByText('Verify the repository')).toBeInTheDocument()
+      expect(screen.getByText('Back up the source')).toBeInTheDocument()
+    })
+
+    it('shows the environment each command runs with, with the password masked', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await openCommands(user)
+
+      await waitFor(() =>
+        expect(
+          screen.getAllByText(/RESTIC_REPOSITORY=\/destinations\/main\/My Documents/).length
+        ).toBeGreaterThan(0)
+      )
+      expect(
+        screen.getAllByText(/RESTIC_PASSWORD=<this job's repository password>/).length
+      ).toBeGreaterThan(0)
+    })
+
+    it('says a step does not run instead of showing a command it will not issue', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await openCommands(user)
+
+      await waitFor(() =>
+        expect(screen.getByText('Apply the retention policy')).toBeInTheDocument()
+      )
+      expect(
+        screen.getByText(/not run: this job has no retention policy configured/i)
+      ).toBeInTheDocument()
+      expect(screen.getByText(/does not run/i)).toBeInTheDocument()
+    })
+
+    it('shows the condition attached to a command', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await openCommands(user)
+
+      await waitFor(() =>
+        expect(
+          screen.getByText(/<id-of-latest-snapshot> is resolved by the previous command/)
+        ).toBeInTheDocument()
+      )
+    })
+
+    it('reloads the commands after the job is edited', async () => {
+      // The section's promise is that it always shows what *this* job will
+      // run. A stale cache after a save would show the old excludes and
+      // retention — worse than showing nothing, because it looks authoritative.
+      const user = userEvent.setup()
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await openCommands(user)
+      await waitFor(() => expect(screen.getByText('restic cat config')).toBeInTheDocument())
+
+      vi.mocked(api.getJobCommands).mockResolvedValue(
+        makeCommands([
+          {},
+          {
+            argv: [
+              'restic',
+              'backup',
+              '--host',
+              'billa-gates',
+              '--exclude',
+              '*.iso',
+              '--json',
+              '/sources/documents',
+            ],
+            command: "restic backup --host billa-gates --exclude '*.iso' --json /sources/documents",
+          },
+        ])
+      )
+
+      await user.click(screen.getByRole('button', { name: /^edit$/i }))
+      const form = await screen.findByRole('form')
+      const submitBtn = Array.from(form.querySelectorAll('button')).find((b) =>
+        /save|create|submit/i.test(b.textContent ?? '')
+      )!
+      await user.click(submitBtn)
+
+      await waitFor(() =>
+        expect(
+          screen.getByText(
+            "restic backup --host billa-gates --exclude '*.iso' --json /sources/documents"
+          )
+        ).toBeInTheDocument()
+      )
+    })
+
+    it('separates the button-triggered commands from the backup run', async () => {
+      // A backup run and a button click are different promises: one happens
+      // unattended on a schedule, the other only when a human asks. Listing
+      // `restic prune` under the backup pipeline would tell an operator their
+      // schedule reclaims disk space, which it never does.
+      const user = userEvent.setup()
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await openCommands(user)
+
+      const backupSection = await screen.findByRole('region', { name: /backup run/i })
+      const onDemandSection = screen.getByRole('region', { name: /only when you click/i })
+
+      expect(within(backupSection).getByText('restic cat config')).toBeInTheDocument()
+      expect(within(backupSection).queryByText('restic prune')).not.toBeInTheDocument()
+
+      expect(within(onDemandSection).getByText('restic prune')).toBeInTheDocument()
+      expect(within(onDemandSection).getByText('restic check --read-data')).toBeInTheDocument()
+      expect(
+        within(onDemandSection).queryByText(
+          'restic backup --host billa-gates --json /sources/documents'
+        )
+      ).not.toBeInTheDocument()
+    })
+
+    it('says plainly that the on-demand commands are not part of a backup', async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await openCommands(user)
+
+      const onDemandSection = await screen.findByRole('region', { name: /only when you click/i })
+      expect(within(onDemandSection).getByText(/not part of a backup/i)).toBeInTheDocument()
+      expect(within(onDemandSection).getByText(/never run on a schedule/i)).toBeInTheDocument()
+      // Each entry still names the button that issues it.
+      expect(
+        within(onDemandSection).getByText(/Runs when you click “Prune Old Files”/)
+      ).toBeInTheDocument()
+    })
+
+    it('reports a failure to load the commands', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.getJobCommands).mockRejectedValue(
+        Object.assign(new Error('boom'), { status: 500 })
+      )
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await openCommands(user)
+
+      await waitFor(() =>
+        expect(screen.getByText(/could not load the commands for this job/i)).toBeInTheDocument()
       )
     })
   })

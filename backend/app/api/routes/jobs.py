@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_session
 from app.api.schemas.jobs import (
     JobCheckRequest,
+    JobCommandResponse,
     JobCreate,
     JobResponse,
     JobUpdate,
@@ -35,7 +36,13 @@ from app.db.models import (
     RunStatus,
     TriggeredBy,
 )
-from app.services import backup_runner, repository, restic, snapshot_listing
+from app.services import (
+    backup_runner,
+    job_commands,
+    repository,
+    restic,
+    snapshot_listing,
+)
 
 logger = get_logger(__name__)
 
@@ -820,6 +827,30 @@ async def list_job_runs(
         .order_by(BackupRun.started_at.desc())
     )
     return result.scalars().all()
+
+
+# ── GET /api/jobs/{id}/commands ───────────────────────────────────────────────
+
+
+@router.get("/{job_id}/commands", response_model=List[JobCommandResponse])
+@log_call
+async def list_job_commands(
+    job_id: str, session: AsyncSession = Depends(get_session)
+) -> List[dict[str, object]]:
+    """Return the restic commands a backup run of this job will issue.
+
+    Derived from the stored job on every request — never cached, never stored
+    — so an edit to the job is reflected immediately and the page can't show
+    a command line the runner has stopped using. The repository password is
+    replaced by a label; it is no more exposed here than anywhere else.
+    """
+    job = await _get_job_or_404(job_id, session)
+    settings = await session.get(AppSettings, 1)
+    # Auto-unlock decides whether `restic unlock` is issued on every run or
+    # only as a stale-lock retry, so the preview needs the same default the
+    # pipeline uses when no settings row exists yet.
+    auto_unlock = settings.auto_unlock if settings else True
+    return job_commands.build_job_commands(job, auto_unlock=auto_unlock)
 
 
 # ── GET /api/jobs/{id}/snapshots ──────────────────────────────────────────────

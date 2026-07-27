@@ -6,7 +6,17 @@ import os
 import re
 import time
 import uuid as _uuid
-from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 from app.core.logging import get_logger, log_call
 from app.services import process_registry
@@ -41,18 +51,205 @@ def _tracked(
         process_registry.unregister(run_id)
 
 
-def _get_restic_env(repo_path: str, password: str) -> Dict[str, str]:
-    """Build the process environment dictionary with configured repository path,
-    password, and cache directory. Respects RESTIC_CACHE_DIR from host environment.
+@log_call
+def build_restic_env_overrides(repo_path: str, password: str) -> Dict[str, str]:
+    """The environment variables every restic command is given, without the
+    inherited process environment.
+
+    Split out from :func:`_get_restic_env` so the job command preview
+    (app/services/job_commands.py) can show the operator the same variables the
+    subprocess actually receives, instead of a second hand-written copy that
+    would drift.
     """
     return {
-        **os.environ,
         "RESTIC_REPOSITORY": repo_path,
         "RESTIC_PASSWORD": password,
         "RESTIC_CACHE_DIR": os.environ.get(
             "RESTIC_CACHE_DIR", "/app/data/restic-cache"
         ),
     }
+
+
+def _get_restic_env(repo_path: str, password: str) -> Dict[str, str]:
+    """Build the process environment dictionary with configured repository path,
+    password, and cache directory. Respects RESTIC_CACHE_DIR from host environment.
+    """
+    return {**os.environ, **build_restic_env_overrides(repo_path, password)}
+
+
+# ── Command-line builders ────────────────────────────────────────────────────
+#
+# Every wrapper below execs the argv its builder returns, and nothing else.
+# The builders are pure so the Job detail page can render exactly the command
+# a run will issue (see app/services/job_commands.py). Never inline an argv in
+# a wrapper again: the moment the preview and the subprocess are assembled by
+# two different pieces of code, the page starts telling operators that flags
+# are applied which are not — and retention/exclude mistakes of that kind are
+# invisible until data is already lost.
+
+RESTIC_BIN: str = "restic"
+
+
+def build_cat_config_args() -> List[str]:
+    """argv for the repo/password verification step."""
+    return [RESTIC_BIN, "cat", "config"]
+
+
+def build_init_args() -> List[str]:
+    """argv for repository provisioning (job creation only, never a run)."""
+    return [RESTIC_BIN, "init"]
+
+
+def build_latest_snapshot_args() -> List[str]:
+    """argv for the parent-snapshot lookup.
+
+    `--no-lock` keeps this read-only step from blocking on a write lock held by
+    a concurrent backup or left behind as a stale lock file.
+    """
+    return [RESTIC_BIN, "snapshots", "--latest", "1", "--json", "--no-lock"]
+
+
+def build_unlock_args() -> List[str]:
+    """argv for stale-lock removal."""
+    return [RESTIC_BIN, "unlock"]
+
+
+def build_prune_args() -> List[str]:
+    """argv for a standalone prune (no retention flags — see restic_forget)."""
+    return [RESTIC_BIN, "prune"]
+
+
+def build_check_args(mode: str, subset_percent: Union[int, str, None]) -> List[str]:
+    """argv for an integrity check. `structural` needs no extra flag.
+
+    `subset_percent` is an int in every execution path. The union widens it for
+    the command preview alone, which passes a placeholder for the percentage
+    the operator types into the check dialog — so the flag's spelling still
+    comes from here rather than being re-written by the preview.
+    """
+    args: List[str] = [RESTIC_BIN, "check"]
+    if mode == "full":
+        args.append("--read-data")
+    elif mode == "subset" and subset_percent is not None:
+        args.append(f"--read-data-subset={subset_percent}%")
+    return args
+
+
+def build_backup_args(
+    source_path: str,
+    *,
+    parent_snapshot_id: Optional[str] = None,
+    **kwargs: Any,
+) -> List[str]:
+    """argv for `restic backup`, assembled from a job's options.
+
+    `--host` is pinned to a fixed string so retention isn't silently split
+    per container ID (each rebuild gets a new hostname, and `restic forget`
+    groups by host+paths by default).
+
+    Snapshots carry no per-job identity tag: the repo at
+    /destinations/<label>/<name> belongs to exactly one job, so the repo is
+    already the scope. Retention across path changes (gaps.md C3) is handled
+    by `restic forget --group-by ''`, which collapses host and paths into a
+    single group. Any --tag values below are the user's own, from job.tags.
+    """
+    args: List[str] = [
+        RESTIC_BIN,
+        "backup",
+        "--host",
+        "billa-gates",
+    ]
+
+    # Explicit --parent lets restic skip the full-tree rescan even when host
+    # or paths have changed; without it, any source_subpath change makes the
+    # next backup re-read every file from disk (gaps.md C5). Omit on the
+    # genuine first run — passing a bogus --parent would fail the backup.
+    if parent_snapshot_id:
+        args.extend(["--parent", parent_snapshot_id])
+
+    if kwargs.get("exclude_patterns"):
+        for pattern in kwargs["exclude_patterns"]:
+            args.extend(["--exclude", pattern])
+
+    if kwargs.get("exclude_caches"):
+        args.append("--exclude-caches")
+
+    if kwargs.get("exclude_if_present"):
+        for file in kwargs["exclude_if_present"]:
+            args.extend(["--exclude-if-present", file])
+
+    if kwargs.get("one_file_system"):
+        args.append("--one-file-system")
+
+    if kwargs.get("no_scan"):
+        args.append("--no-scan")
+
+    if kwargs.get("tags"):
+        for tag in kwargs["tags"]:
+            args.extend(["--tag", tag])
+
+    if kwargs.get("compression"):
+        args.extend(["--compression", kwargs["compression"]])
+
+    if kwargs.get("pack_size"):
+        args.extend(["--pack-size", str(kwargs["pack_size"])])
+
+    if kwargs.get("read_concurrency"):
+        args.extend(["--read-concurrency", str(kwargs["read_concurrency"])])
+
+    # Always emit JSON so summary/error lines are machine-parseable. Never
+    # add --verbose: it makes restic print one JSON line per new/changed
+    # file, which on a multi-million-file source is hundreds of MB of output
+    # for no post-mortem value. Error lines and the final summary are emitted
+    # regardless of verbosity.
+    args.append("--json")
+
+    args.append(source_path)
+    return args
+
+
+# Retention kwargs → `restic forget` flags. The only place the mapping lives.
+FORGET_FLAG_MAP: Dict[str, str] = {
+    "retain_keep_last": "--keep-last",
+    "retain_keep_hourly": "--keep-hourly",
+    "retain_keep_daily": "--keep-daily",
+    "retain_keep_weekly": "--keep-weekly",
+    "retain_keep_monthly": "--keep-monthly",
+    "retain_keep_yearly": "--keep-yearly",
+    "retain_keep_within": "--keep-within",
+    "retain_keep_within_hourly": "--keep-within-hourly",
+    "retain_keep_within_daily": "--keep-within-daily",
+    "retain_keep_within_weekly": "--keep-within-weekly",
+    "retain_keep_within_monthly": "--keep-within-monthly",
+    "retain_keep_within_yearly": "--keep-within-yearly",
+}
+
+
+def build_forget_args(**retention_flags: Any) -> List[str]:
+    """argv for `restic forget` with the job's retention policy.
+
+    --group-by '' puts every snapshot in the repo into one retention group,
+    so the policy applies across any historical path or host change. The
+    original --group-by paths kept old-path snapshots forever whenever a
+    job's source_subpath changed (gaps.md C3).
+
+    Deliberately unfiltered: the repo holds exactly one job's snapshots.
+    Scoping by a per-job tag would strand every snapshot taken before the
+    current job row existed — they would never be pruned, and the repo would
+    grow without bound after a job is recreated.
+    """
+    args: List[str] = [
+        RESTIC_BIN,
+        "forget",
+        "--group-by",
+        "",
+    ]
+
+    for kwarg_name, flag_name in FORGET_FLAG_MAP.items():
+        if kwarg_name in retention_flags and retention_flags[kwarg_name] is not None:
+            args.extend([flag_name, str(retention_flags[kwarg_name])])
+
+    return args
 
 
 @log_call
@@ -97,9 +294,7 @@ async def restic_cat_config(
     env = _get_restic_env(repo_path, password)
     try:
         proc = await asyncio.create_subprocess_exec(
-            "restic",
-            "cat",
-            "config",
+            *build_cat_config_args(),
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -137,8 +332,7 @@ async def restic_init(
     env = _get_restic_env(repo_path, password)
     try:
         proc = await asyncio.create_subprocess_exec(
-            "restic",
-            "init",
+            *build_init_args(),
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -178,12 +372,7 @@ async def restic_latest_snapshot_id(
     env = _get_restic_env(repo_path, password)
     try:
         proc = await asyncio.create_subprocess_exec(
-            "restic",
-            "snapshots",
-            "--latest",
-            "1",
-            "--json",
-            "--no-lock",
+            *build_latest_snapshot_args(),
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -478,70 +667,9 @@ async def restic_backup(
     swallowed: persistence is a side-effect and must never abort a backup.
     """
     env = _get_restic_env(repo_path, password)
-
-    # --host is pinned to a fixed string so retention isn't silently split
-    # per container ID (each rebuild gets a new hostname, and `restic forget`
-    # groups by host+paths by default).
-    #
-    # Snapshots carry no per-job identity tag: the repo at
-    # /destinations/<label>/<name> belongs to exactly one job, so the repo is
-    # already the scope. Retention across path changes (gaps.md C3) is handled
-    # by `restic forget --group-by ''`, which collapses host and paths into a
-    # single group. Any --tag values below are the user's own, from job.tags.
-    args: List[str] = [
-        "restic",
-        "backup",
-        "--host",
-        "billa-gates",
-    ]
-
-    # Explicit --parent lets restic skip the full-tree rescan even when host
-    # or paths have changed; without it, any source_subpath change makes the
-    # next backup re-read every file from disk (gaps.md C5). Omit on the
-    # genuine first run — passing a bogus --parent would fail the backup.
-    if parent_snapshot_id:
-        args.extend(["--parent", parent_snapshot_id])
-
-    # Add flags from kwargs
-    if kwargs.get("exclude_patterns"):
-        for pattern in kwargs["exclude_patterns"]:
-            args.extend(["--exclude", pattern])
-
-    if kwargs.get("exclude_caches"):
-        args.append("--exclude-caches")
-
-    if kwargs.get("exclude_if_present"):
-        for file in kwargs["exclude_if_present"]:
-            args.extend(["--exclude-if-present", file])
-
-    if kwargs.get("one_file_system"):
-        args.append("--one-file-system")
-
-    if kwargs.get("no_scan"):
-        args.append("--no-scan")
-
-    if kwargs.get("tags"):
-        for tag in kwargs["tags"]:
-            args.extend(["--tag", tag])
-
-    if kwargs.get("compression"):
-        args.extend(["--compression", kwargs["compression"]])
-
-    if kwargs.get("pack_size"):
-        args.extend(["--pack-size", str(kwargs["pack_size"])])
-
-    if kwargs.get("read_concurrency"):
-        args.extend(["--read-concurrency", str(kwargs["read_concurrency"])])
-
-    # Always emit JSON so summary/error lines are machine-parseable. Never
-    # add --verbose: it makes restic print one JSON line per new/changed
-    # file, which on a multi-million-file source is hundreds of MB of output
-    # for no post-mortem value. Error lines and the final summary are emitted
-    # regardless of verbosity.
-    args.append("--json")
-
-    # Add source path
-    args.append(source_path)
+    args: List[str] = build_backup_args(
+        source_path, parent_snapshot_id=parent_snapshot_id, **kwargs
+    )
 
     collector = _BackupOutputCollector(password)
     stderr_output = _BoundedOutput(password)
@@ -629,42 +757,7 @@ async def restic_forget(
     schedule) so a backup window stays predictable (gaps.md H1).
     """
     env = _get_restic_env(repo_path, password)
-
-    # --group-by '' puts every snapshot in the repo into one retention group,
-    # so the policy applies across any historical path or host change. The
-    # original --group-by paths kept old-path snapshots forever whenever a
-    # job's source_subpath changed (gaps.md C3).
-    #
-    # Deliberately unfiltered: the repo holds exactly one job's snapshots.
-    # Scoping by a per-job tag would strand every snapshot taken before the
-    # current job row existed — they would never be pruned, and the repo would
-    # grow without bound after a job is recreated.
-    args: List[str] = [
-        "restic",
-        "forget",
-        "--group-by",
-        "",
-    ]
-
-    # Map retention_flags kwargs to CLI arguments
-    flag_map: Dict[str, str] = {
-        "retain_keep_last": "--keep-last",
-        "retain_keep_hourly": "--keep-hourly",
-        "retain_keep_daily": "--keep-daily",
-        "retain_keep_weekly": "--keep-weekly",
-        "retain_keep_monthly": "--keep-monthly",
-        "retain_keep_yearly": "--keep-yearly",
-        "retain_keep_within": "--keep-within",
-        "retain_keep_within_hourly": "--keep-within-hourly",
-        "retain_keep_within_daily": "--keep-within-daily",
-        "retain_keep_within_weekly": "--keep-within-weekly",
-        "retain_keep_within_monthly": "--keep-within-monthly",
-        "retain_keep_within_yearly": "--keep-within-yearly",
-    }
-
-    for kwarg_name, flag_name in flag_map.items():
-        if kwarg_name in retention_flags and retention_flags[kwarg_name] is not None:
-            args.extend([flag_name, str(retention_flags[kwarg_name])])
+    args: List[str] = build_forget_args(**retention_flags)
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -701,8 +794,7 @@ async def restic_prune(
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "restic",
-            "prune",
+            *build_prune_args(),
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -734,14 +826,7 @@ async def restic_check(
 ) -> Tuple[int, str, str]:
     """Verify repo integrity."""
     env = _get_restic_env(repo_path, password)
-
-    args: List[str] = ["restic", "check"]
-
-    if mode == "full":
-        args.append("--read-data")
-    elif mode == "subset" and subset_percent is not None:
-        args.append(f"--read-data-subset={subset_percent}%")
-    # mode == "structural" needs no extra args
+    args: List[str] = build_check_args(mode, subset_percent)
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -783,8 +868,7 @@ async def restic_unlock(
     env = _get_restic_env(repo_path, password)
     try:
         proc = await asyncio.create_subprocess_exec(
-            "restic",
-            "unlock",
+            *build_unlock_args(),
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

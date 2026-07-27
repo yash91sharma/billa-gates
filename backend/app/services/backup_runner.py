@@ -83,6 +83,66 @@ def check_mount_file_exists(
     return os.path.exists(check_file_path)
 
 
+# The job fields that become `restic backup` / `restic forget` inputs. Kept as
+# named tuples (rather than inline lists at the call sites) so the command
+# preview on the Job detail page is assembled from the same field set the
+# pipeline passes to restic — a field added to one and not the other would
+# make the page show a backup that isn't the one that runs.
+BACKUP_OPTION_FIELDS: Tuple[str, ...] = (
+    "exclude_patterns",
+    "exclude_caches",
+    "exclude_if_present",
+    "one_file_system",
+    "no_scan",
+    "tags",
+    "compression",
+    "pack_size",
+    "read_concurrency",
+)
+
+RETENTION_FIELDS: Tuple[str, ...] = (
+    "retain_keep_last",
+    "retain_keep_hourly",
+    "retain_keep_daily",
+    "retain_keep_weekly",
+    "retain_keep_monthly",
+    "retain_keep_yearly",
+    "retain_keep_within",
+    "retain_keep_within_hourly",
+    "retain_keep_within_daily",
+    "retain_keep_within_weekly",
+    "retain_keep_within_monthly",
+    "retain_keep_within_yearly",
+)
+
+
+@log_call
+def build_backup_kwargs(job: BackupJob) -> Dict[str, Any]:
+    """The `restic backup` option kwargs this job produces.
+
+    Unset (None) fields are dropped so restic is never handed an empty flag.
+    """
+    return {
+        field: getattr(job, field)
+        for field in BACKUP_OPTION_FIELDS
+        if getattr(job, field) is not None
+    }
+
+
+@log_call
+def build_retention_kwargs(job: BackupJob) -> Dict[str, Any]:
+    """The `restic forget` retention kwargs this job produces.
+
+    An empty dict means no retention is configured — the pipeline then skips
+    `restic forget` entirely, since it would be a no-op.
+    """
+    return {
+        field: getattr(job, field)
+        for field in RETENTION_FIELDS
+        if getattr(job, field) is not None
+    }
+
+
 DESTINATIONS_ROOT: str = "/destinations"
 
 
@@ -1426,21 +1486,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 f"job_id={job_id} run_id={current_run_id} step=backup_execution "
                 f"source_path={source_path} timeout_seconds={timeout_seconds}"
             )
-            backup_kwargs: Dict[str, Any] = {
-                k: getattr(job, k)
-                for k in [
-                    "exclude_patterns",
-                    "exclude_caches",
-                    "exclude_if_present",
-                    "one_file_system",
-                    "no_scan",
-                    "tags",
-                    "compression",
-                    "pack_size",
-                    "read_concurrency",
-                ]
-                if getattr(job, k) is not None
-            }
+            backup_kwargs: Dict[str, Any] = build_backup_kwargs(job)
 
             try:
                 rc, stdout, stderr, summary = await restic.restic_backup(
@@ -1594,24 +1640,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
 
             # Step 8: Prune (only if backup succeeded)
             logger.debug(f"job_id={job_id} run_id={current_run_id} step=prune")
-            retention_kwargs: Dict[str, Any] = {
-                k: getattr(job, k)
-                for k in [
-                    "retain_keep_last",
-                    "retain_keep_hourly",
-                    "retain_keep_daily",
-                    "retain_keep_weekly",
-                    "retain_keep_monthly",
-                    "retain_keep_yearly",
-                    "retain_keep_within",
-                    "retain_keep_within_hourly",
-                    "retain_keep_within_daily",
-                    "retain_keep_within_weekly",
-                    "retain_keep_within_monthly",
-                    "retain_keep_within_yearly",
-                ]
-                if getattr(job, k) is not None
-            }
+            retention_kwargs: Dict[str, Any] = build_retention_kwargs(job)
 
             # When retention is configured, run `restic forget` only — never
             # `restic prune`. Prune is the heaviest restic operation (rewrites
