@@ -339,6 +339,37 @@ test('JobDetail - running run with Stop button', async () => {
   await page.screenshot({ path: `${OUT}/JobDetail--running.png` })
 })
 
+// Real-browser coverage for the header action tooltips: jsdom has no layout,
+// so placement, width and pointer-out dismissal can only be seen here.
+test('JobDetail - action tooltip on hover', async () => {
+  const user = userEvent.setup()
+  const result = renderPage('/jobs/:id', <JobDetail />)
+  cleanup = result.unmount
+  await waitFor(() => {
+    if (!result.container.textContent?.includes('Documents Backup')) {
+      throw new Error('job detail not ready')
+    }
+  })
+
+  const prune = Array.from(result.container.querySelectorAll('button')).find((b) =>
+    /prune/i.test(b.textContent ?? '')
+  )!
+  await user.hover(prune)
+  await waitFor(() => {
+    if (!document.querySelector('[role="tooltip"]')) throw new Error('tooltip not open yet')
+  })
+  // Let the fade/zoom-in finish, or the shot catches a half-opaque bubble.
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  await page.screenshot({ path: `${OUT}/JobDetail--action-tooltip.png` })
+
+  // Moving away must close it — the behaviour the jsdom suite cannot assert.
+  await user.unhover(prune)
+  await user.hover(result.container.querySelector('h1')!)
+  await waitFor(() => {
+    if (document.querySelector('[role="tooltip"]')) throw new Error('tooltip still open')
+  })
+})
+
 test('RunDetail - running with Stop button', async () => {
   vi.mocked(api.getRun).mockResolvedValue(runningRun)
 

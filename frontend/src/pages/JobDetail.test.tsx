@@ -808,4 +808,156 @@ describe('JobDetail', () => {
       })
     })
   })
+
+  // Every header action is destructive-adjacent or expensive (a prune rewrites
+  // the repository, an unlock deletes locks another process may hold), and the
+  // labels alone don't say what happens to *this job's* backups. Each button
+  // therefore carries a hover/focus explanation.
+  describe('action button tooltips', () => {
+    const runningRun = () => makeRun({ id: 'run-live', status: 'running', check_status: null })
+    const finishedRun = () => makeRun({ status: 'success', check_status: 'passed' })
+
+    // Enabled buttons are hovered directly: pointer events bubble from the
+    // button to the tooltip trigger that wraps it.
+    async function tooltipFor(name: RegExp): Promise<HTMLElement> {
+      const user = userEvent.setup()
+      await user.hover(screen.getByRole('button', { name }))
+      return await screen.findByRole('tooltip')
+    }
+
+    // A disabled button swallows pointer events, so the wrapping trigger is
+    // what the user actually hovers.
+    async function tooltipForDisabled(name: RegExp): Promise<HTMLElement> {
+      const user = userEvent.setup()
+      const button = screen.getByRole('button', { name })
+      expect(button).toBeDisabled()
+      await user.hover(button.closest('[data-testid="action-tooltip-trigger"]') as HTMLElement)
+      return await screen.findByRole('tooltip')
+    }
+
+    it('explains Run Now: an extra backup now, schedule untouched', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([finishedRun()])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await screen.findByRole('button', { name: /^run now$/i })
+
+      const tip = await tooltipFor(/^run now$/i)
+      expect(tip.textContent).toMatch(/backup/i)
+      expect(tip.textContent).toMatch(/snapshot/i)
+      expect(tip.textContent).toMatch(/schedule/i)
+    })
+
+    it('explains Stop: uploaded data is kept, no snapshot for the cancelled run', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([runningRun()])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await screen.findByRole('button', { name: /^stop$/i })
+
+      const tip = await tooltipFor(/^stop$/i)
+      expect(tip.textContent).toMatch(/cancel/i)
+      expect(tip.textContent).toMatch(/already uploaded|already-uploaded/i)
+      expect(tip.textContent).toMatch(/no snapshot/i)
+    })
+
+    it('explains Prune: it is what actually frees disk space, and it is heavy', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([finishedRun()])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await screen.findByRole('button', { name: /prune/i })
+
+      const tip = await tooltipFor(/prune/i)
+      expect(tip.textContent).toMatch(/free|reclaim/i)
+      expect(tip.textContent).toMatch(/space/i)
+      expect(tip.textContent).toMatch(/retention/i)
+      expect(tip.textContent).toMatch(/long time|heavy/i)
+    })
+
+    it('explains Integrity Check: read-only verification', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([finishedRun()])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await screen.findByRole('button', { name: /integrity check/i })
+
+      const tip = await tooltipFor(/integrity check/i)
+      expect(tip.textContent).toMatch(/verif/i)
+      expect(tip.textContent).toMatch(/read-only/i)
+      expect(tip.textContent).toMatch(/nothing is (backed up|changed|deleted)/i)
+    })
+
+    it('explains Edit, including which fields can never change', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([finishedRun()])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await screen.findByRole('button', { name: /^edit$/i })
+
+      const tip = await tooltipFor(/^edit$/i)
+      expect(tip.textContent).toMatch(/schedule|retention/i)
+      expect(tip.textContent).toMatch(/name/i)
+      expect(tip.textContent).toMatch(/destination/i)
+      expect(tip.textContent).toMatch(/password/i)
+    })
+
+    it('explains why Edit is unavailable during a run', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([runningRun()])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await screen.findByRole('button', { name: /^stop$/i })
+
+      const tip = await tooltipForDisabled(/^edit$/i)
+      expect(tip.textContent).toMatch(/run is in progress/i)
+      expect(tip.textContent).toMatch(/stop/i)
+    })
+
+    it('explains Unlock: stale locks go, snapshots stay', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([finishedRun()])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await waitFor(() => expect(screen.getByRole('button', { name: /unlock/i })).toBeEnabled())
+
+      const tip = await tooltipFor(/unlock/i)
+      expect(tip.textContent).toMatch(/lock/i)
+      expect(tip.textContent).toMatch(/snapshots?.*not|not.*snapshots?/i)
+    })
+
+    it('explains why Unlock is unavailable while a run is in progress', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([runningRun()])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await screen.findByRole('button', { name: /^stop$/i })
+
+      const tip = await tooltipForDisabled(/unlock/i)
+      expect(tip.textContent).toMatch(/in progress|running/i)
+      expect(tip.textContent).toMatch(/lock/i)
+    })
+
+    it('explains Cancel Edit once the form is open', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.getJobRuns).mockResolvedValue([finishedRun()])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await user.click(await screen.findByRole('button', { name: /^edit$/i }))
+      await screen.findByRole('button', { name: /cancel edit/i })
+      // Clicking a trigger closes its tooltip, and Radix (like a real browser)
+      // only reopens once the pointer has left and come back.
+      await user.pointer({ target: document.body })
+
+      const tip = await tooltipFor(/cancel edit/i)
+      expect(tip.textContent).toMatch(/discard|unsaved/i)
+    })
+
+    // Leaving the native attribute on would show the browser's own tooltip a
+    // second later, on top of (and disagreeing with) the styled one.
+    it('drops the native title attributes that would double up', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([finishedRun()])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await screen.findByRole('button', { name: /^run now$/i })
+
+      for (const name of [/^run now$/i, /prune/i, /integrity check/i, /^edit$/i, /unlock/i]) {
+        expect(screen.getByRole('button', { name })).not.toHaveAttribute('title')
+      }
+    })
+
+    it('keeps the buttons working while wrapped in a tooltip', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.getJobRuns).mockResolvedValue([finishedRun()])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+
+      await user.click(await screen.findByRole('button', { name: /^run now$/i }))
+      expect(vi.mocked(api.triggerRun)).toHaveBeenCalledWith('job-1')
+
+      await user.click(screen.getByRole('button', { name: /prune/i }))
+      expect(vi.mocked(api.triggerPrune)).toHaveBeenCalledWith('job-1')
+    })
+  })
 })
