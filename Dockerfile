@@ -50,6 +50,12 @@ RUN ARCHIVE="restic_${RESTIC_VERSION}_linux_${RESTIC_ARCH}.bz2" \
 FROM python:3.12-alpine AS python-builder
 RUN apk add --no-cache build-base
 RUN python -m venv /venv
+# The whole venv is copied into the runtime image, so the pip `venv` seeded from
+# the base image ships to production too — python:3.12-alpine still bundles
+# 25.0.1, which carries five advisories fixed across 25.3–26.1.2. Upgrade before
+# installing anything, so the vulnerable copy is never the one that lands in
+# /venv. Mirrored in .devcontainer/Dockerfile.
+RUN /venv/bin/pip install --no-cache-dir --upgrade "pip>=26.1.2"
 COPY backend/requirements.txt /tmp/requirements.txt
 RUN /venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
 # Output: /venv/

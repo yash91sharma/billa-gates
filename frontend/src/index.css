@@ -1,5 +1,15 @@
 @import 'tw-animate-css';
-@import 'shadcn/tailwind.css';
+/*
+ * No `@import 'shadcn/tailwind.css'` here. That file is Tailwind v4 syntax
+ * (@theme inline, @custom-variant, @utility, @slot) and this project is on
+ * Tailwind v3, so v3's PostCSS pass could not interpret any of it — the
+ * at-rules were copied verbatim into the bundle, where browsers ignored them.
+ * It contributed 0 bytes of applied style while making the `shadcn` CLI a
+ * runtime dependency of the build (and with it a vulnerable @hono/node-server
+ * via @modelcontextprotocol/sdk). Removing it is byte-for-byte identical in
+ * every rule a browser actually applies. Re-adding it only makes sense as part
+ * of a real Tailwind v4 migration.
+ */
 @import '@fontsource/carlito/400.css';
 @import '@fontsource/carlito/700.css';
 @tailwind base;
