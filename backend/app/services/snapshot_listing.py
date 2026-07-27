@@ -7,14 +7,12 @@ maintaining a parallel DB copy of snapshot metadata created a class of
 reconciliation bugs that don't exist when restic is the only writer.
 """
 
-import asyncio
 import json
-import os
 from time import monotonic as _monotonic
 from typing import Any, Dict, List, Tuple
 
 from app.core.logging import get_logger, log_call
-from app.services.restic import _terminate_then_kill
+from app.services import restic, restic_process
 
 logger = get_logger(__name__)
 
@@ -108,6 +106,12 @@ async def list_snapshots(
     transient backend hiccup must not lock the UI into an error for the full
     TTL window.
 
+    Every way of not getting a listing is a SnapshotListingError, including a
+    restic process that could not be started or read: the route turns that into
+    a 503 with the reason attached, and the alternative — an exception escaping
+    into the request — is a 500 that says nothing about the detached drive that
+    caused it.
+
     Raises:
         SnapshotListingError: on non-zero exit, malformed JSON, or timeout.
     """
@@ -117,45 +121,33 @@ async def list_snapshots(
         if cached is not None and cached[1] > now:
             return cached[0]
 
-    env: Dict[str, str] = {
-        **os.environ,
-        "RESTIC_REPOSITORY": repo_path,
-        "RESTIC_PASSWORD": password,
-        "RESTIC_CACHE_DIR": os.environ.get(
-            "RESTIC_CACHE_DIR", "/app/data/restic-cache"
-        ),
-    }
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "restic",
-            "snapshots",
-            "--json",
-            "--no-lock",
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except Exception as exc:
-        raise SnapshotListingError(f"failed to launch restic: {exc}") from exc
-
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout_seconds
-        )
-    except asyncio.TimeoutError as exc:
-        await _terminate_then_kill(proc)
+    # argv and environment come from restic.py's builders, and the subprocess
+    # contract (registry, timeout, SIGTERM-before-SIGKILL, contained launch
+    # failure) from restic_process. This call used to hand-roll all three,
+    # which meant an environment variable added for every other restic command
+    # silently skipped this one.
+    outcome = await restic_process.run_restic(
+        restic.build_snapshots_args(),
+        env_overrides=restic.build_restic_env_overrides(repo_path, password),
+        timeout_seconds=timeout_seconds,
+    )
+    if outcome.timed_out:
         raise SnapshotListingError(
             f"restic snapshots timed out after {timeout_seconds}s"
-        ) from exc
-
-    if proc.returncode != 0:
+        ) from outcome.error
+    if outcome.error is not None:
         raise SnapshotListingError(
-            f"restic snapshots failed rc={proc.returncode} stderr={stderr.decode()!r}"
+            f"failed to launch restic: {outcome.error}"
+        ) from outcome.error
+
+    if outcome.returncode != 0:
+        raise SnapshotListingError(
+            f"restic snapshots failed rc={outcome.returncode} "
+            f"stderr={outcome.stderr.decode()!r}"
         )
 
     try:
-        raw = json.loads(stdout.decode())
+        raw = json.loads(outcome.stdout.decode())
     except json.JSONDecodeError as exc:
         raise SnapshotListingError(
             f"restic snapshots returned unparseable JSON: {exc}"

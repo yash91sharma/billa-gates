@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from typing import AsyncGenerator
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -140,6 +140,48 @@ def mock_scheduler():
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+
+class FakeStream:
+    """Minimal StreamReader stand-in that hands out a payload in chunks.
+
+    `restic_backup` consumes stdout/stderr incrementally (see
+    app/services/restic_stream.py::pump_stream), so the fake has to *drain* — an
+    always-returns-everything read() would spin forever. `chunk_size` lets a
+    test force reads to land mid-line (or mid-UTF-8-character).
+    """
+
+    def __init__(self, data: bytes, chunk_size: int = 65536) -> None:
+        self._data = data
+        self._pos = 0
+        self._chunk_size = chunk_size
+
+    async def read(self, n: int = -1) -> bytes:
+        if self._pos >= len(self._data):
+            return b""
+        size = self._chunk_size if n is None or n < 0 else min(n, self._chunk_size)
+        chunk = self._data[self._pos : self._pos + size]
+        self._pos += len(chunk)
+        return chunk
+
+
+def make_fake_process(
+    returncode: int, stdout: str = "", stderr: str = "", chunk_size: int = 65536
+) -> "AsyncMock":
+    """A stand-in for the process `asyncio.create_subprocess_exec` returns.
+
+    Serves both consumption styles: `communicate()` for the capturing commands
+    and drainable `stdout`/`stderr` streams for `restic backup`.
+    """
+    proc = AsyncMock()
+    proc.returncode = returncode
+    proc.stdout = FakeStream(stdout.encode(), chunk_size)
+    proc.stderr = FakeStream(stderr.encode(), chunk_size)
+    proc.communicate = AsyncMock(return_value=(stdout.encode(), stderr.encode()))
+    proc.wait = AsyncMock(return_value=returncode)
+    proc.kill = MagicMock()
+    proc.terminate = MagicMock()
+    return proc
 
 
 def make_job_payload(**overrides) -> dict:

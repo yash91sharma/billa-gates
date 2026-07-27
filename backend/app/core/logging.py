@@ -41,7 +41,19 @@ F = TypeVar("F", bound=Callable[..., object])
 # positional-parameter names (the restic wrappers take the repo password as a
 # positional `password` argument; send_notification takes the ntfy token as
 # `token`).
-SENSITIVE_FIELDS: Set[str] = {"restic_password", "ntfy_token", "password", "token"}
+#
+# RESTIC_PASSWORD is the same secret one layer down: the password reaches
+# restic as an environment variable, so the dict that carries it
+# (restic.build_restic_env_overrides) is logged both as a return value and as
+# an argument to restic_process.run_restic. Matching only `password` left the
+# key that decrypts every backup in the repository sitting in the DEBUG log.
+SENSITIVE_FIELDS: Set[str] = {
+    "restic_password",
+    "ntfy_token",
+    "password",
+    "token",
+    "RESTIC_PASSWORD",
+}
 
 # Maximum repr length for logged return values; protects logs from being
 # flooded by large restic stdout blobs and similar.

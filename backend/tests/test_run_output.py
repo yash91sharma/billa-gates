@@ -266,19 +266,19 @@ def test_error_output_stays_small_enough_to_load_on_every_fetch():
     parse limit's worth of items, each already truncated upstream to the
     collector's per-line cap. Before the shared renderer the rc!=0 path came out
     at ~1.8 MiB here."""
-    from app.services.restic import (
-        _MAX_RETAINED_LINE_CHARS,
-        _MAX_RETAINED_OUTPUT_CHARS,
+    from app.services.restic_stream import (
+        MAX_RETAINED_LINE_CHARS,
+        MAX_RETAINED_OUTPUT_CHARS,
     )
 
-    items = _flood(FAILED_ITEM_PARSE_LIMIT, line_chars=_MAX_RETAINED_LINE_CHARS)
-    stderr = "x" * _MAX_RETAINED_OUTPUT_CHARS
+    items = _flood(FAILED_ITEM_PARSE_LIMIT, line_chars=MAX_RETAINED_LINE_CHARS)
+    stderr = "x" * MAX_RETAINED_OUTPUT_CHARS
 
     # What the row can hold: the capped item block, plus the stderr the restic
     # collector already bounds, plus headlines.
     ceiling = (
-        MAX_REPORTED_FAILED_ITEMS * (_MAX_RETAINED_LINE_CHARS + 128)
-        + _MAX_RETAINED_OUTPUT_CHARS
+        MAX_REPORTED_FAILED_ITEMS * (MAX_RETAINED_LINE_CHARS + 128)
+        + MAX_RETAINED_OUTPUT_CHARS
         + 1024
     )
     assert len(format_backup_error(1, items, stderr)) <= ceiling

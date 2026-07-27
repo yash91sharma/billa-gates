@@ -240,6 +240,29 @@ def test_log_call_redacts_password_keyword_argument(caplog):
     assert SECRET not in joined
 
 
+def test_log_call_redacts_the_password_inside_the_restic_environment(caplog):
+    """The password reaches restic as an environment variable, not an argument.
+
+    `build_restic_env_overrides` returns it under the key `RESTIC_PASSWORD`, and
+    that dict is both logged as a return value and passed to
+    `restic_process.run_restic` as an argument — so redaction has to match the
+    environment variable's own name, not only the `password` parameter it came
+    from. Without it, one DEBUG line discloses the key that decrypts every
+    backup in the repository.
+    """
+    from app.services.restic import build_restic_env_overrides
+
+    setup_logging()
+    with caplog.at_level(logging.DEBUG):
+        overrides = build_restic_env_overrides("/destinations/main/photos", SECRET)
+
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert SECRET not in joined
+    assert "***" in joined
+    # Redaction is a logging concern only — the value restic is given is real.
+    assert overrides["RESTIC_PASSWORD"] == SECRET
+
+
 def test_log_call_redacts_token_parameter(caplog):
     """send_notification-style functions take the ntfy token as `token`."""
     from app.core.logging import log_call

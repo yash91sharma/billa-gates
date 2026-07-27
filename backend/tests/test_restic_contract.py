@@ -32,12 +32,8 @@ from typing import Any, Dict, List
 import pytest
 
 from app.services import repository
-from app.services.restic import (
-    _BackupOutputCollector,
-    _format_progress,
-    _newest_snapshot,
-    _parse_snapshot_time,
-)
+from app.services.restic import _newest_snapshot, _parse_snapshot_time
+from app.services.restic_stream import BackupOutputCollector, format_progress
 from app.services.run_output import extract_failed_items
 from app.services.snapshot_listing import _normalize
 
@@ -220,7 +216,7 @@ def test_format_progress_renders_a_real_status_line():
     whoever bumps restic to edit the assertion instead of reading it.
     """
     status = read_json("backup_status_line.json")
-    rendered = _format_progress(status)
+    rendered = format_progress(status)
 
     assert rendered.startswith("progress: ")
     assert f"{status['percent_done'] * 100:.0f}%" in rendered
@@ -238,7 +234,7 @@ def test_collector_classifies_a_real_backup_stream():
     status_lines = [o for o in jsonl(stdout) if o.get("message_type") == "status"]
     assert len(status_lines) > 1, "recording must contain the progress firehose"
 
-    collector = _BackupOutputCollector(password="s3cret-pw")
+    collector = BackupOutputCollector(password="s3cret-pw")
     for line in stdout.splitlines():
         collector.feed(line)
 
