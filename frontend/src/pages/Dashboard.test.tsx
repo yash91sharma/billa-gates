@@ -370,6 +370,22 @@ describe('Dashboard', () => {
       })
     })
 
+    it('applies alternate row coloring to upcoming runs rows for improved visual clarity', async () => {
+      vi.mocked(api.listJobs).mockResolvedValue([
+        makeJob({ id: 'job-1', name: 'Docs', next_run_time: '2026-08-04T03:00:00Z' }),
+        makeJob({ id: 'job-2', name: 'FamilyMedia', next_run_time: '2026-07-29T03:00:00Z' }),
+      ])
+      renderWithProviders(<Dashboard />)
+      await waitFor(() => {
+        const upcomingSection = screen.getByRole('heading', {
+          name: /upcoming runs/i,
+        }).parentElement
+        expect(upcomingSection).toBeInTheDocument()
+        const rowsContainer = upcomingSection!.querySelector('div')
+        expect(rowsContainer?.className).toContain('[&>div:nth-child(even)]:bg-muted/40')
+      })
+    })
+
     it('displays relative time detail in (In X days, Y hours) format', async () => {
       const mockNow = new Date('2026-07-28T03:00:00Z').getTime()
       const dateSpy = vi.spyOn(Date, 'now').mockReturnValue(mockNow)

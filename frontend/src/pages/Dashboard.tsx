@@ -119,9 +119,12 @@ export default function Dashboard() {
       {sortedJobs.length > 0 && (
         <div>
           <h2 className="text-lg font-semibold mb-2">Upcoming Runs</h2>
-          <div className="space-y-1">
+          <div className="[&>div:nth-child(even)]:bg-muted/40">
             {sortedJobs.map((job) => (
-              <div key={job.id} className="flex justify-between text-sm">
+              <div
+                key={job.id}
+                className="flex justify-between text-sm py-2 px-3 border-b hover:bg-muted/60"
+              >
                 <span>{job.name}</span>
                 <span>{formatNextRun(job.next_run_time)}</span>
               </div>

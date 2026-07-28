@@ -262,10 +262,28 @@ const health: HealthStatus = {
   db_ok: true,
 }
 
+const job2: BackupJob = {
+  ...job,
+  id: 'job-2',
+  name: 'Photos & Media Backup',
+  source_label: 'photos',
+  destination_label: 'archive',
+  next_run_time: new Date(Date.now() + (2 * 3600 + 300) * 1000).toISOString(),
+}
+
+const job3: BackupJob = {
+  ...job,
+  id: 'job-3',
+  name: 'System Configuration',
+  source_label: 'etc',
+  destination_label: 'main',
+  next_run_time: new Date(Date.now() + (50 * 3600 + 600) * 1000).toISOString(),
+}
+
 // ── Mock setup ───────────────────────────────────────────────────────────────
 
 beforeEach(() => {
-  vi.mocked(api.listJobs).mockResolvedValue([job])
+  vi.mocked(api.listJobs).mockResolvedValue([job, job2, job3])
   vi.mocked(api.getJob).mockResolvedValue(job)
   vi.mocked(api.getJobRuns).mockResolvedValue([run])
   vi.mocked(api.getJobSnapshots).mockResolvedValue([snapshot])
