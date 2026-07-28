@@ -16,6 +16,22 @@ function shouldPoll(runs: BackupRun[]): boolean {
   return runs.some((r) => r.status === 'running' || r.check_status === null)
 }
 
+function formatNextRun(nextRunTimeIso: string | null): string {
+  if (!nextRunTimeIso) {
+    return '—'
+  }
+  const nextDate = new Date(nextRunTimeIso)
+  const formattedDate = nextDate.toLocaleString()
+  const diffMs = Math.max(0, nextDate.getTime() - Date.now())
+  const totalHours = Math.floor(diffMs / (1000 * 60 * 60))
+  const days = Math.floor(totalHours / 24)
+  const hours = totalHours % 24
+  const dayUnit = days === 1 ? 'day' : 'days'
+  const hourUnit = hours === 1 ? 'hour' : 'hours'
+
+  return `Next run: ${formattedDate} (In ${days} ${dayUnit}, ${hours} ${hourUnit})`
+}
+
 export default function Dashboard() {
   const queryClient = useQueryClient()
   const { data: jobs, error: jobsError } = useQuery({
@@ -60,6 +76,21 @@ export default function Dashboard() {
   const totalJobs = jobs?.length ?? 0
   const enabledCount = jobs?.filter((j) => j.enabled).length ?? 0
 
+  const sortedJobs = jobs
+    ? [...jobs].sort((a, b) => {
+        if (a.next_run_time && b.next_run_time) {
+          return new Date(a.next_run_time).getTime() - new Date(b.next_run_time).getTime()
+        }
+        if (a.next_run_time && !b.next_run_time) {
+          return -1
+        }
+        if (!a.next_run_time && b.next_run_time) {
+          return 1
+        }
+        return a.name.localeCompare(b.name)
+      })
+    : []
+
   return (
     <div className="p-6 space-y-6">
       {health && !health.scheduler_running && (
@@ -85,18 +116,14 @@ export default function Dashboard() {
         Note: disk space is not monitored by this application.
       </div>
 
-      {jobs && jobs.length > 0 && (
+      {sortedJobs.length > 0 && (
         <div>
           <h2 className="text-lg font-semibold mb-2">Upcoming Runs</h2>
           <div className="space-y-1">
-            {jobs.map((job) => (
+            {sortedJobs.map((job) => (
               <div key={job.id} className="flex justify-between text-sm">
                 <span>{job.name}</span>
-                <span>
-                  {job.next_run_time
-                    ? `Next run: ${new Date(job.next_run_time).toLocaleString()}`
-                    : '—'}
-                </span>
+                <span>{formatNextRun(job.next_run_time)}</span>
               </div>
             ))}
           </div>

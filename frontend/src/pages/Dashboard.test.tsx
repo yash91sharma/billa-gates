@@ -350,6 +350,62 @@ describe('Dashboard', () => {
         expect(nextRunEls.length).toBeGreaterThanOrEqual(1)
       })
     })
+
+    it('sorts upcoming runs chronologically by next_run_time, placing unscheduled jobs last', async () => {
+      vi.mocked(api.listJobs).mockResolvedValue([
+        makeJob({ id: 'job-1', name: 'Docs', next_run_time: '2026-08-04T03:00:00Z' }),
+        makeJob({ id: 'job-2', name: 'FamilyMedia', next_run_time: '2026-07-29T03:00:00Z' }),
+        makeJob({ id: 'job-3', name: 'UnscheduledJob', next_run_time: null }),
+      ])
+      renderWithProviders(<Dashboard />)
+      await waitFor(() => {
+        const upcomingSection = screen.getByRole('heading', {
+          name: /upcoming runs/i,
+        }).parentElement
+        expect(upcomingSection).toBeInTheDocument()
+        const jobNames = Array.from(
+          upcomingSection!.querySelectorAll('.flex > span:first-child')
+        ).map((el) => el.textContent)
+        expect(jobNames).toEqual(['FamilyMedia', 'Docs', 'UnscheduledJob'])
+      })
+    })
+
+    it('displays relative time detail in (In X days, Y hours) format', async () => {
+      const mockNow = new Date('2026-07-28T03:00:00Z').getTime()
+      const dateSpy = vi.spyOn(Date, 'now').mockReturnValue(mockNow)
+      try {
+        // 1 day, 2 hours away -> 2026-07-29T05:00:00Z
+        // 7 days, 0 hours away -> 2026-08-04T03:00:00Z
+        vi.mocked(api.listJobs).mockResolvedValue([
+          makeJob({ id: 'job-1', name: 'Docs', next_run_time: '2026-08-04T03:00:00Z' }),
+          makeJob({ id: 'job-2', name: 'FamilyMedia', next_run_time: '2026-07-29T05:00:00Z' }),
+        ])
+        renderWithProviders(<Dashboard />)
+        await waitFor(() => {
+          expect(screen.getByText(/\(In 1 day, 2 hours\)/)).toBeInTheDocument()
+          expect(screen.getByText(/\(In 7 days, 0 hours\)/)).toBeInTheDocument()
+        })
+      } finally {
+        dateSpy.mockRestore()
+      }
+    })
+
+    it('handles singular and plural units correctly in relative time detail', async () => {
+      const mockNow = new Date('2026-07-28T03:00:00Z').getTime()
+      const dateSpy = vi.spyOn(Date, 'now').mockReturnValue(mockNow)
+      try {
+        // 1 day, 1 hour away -> 2026-07-29T04:00:00Z
+        vi.mocked(api.listJobs).mockResolvedValue([
+          makeJob({ id: 'job-1', name: 'SingularJob', next_run_time: '2026-07-29T04:00:00Z' }),
+        ])
+        renderWithProviders(<Dashboard />)
+        await waitFor(() => {
+          expect(screen.getByText(/\(In 1 day, 1 hour\)/)).toBeInTheDocument()
+        })
+      } finally {
+        dateSpy.mockRestore()
+      }
+    })
   })
 
   describe('inline Stop action', () => {
