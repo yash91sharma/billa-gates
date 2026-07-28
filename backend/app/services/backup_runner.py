@@ -766,17 +766,21 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                         ),
                     )
                 else:
-                    # Restic's --json stream emits per-file `message_type=error`
-                    # lines naming the path that failed; stderr usually only
-                    # carries the final fatal. Stitching both into error_output
-                    # gives the operator the *which file* context that pure
-                    # stderr does not (gaps.md H5). Falls back gracefully when
-                    # one or the other is empty.
+                    # stderr first, exactly as the rc=3 branch does. restic puts
+                    # its `message_type=error` lines on **stderr**; stdout
+                    # carries only status and summary. This branch passed stdout
+                    # alone, so `json_errors` was empty on every failed run and
+                    # the "Per-file errors" section never rendered — the same
+                    # bug that made rc=3 report zero failed items, left standing
+                    # in the sibling branch. Stitching both gives the operator
+                    # the *which file* context a post-mortem fatal does not
+                    # (gaps.md H5), and falls back gracefully when either is
+                    # empty.
                     logger.error(
                         f"job_id={job_id} run_id={run_id} "
                         f"step=backup_execution status=failed rc={rc}"
                     )
-                    json_errors = run_output.extract_failed_items(stdout)
+                    json_errors = run_output.extract_failed_items(stderr, stdout)
                     await run_records.update(
                         factory,
                         run_id,

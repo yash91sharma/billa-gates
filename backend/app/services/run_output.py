@@ -20,7 +20,8 @@ Two properties are load-bearing and apply to every formatter below:
 """
 
 import json
-from typing import Dict, List, Tuple
+import re
+from typing import Dict, List, Sequence, Set, Tuple
 
 from app.core.logging import get_logger
 
@@ -34,6 +35,10 @@ logger = get_logger(__name__)
 # actually read before going to look at the mount.
 FAILED_ITEM_PARSE_LIMIT: int = 200
 MAX_REPORTED_FAILED_ITEMS: int = 50
+# How many items must share one message before they render as a tally instead
+# of a list. Below this, the paths are the information; above it, the repeated
+# sentence is noise and the *count* is the information.
+MESSAGE_TALLY_THRESHOLD: int = 5
 # Fallback when restic said something we could not parse: keep the tail, since
 # the fatal and the exit_error line arrive last.
 MAX_STDERR_TAIL_CHARS: int = 4000
@@ -52,6 +57,29 @@ RETENTION_SKIPPED_PARTIAL_NOTE: str = (
     "backup that reads everything — until then this repository keeps growing, "
     "so fix the unreadable items above."
 )
+
+
+class FailedItem(str):
+    """One rendered failure line, carrying the parts it was built from.
+
+    It **is** the string every formatter, caller and test already expects — the
+    parts ride along only so :func:`render_failed_items` can group a flood by
+    cause. Recovering them from the rendered text afterwards is not possible:
+    the format is ``"{path}: {message}"`` and a path may contain any number of
+    colons, so the split is genuinely ambiguous. Carrying them costs two
+    attributes and keeps every existing call site working unchanged.
+    """
+
+    message: str
+    path: str
+
+    def __new__(cls, *, item: str, message: str, phases: List[str]) -> "FailedItem":
+        suffix: str = f" [{', '.join(phases)}]" if phases else ""
+        rendered: str = f"{item}: {message}{suffix}" if item else f"{message}{suffix}"
+        obj = super().__new__(cls, rendered)
+        obj.message = message
+        obj.path = item
+        return obj
 
 
 def extract_failed_items(
@@ -110,11 +138,10 @@ def extract_failed_items(
             if during and during not in phases:
                 phases.append(str(during))
 
-    items: List[str] = []
-    for (item, msg), phases in collected.items():
-        suffix: str = f" [{', '.join(phases)}]" if phases else ""
-        items.append(f"{item}: {msg}{suffix}" if item else f"{msg}{suffix}")
-    return items
+    return [
+        FailedItem(item=item, message=msg, phases=phases)
+        for (item, msg), phases in collected.items()
+    ]
 
 
 def _at_least_suffix(count: int) -> str:
@@ -128,7 +155,67 @@ def _at_least_suffix(count: int) -> str:
     return "+" if count >= FAILED_ITEM_PARSE_LIMIT else ""
 
 
-def render_failed_items(failed_items: List[str]) -> List[str]:
+def _message_signature(message: str) -> str:
+    """What two failures have in common when they share a cause.
+
+    restic embeds the failing path *inside* the message text — the real line is
+    `lstat /sources/FamilyMedia/thumbs/00/2d: too many open files in system`, not
+    a bare errno — so grouping on the message itself groups nothing at all on
+    precisely the floods that need it. Verified against the reported capture:
+    3,418 lines, 3,418 distinct messages, one cause.
+
+    The errno phrase is what restic puts last, after the final `": "`. Two
+    different operations failing the same way (`lstat …: permission denied` and
+    `open …: permission denied`) collapsing into one line is the intent, not a
+    loss: it is one thing to go and fix.
+    """
+    _, separator, tail = message.rpartition(": ")
+    return tail if separator and tail else message
+
+
+def _tally_by_message(failed_items: Sequence[str]) -> List[str]:
+    """Collapse runs of one cause into `N × <message> (first: <path>)`.
+
+    :func:`extract_failed_items` already collapses identical `(item, message)`
+    pairs, which is enough when a directory is reported twice. It does nothing
+    for one cause hitting thousands of *different* paths — the shape of a
+    resource limit rather than a per-file problem. Live example: ~3,600 lines of
+    `too many open files in system`, one per thumbnail, which consumed the whole
+    parse limit and rendered as fifty copies of one sentence. The count is the
+    information there; the individual paths are not.
+
+    Plain strings (a caller that built its own list) are passed through
+    untouched — only parsed :class:`FailedItem`s know their message.
+    """
+    groups: Dict[str, List[FailedItem]] = {}
+    for entry in failed_items:
+        if isinstance(entry, FailedItem):
+            groups.setdefault(_message_signature(entry.message), []).append(entry)
+
+    rendered: List[str] = []
+    tallied: Set[str] = set()
+    # Walk the originals so a tally lands where its first item was reported,
+    # keeping the order restic used.
+    for entry in failed_items:
+        if not isinstance(entry, FailedItem):
+            rendered.append(entry)
+            continue
+        signature = _message_signature(entry.message)
+        group = groups[signature]
+        if len(group) < MESSAGE_TALLY_THRESHOLD:
+            rendered.append(entry)
+            continue
+        if signature in tallied:
+            continue
+        tallied.add(signature)
+        rendered.append(
+            f"{len(group)}{_at_least_suffix(len(failed_items))} × {signature} "
+            f"(first: {group[0].path})"
+        )
+    return rendered
+
+
+def render_failed_items(failed_items: Sequence[str]) -> List[str]:
     """The item lines allowed into `BackupRun.error_output`: at most
     :data:`MAX_REPORTED_FAILED_ITEMS`, followed by an honest "... and N more".
 
@@ -138,14 +225,72 @@ def render_failed_items(failed_items: List[str]) -> List[str]:
     half-succeeded and ~1.8 MiB if it failed outright, from the same source and
     the same parse limit. `error_output` is read on every run-detail fetch, so
     the bound has to hold whichever way the run ended, and one renderer is what
-    keeps the two paths from drifting apart again.
+    keeps the two paths from drifting apart again. It is also where the tally
+    lives, for the same reason: one place decides what a flood looks like.
     """
-    shown: List[str] = failed_items[:MAX_REPORTED_FAILED_ITEMS]
+    tallied: List[str] = _tally_by_message(failed_items)
+    shown: List[str] = tallied[:MAX_REPORTED_FAILED_ITEMS]
     lines: List[str] = list(shown)
-    hidden: int = len(failed_items) - len(shown)
+    hidden: int = len(tallied) - len(shown)
     if hidden > 0:
         lines.append(f"... and {hidden}{_at_least_suffix(len(failed_items))} more")
     return lines
+
+
+# restic reports both descriptor limits with wording that differs by three
+# words, and the two need opposite fixes — so the app has to tell them apart or
+# stay quiet. ENFILE ("...in system") is the host's system-wide table; EMFILE is
+# this process's own RLIMIT_NOFILE.
+_OPEN_FILE_LIMIT_RE = re.compile(r"too many open files", re.IGNORECASE)
+_SYSTEM_FILE_LIMIT_RE = re.compile(r"too many open files in system", re.IGNORECASE)
+
+_ENFILE_NOTE: str = (
+    "This run ran out of file descriptors on the HOST, not in this container. "
+    '"too many open files in system" is errno ENFILE — the host\'s system-wide '
+    "open-file table — so raising this container's `nofile` ulimit will not "
+    "help.\n"
+    "\n"
+    "What does, in order:\n"
+    "  1. Back up fewer files. A source holding hundreds of thousands of small "
+    "generated files (a photo app's thumbnails, transcodes, a build cache) is "
+    "what exhausts the table. Exclude the directories whose contents the "
+    "application can rebuild.\n"
+    "  2. Turn on 'Skip pre-scan' (no-scan) for this job. restic runs its "
+    "size-estimate scan concurrently with the backup, so it walks the whole "
+    "tree twice; the second walk buys only the progress percentage.\n"
+    "  3. Raise the host's limit — on macOS that is `kern.maxfiles`. Note that "
+    "a folder shared into a Linux container from macOS goes through a "
+    "file-sharing bridge that holds a descriptor per file it has looked at, so "
+    "the source's file count lands on the host's table. Mounting the share "
+    "inside the container instead takes that bridge out of the path.\n"
+    "  4. Avoid backing up a tree while another application is actively writing "
+    "to it."
+)
+
+_EMFILE_NOTE: str = (
+    "This run ran out of file descriptors. "
+    '"too many open files" (without "in system") is this process\'s own limit, '
+    "so raising the container's `nofile` ulimit is the fix — `--ulimit "
+    "nofile=1048576` on `docker run`, or a `ulimits:` block in compose. "
+    "Reducing the job's read concurrency lowers the demand in the meantime."
+)
+
+
+def diagnose_open_file_limit(*texts: str) -> str:
+    """The one thing restic's own message cannot tell an operator: which limit.
+
+    restic reports the symptom and stops. Reading ENFILE as a container limit
+    sends someone to raise a `nofile` ulimit that cannot have any effect, and
+    reading EMFILE as a host limit sends them to reconfigure a machine that was
+    fine — so this returns advice only when it can tell the two apart, and ""
+    otherwise. Kept narrow deliberately: it is prepended near the top of
+    `error_output`, and `RunNotifier.failed` pushes only the first 200
+    characters, so a wrong note would displace the real error in the alert.
+    """
+    joined: str = "\n".join(texts)
+    if not _OPEN_FILE_LIMIT_RE.search(joined):
+        return ""
+    return _ENFILE_NOTE if _SYSTEM_FILE_LIMIT_RE.search(joined) else _EMFILE_NOTE
 
 
 def format_partial_backup_error(failed_items: List[str], stderr: str) -> str:
@@ -158,17 +303,22 @@ def format_partial_backup_error(failed_items: List[str], stderr: str) -> str:
     cannot act on.
     """
     count: int = len(failed_items)
+    diagnosis: str = diagnose_open_file_limit(stderr, *failed_items)
     if count:
         parts: List[str] = [
             f"Partial backup: {count}{_at_least_suffix(count)} item(s) could "
             f"not be read; the snapshot was still saved."
         ]
+        if diagnosis:
+            parts.extend(("", diagnosis, ""))
         parts.extend(render_failed_items(failed_items))
         return "\n".join(parts)
 
     parts = [
         "Partial backup: some files could not be read; the snapshot was still saved."
     ]
+    if diagnosis:
+        parts.extend(("", diagnosis))
     tail: str = stderr.strip()
     if tail:
         parts.append("")
@@ -215,6 +365,9 @@ def format_scan_errors(failed_items: List[str]) -> str:
         "that cannot list a directory once may be failing intermittently.",
         "",
     ]
+    diagnosis: str = diagnose_open_file_limit(*failed_items)
+    if diagnosis:
+        parts.extend((diagnosis, ""))
     parts.extend(render_failed_items(failed_items))
     return "\n".join(parts)
 
@@ -222,18 +375,25 @@ def format_scan_errors(failed_items: List[str]) -> str:
 def format_backup_error(rc: int, json_errors: List[str], stderr: str) -> str:
     """Build the user-visible error_output string for a failed backup run.
 
-    Always includes the restic exit code and stderr. When restic emitted
-    per-file JSON error lines on stdout before giving up, those are included
-    too — they name the specific path/operation that caused the failure,
-    which stderr (usually a single post-mortem fatal) does not. Order is
-    chosen so the operator sees the high-level summary first, then the
+    Always includes the restic exit code and stderr, plus the per-file error
+    lines restic emitted before giving up — they name the specific
+    path/operation that caused the failure, which a post-mortem fatal does not.
+    Order is chosen so the operator sees the high-level summary first, then the
     granular per-file context (gaps.md H5).
+
+    A recognised cause goes **above** the stderr dump, not below it:
+    `RunNotifier.failed` pushes only the first 200 characters of this string, so
+    anything under a stderr block never reaches the alert.
 
     The item list goes through :func:`render_failed_items` — the same renderer
     the partial-backup path uses. This one used to print every parsed item
     instead, so the two paths bounded the same DB column differently.
     """
     parts: List[str] = [f"Backup failed (restic exit code {rc})."]
+    diagnosis: str = diagnose_open_file_limit(stderr, *json_errors)
+    if diagnosis:
+        parts.append("")
+        parts.append(diagnosis)
     if stderr.strip():
         parts.append("")
         parts.append(stderr.strip())

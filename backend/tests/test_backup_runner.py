@@ -1272,9 +1272,41 @@ async def test_step5_rc3_error_output_is_never_uninformative(engine):
 
 async def test_step5_rc3_failed_item_list_is_capped(engine):
     """A share that denies a million files must not write a million lines into
-    the run row — error_output is read on every run-detail fetch."""
+    the run row — error_output is read on every run-detail fetch.
+
+    Distinct messages on purpose: identical ones are tallied into a single line
+    (the test below), so a same-message flood would never reach the cap and this
+    would pass without exercising it.
+    """
     from app.services.run_output import MAX_REPORTED_FAILED_ITEMS
 
+    await _setup_job(engine, retain_keep_last=5)
+    run_id = str(uuid.uuid4())
+    flood = "\n".join(
+        json.dumps(
+            {
+                "message_type": "error",
+                "error": {"message": f"device error 0x{i:04x}"},
+                "during": "archival",
+                "item": f"/sources/Docs/f{i}",
+            }
+        )
+        for i in range(500)
+    )
+    await _run_rc3(
+        engine, stdout=json.dumps(BACKUP_SUMMARY), stderr=flood, run_id=run_id
+    )
+
+    run = await _get_run(engine, run_id)
+    listed = [ln for ln in run.error_output.splitlines() if ln.startswith("/sources/")]
+    assert len(listed) == MAX_REPORTED_FAILED_ITEMS
+    assert "more" in run.error_output, "the user must be told the list was truncated"
+    assert len(run.error_output) < 20_000
+
+
+async def test_step5_rc3_one_cause_across_many_paths_is_tallied(engine):
+    """The shape a resource limit makes: one message, thousands of paths. Fifty
+    copies of a single sentence is not a record of anything — the count is."""
     await _setup_job(engine, retain_keep_last=5)
     run_id = str(uuid.uuid4())
     flood = "\n".join(
@@ -1293,10 +1325,12 @@ async def test_step5_rc3_failed_item_list_is_capped(engine):
     )
 
     run = await _get_run(engine, run_id)
-    listed = [ln for ln in run.error_output.splitlines() if ln.startswith("/sources/")]
-    assert len(listed) == MAX_REPORTED_FAILED_ITEMS
-    assert "more" in run.error_output, "the user must be told the list was truncated"
-    assert len(run.error_output) < 20_000
+    tallies = [ln for ln in run.error_output.splitlines() if " × " in ln]
+    assert len(tallies) == 1, run.error_output
+    assert "permission denied" in tallies[0]
+    assert "/sources/Docs/f" in tallies[0], "one path, so it can be checked by hand"
+    # The headline still counts items, not causes — the operator needs the scale.
+    assert "200+ item(s)" in run.error_output
 
 
 async def test_step5_rc3_notification_names_the_count(engine):
@@ -1628,6 +1662,58 @@ async def test_step5_rc0_ignores_stderr_that_names_no_failure(engine):
 
     run = await _get_run(engine, run_id)
     assert run.status == RunStatus.success
+
+
+async def test_step5_a_failed_run_names_the_items_from_stderr(engine):
+    """The rc≠0 twin of the rc=3 lesson, and it was never applied here.
+
+    restic writes `message_type=error` lines to **stderr**; this branch parsed
+    `stdout`, where they never appear — so on every failed run `json_errors` came
+    back empty and the "Per-file errors" section was never rendered. The operator
+    got an undeduplicated stderr dump instead of the capped item list.
+    """
+    await _setup_job(engine, retain_keep_last=5)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    stderr = (
+        '{"message_type":"error","error":{"message":"too many open files in '
+        'system"},"during":"scan","item":"/sources/FamilyMedia/thumbs/ab/cd"}\n'
+        '{"message_type":"exit_error","code":1,"message":"Fatal: unable to open '
+        'repository"}'
+    )
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(1, json.dumps({"message_type": "status"}), stderr, None),
+        ),
+        patch("app.services.run_notifications.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert "/sources/FamilyMedia/thumbs/ab/cd" in run.error_output, (
+        "the failing path is on stderr, which this branch was not parsing"
+    )
+    assert "Per-file errors" in run.error_output
+    # And the recognised-cause note, which is what makes the run actionable.
+    assert "ulimit" in run.error_output
 
 
 # ── Step 7: stats update ──────────────────────────────────────────────────────

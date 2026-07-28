@@ -293,6 +293,135 @@ def test_format_scan_errors_names_the_paths_and_the_consequence():
     assert "snapshot" in rendered.lower()
 
 
+def test_a_flood_of_one_cause_is_tallied_rather_than_repeated():
+    """Reported live: ~3,600 error lines, every one of them the same message with
+    a different path. `extract_failed_items` collapses identical (item, message)
+    pairs, but the paths differ, so nothing collapsed — one cause consumed the
+    whole parse limit and rendered as 50 copies of a single sentence."""
+    stream = "\n".join(
+        json.dumps(
+            {
+                "message_type": "error",
+                "error": {"message": "too many open files in system"},
+                "item": f"/sources/FamilyMedia/thumbs/ab/{i:02x}",
+                "during": "scan",
+            }
+        )
+        for i in range(120)
+    )
+    lines = render_failed_items(extract_failed_items(stream))
+
+    assert len(lines) == 1, f"one cause, one line: {lines}"
+    assert "120" in lines[0] and "too many open files in system" in lines[0]
+    assert "/sources/FamilyMedia/thumbs/ab/" in lines[0], (
+        "name one, so it can be checked"
+    )
+
+
+def test_the_tally_survives_restic_putting_the_path_inside_the_message():
+    """The shape of the real capture, and the reason grouping on the raw message
+    is not enough: restic writes `lstat <path>: <errno>`, so 3,418 lines of one
+    cause carried 3,418 distinct messages."""
+    stream = "\n".join(
+        json.dumps(
+            {
+                "message_type": "error",
+                "error": {
+                    "message": (
+                        f"lstat /sources/FamilyMedia/thumbs/00/{i:02x}: "
+                        "too many open files in system"
+                    )
+                },
+                "item": f"/sources/FamilyMedia/thumbs/00/{i:02x}",
+                "during": "scan",
+            }
+        )
+        for i in range(80)
+    )
+    lines = render_failed_items(extract_failed_items(stream))
+
+    assert len(lines) == 1, f"one cause, one line: {lines[:3]}"
+    assert lines[0].startswith("80 × too many open files in system"), lines[0]
+
+
+def test_distinct_causes_are_still_listed_individually():
+    """The tally must not swallow a mixed failure — three unrelated causes are
+    three things to fix, and collapsing them would hide two of them."""
+    stream = "\n".join(
+        json.dumps(
+            {
+                "message_type": "error",
+                "error": {"message": msg},
+                "item": f"/sources/x/{i}",
+            }
+        )
+        for i, msg in enumerate(
+            ("permission denied", "input/output error", "no such file")
+        )
+    )
+    lines = render_failed_items(extract_failed_items(stream))
+
+    assert len(lines) == 3
+    assert any("input/output error" in ln for ln in lines)
+
+
+@pytest.mark.parametrize(
+    "formatter",
+    (
+        lambda items, stderr: format_backup_error(1, items, stderr),
+        format_partial_backup_error,
+        lambda items, stderr: format_scan_errors(items),
+    ),
+)
+def test_every_formatter_explains_a_file_descriptor_exhaustion(formatter):
+    """restic's message names the symptom and nothing else. The one thing an
+    operator cannot infer from it is which limit was hit — and getting that
+    wrong sends them to raise a container ulimit that has no effect."""
+    items = extract_failed_items(
+        json.dumps(
+            {
+                "message_type": "error",
+                "error": {"message": "too many open files in system"},
+                "item": "/sources/FamilyMedia/thumbs/ab/cd",
+                "during": "scan",
+            }
+        )
+    )
+    out = formatter(items, "Fatal: too many open files in system")
+
+    assert "ENFILE" in out or "system-wide" in out
+    assert "ulimit" in out, "say plainly that the container's limit is the wrong knob"
+    assert "pre-scan" in out.lower() or "no-scan" in out.lower()
+
+
+def test_the_per_process_limit_gets_the_opposite_advice():
+    """EMFILE ("too many open files", no "in system") *is* the container's own
+    limit, where raising `nofile` is exactly the fix. One note for both would
+    have to be wrong about one of them."""
+    out = format_backup_error(1, [], "Fatal: open /x: too many open files")
+
+    assert "ulimit" in out
+    assert "ENFILE" not in out
+
+
+def test_no_diagnosis_is_added_to_an_unrelated_failure():
+    """The note is additive and must stay narrow — advice about descriptors on a
+    wrong-password run is noise that pushes the real error out of the ntfy
+    excerpt."""
+    out = format_backup_error(12, [], "Fatal: wrong password or no key found")
+
+    assert "ulimit" not in out
+    assert "wrong password" in out
+
+
+def test_the_diagnosis_leads_so_it_survives_the_notification_excerpt():
+    """`RunNotifier.failed` pushes only the first 200 characters of
+    `error_output`, so a note buried under a stderr dump reaches nobody."""
+    out = format_backup_error(1, [], "Fatal: too many open files in system")
+
+    assert "file descriptor" in out[:200].lower()
+
+
 def test_format_scan_errors_is_empty_for_a_clean_run():
     """The caller checks the item list, but a formatter that invents a headline
     from nothing would put a scary empty note on every successful run."""

@@ -466,6 +466,49 @@ def test_bounded_output_drops_past_the_cap_and_says_so():
     assert "capped at 100 characters" in text
 
 
+def test_bounded_output_keeps_the_tail_when_a_flood_fills_the_cap():
+    """The line that ends a run arrives **last**, so on a flood it is exactly the
+    line the cap discards.
+
+    Reported live: a backup over an SMB source hit `too many open files in
+    system` on thousands of paths, and the run recorded 3,418 omitted lines and
+    no cause at all — restic's terminating `Fatal:` had been dropped behind the
+    flood that caused it. A reserved tail is wording-independent, which matters
+    because restic's message text is explicitly not a contract (gaps.md H5).
+    """
+    out = BoundedOutput(password="", max_chars=4000)
+    for i in range(2000):
+        out.add(f'{{"message_type":"error","item":"/sources/photos/{i}"}}')
+    out.add("Fatal: unable to open repository: too many open files in system")
+
+    text = out.text()
+    assert "Fatal: unable to open repository" in text, (
+        "the fatal is the whole point of keeping the record"
+    )
+    assert "/sources/photos/0" in text, "the head still shows where it started"
+    assert "more output line(s) omitted" in text
+
+
+def test_bounded_output_stays_bounded_once_it_keeps_a_tail():
+    """The tail is carved out of the existing budget, not added to it — the
+    ceiling that lets this string sit in a row read on every run-detail fetch
+    has to hold whatever restic threw at it."""
+    out = BoundedOutput(password="", max_chars=4000)
+    for i in range(5000):
+        out.add(f"line {i} " + "z" * 60)
+
+    # Budget, plus the one-line omission notice.
+    assert len(out.text()) <= 4000 + 200
+
+
+def test_bounded_output_adds_no_tail_when_nothing_was_dropped():
+    """Short output must read exactly as it did before — no marker, no repeats."""
+    out = BoundedOutput(password="")
+    for line in ("first", "second", "third"):
+        out.add(line)
+    assert out.text() == "first\nsecond\nthird"
+
+
 def test_bounded_output_force_bypasses_the_cap():
     """The summary arrives last, after any error flood that may have filled the
     cap, and it drives every stats column — it must survive regardless."""

@@ -23,7 +23,18 @@ the length of the run.
 
 import codecs
 import json
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Tuple
+from collections import deque
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Deque,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    Tuple,
+)
 
 from app.core.logging import get_logger
 
@@ -33,6 +44,9 @@ logger = get_logger(__name__)
 # lines) and still small enough to sit in a DB row and a run-detail response.
 MAX_RETAINED_OUTPUT_CHARS: int = 256 * 1024
 MAX_RETAINED_LINE_CHARS: int = 8 * 1024
+# Reserved *inside* MAX_RETAINED_OUTPUT_CHARS for the end of the stream. See
+# BoundedOutput: a run's fatal arrives last, so a head-only budget drops it.
+MAX_RETAINED_TAIL_CHARS: int = 8 * 1024
 STREAM_CHUNK_BYTES: int = 65536
 
 # How long restic's scan totals must hold still before the app concludes the
@@ -367,16 +381,37 @@ class BoundedOutput:
     Keeps whole lines up to `max_chars`, truncates any single oversized line,
     and counts what it had to drop so the caller can say output was omitted
     rather than silently losing it.
+
+    **Both ends of the stream are kept, not just the head.** A budget spent
+    front-to-back discards the newest lines — and the line that ends a run
+    always arrives last, so on an error flood the cap threw away precisely the
+    line explaining the failure it was reporting. Observed live: a backup over
+    an SMB source hit `too many open files in system` on thousands of paths and
+    recorded "3418 more output line(s) omitted" with no cause anywhere in the
+    row, because restic's terminating `Fatal:` sat behind the flood that caused
+    it. A reserved tail is carved out of `max_chars` (never added to it — this
+    string is loaded on every run-detail fetch) and is deliberately
+    wording-independent: restic's message text is not a contract, so matching
+    on `Fatal:` would be one rename away from losing the line again.
     """
 
     def __init__(
-        self, password: str, max_chars: int = MAX_RETAINED_OUTPUT_CHARS
+        self,
+        password: str,
+        max_chars: int = MAX_RETAINED_OUTPUT_CHARS,
+        tail_chars: int = MAX_RETAINED_TAIL_CHARS,
     ) -> None:
         self._password = password
         self._max_chars = max_chars
+        # Never more than half the budget, so a small `max_chars` (the tests
+        # use 50) cannot leave the head with nothing.
+        self._tail_max = min(tail_chars, max_chars // 2)
+        self._head_max = max_chars - self._tail_max
         self._lines: List[str] = []
         self._chars = 0
         self._dropped = 0
+        self._tail: Deque[str] = deque()
+        self._tail_chars = 0
 
     def scrub(self, line: str) -> str:
         """Strip the repo password. Per line now, since there is no longer a
@@ -386,24 +421,37 @@ class BoundedOutput:
     def add(self, line: str, *, force: bool = False) -> None:
         """Retain one line, unless that would push us past the ceiling.
 
-        `force` is for the lines that must survive at any cost (the summary),
-        which arrive last and would otherwise be lost behind an error flood.
+        A line that does not fit the head is not lost outright: it enters the
+        tail ring, where it survives until a newer line evicts it. `force` is
+        for the lines that must survive at any cost (the summary), which arrive
+        last and would otherwise be lost behind an error flood.
         """
         if len(line) > MAX_RETAINED_LINE_CHARS:
             line = line[:MAX_RETAINED_LINE_CHARS] + "…<truncated>"
-        if not force and self._chars + len(line) > self._max_chars:
-            self._dropped += 1
+        if force or self._chars + len(line) <= self._head_max:
+            self._lines.append(line)
+            self._chars += len(line) + 1
             return
-        self._lines.append(line)
-        self._chars += len(line) + 1
+        self._dropped += 1
+        self._tail.append(line)
+        self._tail_chars += len(line) + 1
+        while self._tail and self._tail_chars > self._tail_max:
+            self._tail_chars -= len(self._tail.popleft()) + 1
 
     def text(self, *, extra: Optional[str] = None) -> str:
         parts = list(self._lines)
         if self._dropped:
-            parts.append(
-                f"... {self._dropped} more output line(s) omitted "
-                f"(retained output is capped at {self._max_chars} characters)"
-            )
+            # Only what neither end kept is "omitted" — the tail lines are
+            # printed right below, and counting them as missing would send the
+            # operator looking for output that is on the screen.
+            hidden = self._dropped - len(self._tail)
+            if hidden > 0:
+                parts.append(
+                    f"... {hidden} more output line(s) omitted "
+                    f"(retained output is capped at {self._max_chars} "
+                    f"characters); the last {len(self._tail)} line(s) follow:"
+                )
+            parts.extend(self._tail)
         if extra:
             parts.append(extra)
         return "\n".join(parts)
