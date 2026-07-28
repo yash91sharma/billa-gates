@@ -1,7 +1,9 @@
 import { Eye, EyeOff, Loader2 } from 'lucide-react'
+import { Button } from './ui/button'
+import { Switch } from './ui/switch'
 import { useState } from 'react'
 import type { BackupJob } from '../lib/types'
-import FieldLabel, { helpId, type FieldHelp } from './FieldLabel'
+import FieldLabel, { helpId, labelId, type FieldHelp } from './FieldLabel'
 import ScheduleInput, { type ScheduleValue } from './ScheduleInput'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
 import { TooltipProvider } from './ui/tooltip'
@@ -228,7 +230,14 @@ const HELP: Record<string, FieldHelp> = {
   },
 }
 
-const inputCls = 'border rounded px-2 py-1 text-sm w-full'
+// The same surface the `Input` primitive renders (components/ui/input.tsx),
+// applied as a class because this form drives ~30 native inputs, selects and
+// textareas — several of which stay native on purpose (the source and
+// destination pickers are real `<select>`s so the browser's own picker shows
+// up on a phone). Keeping one string in step with the primitive is what stops
+// the form drifting into its own visual language, as it had.
+const inputCls =
+  'h-8 w-full min-w-0 rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50'
 
 export interface JobFormProps {
   job?: BackupJob
@@ -249,6 +258,9 @@ export interface JobFormProps {
 export default function JobForm({
   job,
   onSubmit,
+  // Both call sites pass this, but the form never rendered a control for it —
+  // so an opened create form had no way out except reloading the page.
+  onCancel,
   conflictingJob,
   sourceMounts = [],
   destinationMounts = [],
@@ -461,7 +473,7 @@ export default function JobForm({
 
           {/* Basic section */}
           <section>
-            <h2 className="text-base font-semibold mb-3">Basic</h2>
+            <h2 className="font-heading mb-3 text-base font-medium">Basic</h2>
             <div className="space-y-3">
               <div>
                 <FieldLabel htmlFor="job-name" help={HELP.name} />
@@ -624,12 +636,12 @@ export default function JobForm({
                 )}
               </div>
 
-              <div className="flex items-center gap-2">
-                <input
+              <div className="flex items-center gap-2.5">
+                <Switch
                   id="job-enabled"
-                  type="checkbox"
                   checked={enabled}
-                  onChange={(e) => setEnabled(e.target.checked)}
+                  onCheckedChange={setEnabled}
+                  aria-labelledby={labelId('job-enabled')}
                   aria-describedby={helpId('job-enabled')}
                 />
                 <FieldLabel htmlFor="job-enabled" help={HELP.enabled} variant="inline" />
@@ -647,7 +659,7 @@ export default function JobForm({
             <button
               type="button"
               onClick={() => setRetentionExpanded(!retentionExpanded)}
-              className="text-base font-semibold w-full text-left py-1"
+              className="font-heading w-full py-1 text-left text-base font-medium"
             >
               Retention Policy
             </button>
@@ -742,7 +754,7 @@ export default function JobForm({
           </section>
 
           <section>
-            <h2 className="text-base font-semibold mb-3">Backup Options</h2>
+            <h2 className="font-heading mb-3 text-base font-medium">Backup Options</h2>
             <div className="space-y-3">
               <div>
                 <FieldLabel htmlFor="exclude-patterns" help={HELP.excludePatterns} />
@@ -753,7 +765,7 @@ export default function JobForm({
                   rows={3}
                   placeholder={'*.tmp\nnode_modules/'}
                   aria-describedby={helpId('exclude-patterns')}
-                  className={`${inputCls} font-mono`}
+                  className={`${inputCls} h-auto py-2 font-mono`}
                 />
               </div>
 
@@ -766,38 +778,38 @@ export default function JobForm({
                   rows={2}
                   placeholder={'.nobackup'}
                   aria-describedby={helpId('exclude-if-present')}
-                  className={`${inputCls} font-mono`}
+                  className={`${inputCls} h-auto py-2 font-mono`}
                 />
               </div>
 
-              <div className="flex items-center gap-2">
-                <input
+              <div className="flex items-center gap-2.5">
+                <Switch
                   id="exclude-caches"
-                  type="checkbox"
                   checked={excludeCaches}
-                  onChange={(e) => setExcludeCaches(e.target.checked)}
+                  onCheckedChange={setExcludeCaches}
+                  aria-labelledby={labelId('exclude-caches')}
                   aria-describedby={helpId('exclude-caches')}
                 />
                 <FieldLabel htmlFor="exclude-caches" help={HELP.excludeCaches} variant="inline" />
               </div>
 
-              <div className="flex items-center gap-2">
-                <input
+              <div className="flex items-center gap-2.5">
+                <Switch
                   id="one-file-system"
-                  type="checkbox"
                   checked={oneFileSystem}
-                  onChange={(e) => setOneFileSystem(e.target.checked)}
+                  onCheckedChange={setOneFileSystem}
+                  aria-labelledby={labelId('one-file-system')}
                   aria-describedby={helpId('one-file-system')}
                 />
                 <FieldLabel htmlFor="one-file-system" help={HELP.oneFileSystem} variant="inline" />
               </div>
 
-              <div className="flex items-center gap-2">
-                <input
+              <div className="flex items-center gap-2.5">
+                <Switch
                   id="no-scan"
-                  type="checkbox"
                   checked={noScan}
-                  onChange={(e) => setNoScan(e.target.checked)}
+                  onCheckedChange={setNoScan}
+                  aria-labelledby={labelId('no-scan')}
                   aria-describedby={helpId('no-scan')}
                 />
                 <FieldLabel htmlFor="no-scan" help={HELP.noScan} variant="inline" />
@@ -879,13 +891,17 @@ export default function JobForm({
             </div>
           </section>
 
-          <button
-            type="submit"
-            className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground hover:bg-primary/90 rounded-sm text-sm font-medium disabled:opacity-70 disabled:cursor-not-allowed"
-          >
-            {submitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
-            {submitting ? (isEdit ? 'Saving…' : 'Creating…') : isEdit ? 'Save' : 'Create'}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="submit" size="lg">
+              {submitting && <Loader2 className="animate-spin" aria-hidden="true" />}
+              {submitting ? (isEdit ? 'Saving…' : 'Creating…') : isEdit ? 'Save' : 'Create'}
+            </Button>
+            {onCancel && (
+              <Button type="button" variant="outline" size="lg" onClick={onCancel}>
+                Cancel
+              </Button>
+            )}
+          </div>
         </fieldset>
       </form>
 

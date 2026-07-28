@@ -1,41 +1,51 @@
 import type { CheckStatus, RunStatus } from '../lib/types'
 
-// Soft pastel badge palette — pale tonal background + matching darker text.
-// Aligned with the Arctic theme; running uses the accent blue family.
-const BADGE_BASE = 'rounded-sm px-2 py-0.5 text-xs font-medium'
+// Soft tonal badge: a pale fill with matching darker text, plus a dot in the
+// same family. The dot is what makes the set scannable down a column — at 12px
+// the difference between "passed" and "failed" is two words of similar length,
+// and the eye finds a colour before it reads a word.
+//
+// The colours come from the theme's `*-subtle` tokens rather than raw palette
+// classes (`bg-green-100 text-green-800`, as this used to be). Those had
+// already drifted: `running` here was blue-100 while the Dashboard's `backup`
+// kind badge was sky-100, two names for one idea with nothing tying them
+// together. The `badge-*` marker classes are kept — tests and the screenshot
+// gallery identify badges by them.
+const BADGE_BASE =
+  'inline-flex items-center gap-1.5 rounded-sm px-2 py-0.5 text-xs font-medium whitespace-nowrap'
 
 const STATUS_CONFIG: Record<string, { label: string; className: string }> = {
   running: {
     label: 'running',
-    className: `badge-running bg-blue-100 text-blue-800 ${BADGE_BASE}`,
+    className: `badge-running bg-info-subtle text-info-subtle-foreground ${BADGE_BASE}`,
   },
   success: {
     label: 'success',
-    className: `badge-success bg-green-100 text-green-800 ${BADGE_BASE}`,
+    className: `badge-success bg-success-subtle text-success-subtle-foreground ${BADGE_BASE}`,
   },
   warning: {
     label: 'warning',
-    className: `badge-warning bg-amber-100 text-amber-800 ${BADGE_BASE}`,
+    className: `badge-warning bg-warning-subtle text-warning-subtle-foreground ${BADGE_BASE}`,
   },
   failed: {
     label: 'failed',
-    className: `badge-failed bg-red-100 text-red-800 ${BADGE_BASE}`,
+    className: `badge-failed bg-danger-subtle text-danger-subtle-foreground ${BADGE_BASE}`,
   },
   skipped: {
     label: 'skipped',
-    className: `badge-skipped bg-slate-100 text-slate-600 ${BADGE_BASE}`,
+    className: `badge-skipped bg-neutral-subtle text-neutral-subtle-foreground ${BADGE_BASE}`,
   },
   canceled: {
     label: 'canceled',
-    className: `badge-canceled bg-slate-100 text-slate-700 ${BADGE_BASE}`,
+    className: `badge-canceled bg-neutral-subtle text-neutral-subtle-foreground ${BADGE_BASE}`,
   },
   passed: {
     label: 'passed',
-    className: `badge-success bg-green-100 text-green-800 ${BADGE_BASE}`,
+    className: `badge-success bg-success-subtle text-success-subtle-foreground ${BADGE_BASE}`,
   },
   pending: {
     label: 'pending',
-    className: `badge-pending bg-slate-100 text-slate-500 ${BADGE_BASE}`,
+    className: `badge-pending bg-neutral-subtle text-neutral-subtle-foreground ${BADGE_BASE}`,
   },
 }
 
@@ -48,6 +58,16 @@ export default function RunStatusBadge({ status, className = '' }: RunStatusBadg
   const key = status ?? 'pending'
   const config = STATUS_CONFIG[key] ?? STATUS_CONFIG.pending
   return (
-    <span className={`${config.className}${className ? ' ' + className : ''}`}>{config.label}</span>
+    <span className={`${config.className}${className ? ' ' + className : ''}`}>
+      {/* Decorative: the label beside it already says the status, and a screen
+          reader announcing "circle" adds nothing. */}
+      <span
+        aria-hidden="true"
+        className={`size-1.5 shrink-0 rounded-full bg-current ${
+          key === 'running' ? 'animate-pulse' : ''
+        }`}
+      />
+      {config.label}
+    </span>
   )
 }

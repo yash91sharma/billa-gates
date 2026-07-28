@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import { cn } from '@/lib/utils'
+import { Input } from './ui/input'
 
 export interface ScheduleValue {
   type: 'cron' | 'interval'
@@ -73,35 +75,37 @@ export default function ScheduleInput({ value, onChange }: ScheduleInputProps) {
 
   return (
     <div data-testid="schedule-input">
-      <div className="flex gap-2 mb-2">
-        <button
-          type="button"
-          aria-pressed={isInterval ? 'true' : 'false'}
-          onClick={() => switchMode('interval')}
-          className="px-3 py-1 rounded border text-sm"
-        >
-          Interval
-        </button>
-        <button
-          type="button"
-          aria-pressed={isCron ? 'true' : 'false'}
-          onClick={() => switchMode('cron')}
-          className="px-3 py-1 rounded border text-sm"
-        >
-          Cron
-        </button>
+      {/* A segmented control: the selected half is filled, the other is not.
+          Both buttons used to carry the same classes, so the only signal that
+          you were editing a cron expression rather than an interval was the
+          label above the field — the control itself looked identical in either
+          mode, which is how you end up typing `6h` into a cron box. */}
+      <div className="mb-2 inline-flex rounded-md border border-border bg-muted p-0.5">
+        {(['interval', 'cron'] as const).map((mode) => {
+          const selected = mode === 'interval' ? isInterval : isCron
+          return (
+            <button
+              key={mode}
+              type="button"
+              aria-pressed={selected ? 'true' : 'false'}
+              onClick={() => switchMode(mode)}
+              className={cn(
+                'rounded-sm px-3 py-1 text-sm font-medium capitalize transition-colors',
+                selected
+                  ? 'bg-card text-foreground shadow-xs'
+                  : 'text-muted-foreground hover:text-foreground'
+              )}
+            >
+              {mode}
+            </button>
+          )
+        })}
       </div>
       <div>
-        <label htmlFor={inputId} className="block text-sm font-medium mb-1">
+        <label htmlFor={inputId} className="mb-1 block text-sm font-medium">
           {inputLabel}
         </label>
-        <input
-          id={inputId}
-          type="text"
-          value={inputValue}
-          onChange={handleInputChange}
-          className="border rounded px-2 py-1 text-sm w-full"
-        />
+        <Input id={inputId} type="text" value={inputValue} onChange={handleInputChange} />
         {intervalError && <p className="text-destructive text-xs mt-1">{intervalError}</p>}
         {cronError && <p className="text-destructive text-xs mt-1">{cronError}</p>}
         {intervalPreview && <p className="text-muted-foreground text-xs mt-1">{intervalPreview}</p>}

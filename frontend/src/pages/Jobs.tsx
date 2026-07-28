@@ -1,11 +1,37 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { HardDriveDownload, Play, Plus, Trash2 } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
+import EmptyState from '../components/EmptyState'
 import JobForm from '../components/JobForm'
+import PageHeader from '../components/PageHeader'
 import RunStatusBadge from '../components/RunStatusBadge'
+import { Button } from '../components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
+import { Checkbox } from '../components/ui/checkbox'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../components/ui/dialog'
+import { Skeleton } from '../components/ui/skeleton'
+import { Switch } from '../components/ui/switch'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '../components/ui/table'
 import * as api from '../lib/api'
 import type { BackupJob } from '../lib/types'
 import { parseApiError, type ConflictingJob } from '../lib/utils'
+
+const COLUMN_COUNT = 7
 
 export default function Jobs() {
   const navigate = useNavigate()
@@ -20,6 +46,7 @@ export default function Jobs() {
   const {
     data: jobs,
     error: jobsError,
+    isPending,
     refetch,
   } = useQuery({
     queryKey: ['jobs'],
@@ -41,9 +68,12 @@ export default function Jobs() {
 
   if (jobsError) {
     return (
-      <div className="p-6">
-        <p className="text-destructive">Error: could not load jobs.</p>
-      </div>
+      <>
+        <PageHeader title="Jobs" />
+        <Card className="border border-destructive/30 bg-destructive/5">
+          <CardContent className="text-destructive">Error: could not load jobs.</CardContent>
+        </Card>
+      </>
     )
   }
 
@@ -106,167 +136,254 @@ export default function Jobs() {
   }
 
   return (
-    <div className="p-6">
-      <div className="flex justify-between items-center mb-4">
-        <h1 className="text-2xl font-bold">Jobs</h1>
-        <button
-          className="bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded-sm"
-          onClick={() => setShowCreateForm(true)}
-        >
-          Create Job
-        </button>
-      </div>
+    <>
+      <PageHeader
+        title="Jobs"
+        description="Every configured backup, its schedule, and how its last run went."
+        actions={
+          !showCreateForm && (
+            <Button size="lg" onClick={() => setShowCreateForm(true)}>
+              <Plus aria-hidden="true" />
+              Create Job
+            </Button>
+          )
+        }
+      />
 
-      {runError && <p className="text-destructive mb-2">{runError}</p>}
-      {deleteError && <p className="text-destructive mb-2">{deleteError}</p>}
-
-      {!jobToDelete && jobs?.length === 0 && (
-        <p className="text-muted-foreground">No backup jobs configured yet.</p>
+      {(runError || deleteError) && (
+        <div className="mb-4 space-y-2">
+          {runError && (
+            <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              {runError}
+            </p>
+          )}
+          {deleteError && (
+            <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              {deleteError}
+            </p>
+          )}
+        </div>
       )}
 
-      {!jobToDelete && jobs && jobs.length > 0 && (
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left border-b">
-              <th className="py-2 pr-4">Name</th>
-              <th className="py-2 pr-4">Source → Dest</th>
-              <th className="py-2 pr-4">Schedule</th>
-              <th className="py-2 pr-4">Last Run</th>
-              <th className="py-2 pr-4">Next Run</th>
-              <th className="py-2 pr-4">Status</th>
-              <th className="py-2">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="[&>tr:nth-child(even)]:bg-muted/40">
-            {jobs.map((job) => (
-              <tr key={job.id} className="border-b hover:bg-muted/60">
-                <td className="py-2 pr-4">
-                  <Link to={`/jobs/${job.id}`} className="text-primary hover:underline">
-                    {job.name}
-                  </Link>
-                </td>
-                <td className="py-2 pr-4">
-                  <span>{job.source_label}</span>
-                  {' → '}
-                  <span>{job.destination_label}</span>
-                </td>
-                <td className="py-2 pr-4">{job.schedule_value}</td>
-                <td className="py-2 pr-4">
-                  {job.last_run ? <RunStatusBadge status={job.last_run.status} /> : '—'}
-                </td>
-                <td className="py-2 pr-4">
-                  {job.next_run_time ? new Date(job.next_run_time).toLocaleString() : '—'}
-                </td>
-                <td className="py-2 pr-4">
-                  <input
-                    type="checkbox"
-                    checked={job.enabled}
-                    onChange={() => handleToggleEnabled(job)}
-                    aria-label="enabled"
-                    className="mr-1"
-                  />
-                  {job.enabled ? 'Enabled' : 'Disabled'}
-                </td>
-                <td className="py-2 flex gap-2">
-                  <button
-                    className="text-sm text-primary hover:underline"
-                    onClick={() => handleRunNow(job)}
-                  >
-                    Run Now
-                  </button>
-                  <button
-                    className="text-sm text-destructive hover:underline"
-                    onClick={() => openDeleteDialog(job)}
-                  >
-                    Delete
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      {showCreateForm ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>New backup job</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {createError && (
+              <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+                {createError}
+              </div>
+            )}
+            <JobForm
+              sourceMounts={sourceMounts ?? []}
+              destinationMounts={destinationMounts ?? []}
+              conflictingJob={createConflict ?? undefined}
+              onSubmit={async (data) => {
+                setCreateError(null)
+                setCreateConflict(null)
+                try {
+                  await api.createJob(data)
+                  setShowCreateForm(false)
+                  refetch()
+                } catch (err: unknown) {
+                  // Surface backend detail strings; the duplicate-job 409 nests
+                  // an object, which parseApiError flattens (rendering it raw
+                  // would crash React).
+                  const { message, conflictingJob } = parseApiError(err)
+                  setCreateError(message || 'Failed to create job.')
+                  setCreateConflict(conflictingJob)
+                }
+              }}
+              onCancel={() => {
+                setCreateError(null)
+                setCreateConflict(null)
+                setShowCreateForm(false)
+              }}
+            />
+          </CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardContent>
+            {isPending ? (
+              <JobsTableSkeleton />
+            ) : jobs && jobs.length > 0 ? (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Source → Dest</TableHead>
+                    <TableHead>Schedule</TableHead>
+                    <TableHead>Last Run</TableHead>
+                    <TableHead>Next Run</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {jobs.map((job) => (
+                    <TableRow key={job.id}>
+                      <TableCell className="font-medium">
+                        <Link to={`/jobs/${job.id}`} className="text-primary hover:underline">
+                          {job.name}
+                        </Link>
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">
+                        <span className="text-foreground">{job.source_label}</span>
+                        {' → '}
+                        <span className="text-foreground">{job.destination_label}</span>
+                      </TableCell>
+                      <TableCell className="tabular-nums">{job.schedule_value}</TableCell>
+                      <TableCell>
+                        {job.last_run ? <RunStatusBadge status={job.last_run.status} /> : '—'}
+                      </TableCell>
+                      <TableCell className="tabular-nums whitespace-nowrap">
+                        {job.next_run_time ? new Date(job.next_run_time).toLocaleString() : '—'}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <Switch
+                            checked={job.enabled}
+                            onCheckedChange={() => handleToggleEnabled(job)}
+                            aria-label="enabled"
+                          />
+                          <span className="text-muted-foreground">
+                            {job.enabled ? 'Enabled' : 'Disabled'}
+                          </span>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center justify-end gap-1">
+                          <Button variant="ghost" size="sm" onClick={() => handleRunNow(job)}>
+                            <Play aria-hidden="true" />
+                            Run Now
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            onClick={() => openDeleteDialog(job)}
+                          >
+                            <Trash2 aria-hidden="true" />
+                            Delete
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            ) : (
+              <EmptyState
+                icon={HardDriveDownload}
+                title="No backup jobs configured yet"
+                description="A job pairs a source mount with a destination repository and a schedule. Create one to start backing up."
+                action={
+                  <Button onClick={() => setShowCreateForm(true)}>
+                    <Plus aria-hidden="true" />
+                    Create Job
+                  </Button>
+                }
+              />
+            )}
+          </CardContent>
+        </Card>
       )}
 
-      {jobToDelete && (
-        <div
-          role="dialog"
-          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
-        >
-          <div className="bg-white rounded p-6 max-w-md w-full">
-            <p className="mb-4">
-              Are you sure you want to delete &ldquo;{jobToDelete.name}&rdquo;? This cannot be
-              undone.
+      <Dialog
+        open={jobToDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setJobToDelete(null)
+            setDeleteRepository(false)
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete “{jobToDelete?.name}”?</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete this job? This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 text-sm">
+            <p className="text-muted-foreground">
+              The backup repository is kept by default, so a new job named “{jobToDelete?.name}” on{' '}
+              <code className="font-mono">{jobToDelete?.destination_label}</code> will continue its
+              history.
             </p>
-            <p className="text-muted-foreground text-sm mb-4">
-              The backup repository is kept by default, so a new job named &ldquo;
-              {jobToDelete.name}&rdquo; on <code>{jobToDelete.destination_label}</code> will
-              continue its history.
-            </p>
-            <label className="flex items-start gap-2 mb-4 text-sm">
-              <input
-                type="checkbox"
+            <label className="flex items-start gap-2.5">
+              <Checkbox
                 className="mt-0.5"
                 checked={deleteRepository}
-                onChange={(e) => setDeleteRepository(e.target.checked)}
+                onCheckedChange={(checked) => setDeleteRepository(checked === true)}
               />
               <span>
                 Also permanently delete the repository and all its snapshots at{' '}
-                <code>
-                  /destinations/{jobToDelete.destination_label}/{jobToDelete.name}
+                <code className="font-mono">
+                  /destinations/{jobToDelete?.destination_label}/{jobToDelete?.name}
                 </code>
                 . <span className="text-destructive">This cannot be undone.</span>
               </span>
             </label>
-            <div className="flex gap-2 justify-end">
-              <button
-                className="px-4 py-2 bg-destructive text-destructive-foreground hover:bg-destructive/90 rounded-sm"
-                onClick={handleConfirmDelete}
-              >
-                {deleteRepository ? 'Yes, Delete Job and Repository' : 'Yes, Delete'}
-              </button>
-              <button className="px-4 py-2 border rounded" onClick={() => setJobToDelete(null)}>
-                Cancel
-              </button>
-            </div>
           </div>
-        </div>
-      )}
 
-      {showCreateForm && (
-        <div className="mt-6 space-y-3">
-          {createError && (
-            <div className="bg-destructive/10 border border-destructive/30 rounded-sm p-3 text-sm text-destructive">
-              {createError}
-            </div>
-          )}
-          <JobForm
-            sourceMounts={sourceMounts ?? []}
-            destinationMounts={destinationMounts ?? []}
-            conflictingJob={createConflict ?? undefined}
-            onSubmit={async (data) => {
-              setCreateError(null)
-              setCreateConflict(null)
-              try {
-                await api.createJob(data)
-                setShowCreateForm(false)
-                refetch()
-              } catch (err: unknown) {
-                // Surface backend detail strings; the duplicate-job 409 nests
-                // an object, which parseApiError flattens (rendering it raw
-                // would crash React).
-                const { message, conflictingJob } = parseApiError(err)
-                setCreateError(message || 'Failed to create job.')
-                setCreateConflict(conflictingJob)
-              }
-            }}
-            onCancel={() => {
-              setCreateError(null)
-              setCreateConflict(null)
-              setShowCreateForm(false)
-            }}
-          />
-        </div>
-      )}
-    </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              size="lg"
+              onClick={() => {
+                setJobToDelete(null)
+                setDeleteRepository(false)
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="lg"
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={handleConfirmDelete}
+            >
+              {deleteRepository ? 'Yes, Delete Job and Repository' : 'Yes, Delete'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
+
+/**
+ * Shown while the job list is in flight. The page used to render nothing at
+ * all until the fetch landed, so opening it flashed an empty white frame —
+ * indistinguishable from having no jobs configured.
+ */
+function JobsTableSkeleton() {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          {Array.from({ length: COLUMN_COUNT }).map((_, i) => (
+            <TableHead key={i}>
+              <Skeleton className="h-3 w-16" />
+            </TableHead>
+          ))}
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {Array.from({ length: 3 }).map((_, row) => (
+          <TableRow key={row}>
+            {Array.from({ length: COLUMN_COUNT }).map((_, col) => (
+              <TableCell key={col}>
+                <Skeleton className="h-4 w-full max-w-28" />
+              </TableCell>
+            ))}
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
   )
 }

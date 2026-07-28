@@ -2,6 +2,7 @@
 import path from 'path'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 
 /**
  * Screenshot test config — runs tests in a real headless Chromium via
@@ -12,13 +13,19 @@ import react from '@vitejs/plugin-react'
  * mode is much slower to boot and we only want to pay that cost when
  * generating screenshots, not on every unit-test run.
  */
+import pkg from './package.json' with { type: 'json' }
+
 export default defineConfig({
+  define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
     },
   },
-  plugins: [react()],
+  // Tailwind must be wired up here too, not just in vite.config.ts: this is a
+  // standalone Vite config, and since v4 there is no postcss.config.js for it
+  // to pick the framework up from. Without it every PNG renders unstyled.
+  plugins: [react(), tailwindcss()],
   test: {
     globals: true,
     setupFiles: ['./src/test/screenshot-setup.ts'],

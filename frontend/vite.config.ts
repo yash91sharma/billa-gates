@@ -2,15 +2,21 @@
 import path from 'path'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+import pkg from './package.json' with { type: 'json' }
 
 export default defineConfig({
   base: '/static/',
+  // Surfaced in the sidebar footer. Read from package.json so the number
+  // cannot drift from the one that was released.
+  define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
     },
   },
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   server: {
     proxy: {
       '/api': 'http://localhost:12345',

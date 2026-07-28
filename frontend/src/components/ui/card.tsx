@@ -33,9 +33,17 @@ function CardHeader({ className, ...props }: React.ComponentProps<'div'>) {
   )
 }
 
-function CardTitle({ className, ...props }: React.ComponentProps<'div'>) {
+// `as` is a local addition to upstream: a card that titles a section of a page
+// should contribute a real heading to the document outline, which is how a
+// screen-reader user skims the page. Defaults to `div` so decorative cards
+// don't inject stray headings.
+function CardTitle({
+  className,
+  as: Comp = 'div',
+  ...props
+}: React.ComponentProps<'div'> & { as?: 'div' | 'h2' | 'h3' }) {
   return (
-    <div
+    <Comp
       data-slot="card-title"
       className={cn(
         'font-heading text-base leading-snug font-medium group-data-[size=sm]/card:text-sm',

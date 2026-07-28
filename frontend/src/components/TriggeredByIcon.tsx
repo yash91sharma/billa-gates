@@ -1,6 +1,6 @@
 import { CalendarClock, Hand } from 'lucide-react'
 import type { TriggeredBy } from '../lib/types'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
+import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip'
 
 // Visual config per trigger source. Two distinct icon colors so the two
 // values are immediately distinguishable in dense tables — not just a pair
@@ -22,21 +22,19 @@ export interface TriggeredByIconProps {
   value: TriggeredBy
 }
 
-// Compact icon + tooltip used in run tables. Wraps its own TooltipProvider so
-// callers don't need to add one — the dashboard and job-detail tables both
-// render many of these and treating them as self-contained keeps usage simple.
+// Compact icon + tooltip used in run tables. The provider lives at the app
+// root (App.tsx), not here: this renders once per table row, so a provider of
+// its own meant twenty of them on a busy dashboard.
 export default function TriggeredByIcon({ value }: TriggeredByIconProps) {
   const { icon: Icon, color, label } = CONFIG[value]
   return (
-    <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span data-trigger-by={value} aria-label={label} className={`inline-flex ${color}`}>
-            <Icon className="h-4 w-4" aria-hidden="true" />
-          </span>
-        </TooltipTrigger>
-        <TooltipContent>{label}</TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span data-trigger-by={value} aria-label={label} className={`inline-flex ${color}`}>
+          <Icon className="h-4 w-4" aria-hidden="true" />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   )
 }

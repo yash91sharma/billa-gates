@@ -30,8 +30,8 @@ describe('RunStatusBadge', () => {
   it('applies pastel amber styling for warning', () => {
     render(<RunStatusBadge status="warning" />)
     const badge = screen.getByText('warning')
-    expect(badge.className).toMatch(/\bbg-amber-100\b/)
-    expect(badge.className).toMatch(/\btext-amber-(800|900)\b/)
+    expect(badge.className).toMatch(/\bbg-warning-subtle\b/)
+    expect(badge.className).toMatch(/\btext-warning-subtle-foreground\b/)
   })
 
   it('renders "pending" text for null status (check not yet complete)', () => {
@@ -44,40 +44,42 @@ describe('RunStatusBadge', () => {
     expect(screen.getByText('passed')).toBeInTheDocument()
   })
 
-  // Soft pastel pairs from the Arctic theme: bg-<tone>-100 + text-<tone>-800.
+  // Theme tokens, not palette classes. Pinning `bg-green-100` here is what let
+  // the badge set drift from the Dashboard's kind badges — one idea, two
+  // hardcoded colours, nothing tying them together.
   it('applies pastel green styling for success', () => {
     render(<RunStatusBadge status="success" />)
     const badge = screen.getByText('success')
-    expect(badge.className).toMatch(/\bbg-green-100\b/)
-    expect(badge.className).toMatch(/\btext-green-800\b/)
+    expect(badge.className).toMatch(/\bbg-success-subtle\b/)
+    expect(badge.className).toMatch(/\btext-success-subtle-foreground\b/)
   })
 
   it('applies pastel red styling for failed', () => {
     render(<RunStatusBadge status="failed" />)
     const badge = screen.getByText('failed')
-    expect(badge.className).toMatch(/\bbg-red-100\b/)
-    expect(badge.className).toMatch(/\btext-red-800\b/)
+    expect(badge.className).toMatch(/\bbg-danger-subtle\b/)
+    expect(badge.className).toMatch(/\btext-danger-subtle-foreground\b/)
   })
 
   it('applies pastel blue styling for running (Arctic-theme accent family)', () => {
     render(<RunStatusBadge status="running" />)
     const badge = screen.getByText('running')
-    expect(badge.className).toMatch(/\bbg-blue-100\b/)
-    expect(badge.className).toMatch(/\btext-blue-800\b/)
+    expect(badge.className).toMatch(/\bbg-info-subtle\b/)
+    expect(badge.className).toMatch(/\btext-info-subtle-foreground\b/)
   })
 
   it('applies muted slate styling for skipped', () => {
     render(<RunStatusBadge status="skipped" />)
     const badge = screen.getByText('skipped')
-    expect(badge.className).toMatch(/\bbg-slate-100\b/)
-    expect(badge.className).toMatch(/\btext-slate-(600|700)\b/)
+    expect(badge.className).toMatch(/\bbg-neutral-subtle\b/)
+    expect(badge.className).toMatch(/\btext-neutral-subtle-foreground\b/)
   })
 
   it('applies muted slate styling for pending (null)', () => {
     render(<RunStatusBadge status={null} />)
     const badge = screen.getByText('pending')
-    expect(badge.className).toMatch(/\bbg-slate-100\b/)
-    expect(badge.className).toMatch(/\btext-slate-(500|600)\b/)
+    expect(badge.className).toMatch(/\bbg-neutral-subtle\b/)
+    expect(badge.className).toMatch(/\btext-neutral-subtle-foreground\b/)
   })
 
   it('accepts an additional className prop', () => {
@@ -100,7 +102,7 @@ describe('RunStatusBadge', () => {
   it('applies muted slate styling for canceled', () => {
     render(<RunStatusBadge status="canceled" />)
     const badge = screen.getByText('canceled')
-    expect(badge.className).toMatch(/\bbg-slate-100\b/)
-    expect(badge.className).toMatch(/\btext-slate-(600|700|800)\b/)
+    expect(badge.className).toMatch(/\bbg-neutral-subtle\b/)
+    expect(badge.className).toMatch(/\btext-neutral-subtle-foreground\b/)
   })
 })

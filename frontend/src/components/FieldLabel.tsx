@@ -12,6 +12,13 @@ export function helpId(htmlFor: string): string {
   return `${htmlFor}-help`
 }
 
+// A `<label for>` only names a labelable element, and a Radix Switch renders a
+// `<button role="switch">` — which is not one. Toggle rows therefore point at
+// their label with `aria-labelledby` instead, and need it to have an id.
+export function labelId(htmlFor: string): string {
+  return `${htmlFor}-label`
+}
+
 // Standalone Info-icon + tooltip + sr-only description used by FieldLabel.
 // Exported so callers that need a custom label layout (e.g. labels with split
 // text spans) can still attach the same tooltip + a11y plumbing.
@@ -67,7 +74,7 @@ export default function FieldLabel({ htmlFor, help, variant = 'block' }: FieldLa
         variant === 'block' ? 'flex items-center gap-1.5 mb-1' : 'flex items-center gap-1.5'
       }
     >
-      <label htmlFor={htmlFor} className="text-sm font-medium">
+      <label id={labelId(htmlFor)} htmlFor={htmlFor} className="text-sm font-medium">
         {help.label}
       </label>
       {help.optional && <span className="text-xs text-muted-foreground">(optional)</span>}

@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import * as api from '../lib/api'
 import type { BackupJob, BackupRun, HealthStatus } from '../lib/types'
 import { renderWithProviders } from '../test/utils'
@@ -104,7 +104,10 @@ describe('Dashboard', () => {
         makeJob({ id: 'job-2', enabled: false }),
       ])
       renderWithProviders(<Dashboard />)
-      await waitFor(() => expect(screen.getByText(/1.*enabled|enabled.*1/i)).toBeInTheDocument())
+      // Reported against the total, so "1" is legible on its own: one enabled
+      // job means something different in a fleet of two than in a fleet of ten.
+      await waitFor(() => expect(screen.getByText('1 of 2')).toBeInTheDocument())
+      expect(screen.getByText('Enabled')).toBeInTheDocument()
     })
 
     it('shows restic version from health endpoint', async () => {
@@ -139,6 +142,9 @@ describe('Dashboard', () => {
     })
 
     it('renders separate Backup and Verification column headers', async () => {
+      // Needs a run: with none, the card shows an empty state rather than a
+      // header row standing over nothing.
+      vi.mocked(api.getRecentRuns).mockResolvedValue([makeRun()])
       renderWithProviders(<Dashboard />)
       await waitFor(() => {
         expect(screen.getByRole('columnheader', { name: /^backup$/i })).toBeInTheDocument()
@@ -196,7 +202,10 @@ describe('Dashboard', () => {
       renderWithProviders(<Dashboard />)
       await waitFor(() => {
         const badge = screen.getByTestId('kind-badge-run-backup')
-        expect(badge.className).toMatch(/\bbg-(blue|sky|indigo)-100\b/)
+        // A theme token, not a palette class. `backup` was sky-100 here while
+        // `running` was blue-100 in RunStatusBadge — one idea, two hardcoded
+        // colours, free to drift because nothing tied them together.
+        expect(badge.className).toMatch(/\bbg-info-subtle\b/)
       })
     })
 
@@ -205,7 +214,7 @@ describe('Dashboard', () => {
       renderWithProviders(<Dashboard />)
       await waitFor(() => {
         const badge = screen.getByTestId('kind-badge-run-prune')
-        expect(badge.className).toMatch(/\bbg-(amber|orange|purple)-100\b/)
+        expect(badge.className).toMatch(/\bbg-warning-subtle\b/)
       })
     })
 
@@ -363,14 +372,15 @@ describe('Dashboard', () => {
           name: /upcoming runs/i,
         }).parentElement
         expect(upcomingSection).toBeInTheDocument()
-        const jobNames = Array.from(
-          upcomingSection!.querySelectorAll('.flex > span:first-child')
-        ).map((el) => el.textContent)
+        const card = upcomingSection!.closest('[data-slot="card"]')!
+        const jobNames = Array.from(card.querySelectorAll('[data-slot="upcoming-job-name"]')).map(
+          (el) => el.textContent
+        )
         expect(jobNames).toEqual(['FamilyMedia', 'Docs', 'UnscheduledJob'])
       })
     })
 
-    it('applies alternate row coloring to upcoming runs rows for improved visual clarity', async () => {
+    it('separates upcoming runs rows for improved visual clarity', async () => {
       vi.mocked(api.listJobs).mockResolvedValue([
         makeJob({ id: 'job-1', name: 'Docs', next_run_time: '2026-08-04T03:00:00Z' }),
         makeJob({ id: 'job-2', name: 'FamilyMedia', next_run_time: '2026-07-29T03:00:00Z' }),
@@ -381,8 +391,12 @@ describe('Dashboard', () => {
           name: /upcoming runs/i,
         }).parentElement
         expect(upcomingSection).toBeInTheDocument()
-        const rowsContainer = upcomingSection!.querySelector('div')
-        expect(rowsContainer?.className).toContain('[&>div:nth-child(even)]:bg-muted/40')
+        // Hairline dividers rather than zebra striping: with a job name on the
+        // left and a timestamp on the right, the eye needs the row boundary,
+        // not a tinted band behind every other one.
+        const list = upcomingSection!.closest('[data-slot="card"]')!.querySelector('ul')
+        expect(list?.className).toContain('divide-y')
+        expect(list?.querySelectorAll('li')).toHaveLength(2)
       })
     })
 
@@ -458,14 +472,17 @@ describe('Dashboard', () => {
       expect(screen.queryByRole('button', { name: /^stop$/i })).not.toBeInTheDocument()
     })
 
-    it('clicking Stop calls cancelRun after confirm', async () => {
+    it('clicking Stop calls cancelRun after confirming in the dialog', async () => {
+      // Cancelling a running backup is confirmed in an in-app dialog rather
+      // than window.confirm — the browser's own box cannot explain that
+      // already-uploaded data is kept, which is the whole question the user
+      // is weighing at that moment.
       const { default: userEvent } = await import('@testing-library/user-event')
       vi.mocked(api.listJobs).mockResolvedValue([])
       vi.mocked(api.getRecentRuns).mockResolvedValue([
         makeRun({ id: 'run-running', status: 'running', check_status: null }),
       ])
       vi.mocked(api.cancelRun).mockResolvedValue(undefined)
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
       vi.mocked(api.getHealth).mockResolvedValue({
         scheduler_running: true,
         restic_version: '0.17.3',
@@ -473,10 +490,27 @@ describe('Dashboard', () => {
       } as HealthStatus)
 
       renderWithProviders(<Dashboard />)
-      const btn = await screen.findByRole('button', { name: /^stop$/i })
-      await userEvent.setup().click(btn)
+      const user = userEvent.setup()
+      await user.click(await screen.findByRole('button', { name: /^stop$/i }))
+
+      const dialog = await screen.findByRole('dialog')
+      await user.click(within(dialog).getByRole('button', { name: /stop backup/i }))
       await waitFor(() => expect(vi.mocked(api.cancelRun)).toHaveBeenCalledWith('run-running'))
-      confirmSpy.mockRestore()
+    })
+
+    it('dismissing the stop dialog leaves the run alone', async () => {
+      const { default: userEvent } = await import('@testing-library/user-event')
+      vi.mocked(api.getRecentRuns).mockResolvedValue([
+        makeRun({ id: 'run-running', status: 'running', check_status: null }),
+      ])
+      renderWithProviders(<Dashboard />)
+      const user = userEvent.setup()
+      await user.click(await screen.findByRole('button', { name: /^stop$/i }))
+
+      const dialog = await screen.findByRole('dialog')
+      await user.click(within(dialog).getByRole('button', { name: /keep running/i }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(vi.mocked(api.cancelRun)).not.toHaveBeenCalled()
     })
   })
 })

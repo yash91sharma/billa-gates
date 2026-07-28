@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, type RenderOptions } from '@testing-library/react'
 import React from 'react'
 import { MemoryRouter } from 'react-router-dom'
+import { TooltipProvider } from '../components/ui/tooltip'
 
 function makeQueryClient() {
   return new QueryClient({
@@ -23,7 +24,11 @@ export function renderWithProviders(
   const queryClient = makeQueryClient()
   return render(
     <MemoryRouter initialEntries={[route]}>
-      <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>
+      <QueryClientProvider client={queryClient}>
+        {/* Mirrors App.tsx: the tooltip provider is app-level, so components
+            under test see the same context they see in the real app. */}
+        <TooltipProvider delayDuration={200}>{ui}</TooltipProvider>
+      </QueryClientProvider>
     </MemoryRouter>,
     options
   )

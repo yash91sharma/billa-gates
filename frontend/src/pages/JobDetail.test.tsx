@@ -944,17 +944,20 @@ describe('JobDetail', () => {
     })
 
     it('clicking Stop calls cancelRun with the active run id after confirm', async () => {
+      // Confirmed in an in-app dialog rather than window.confirm — see
+      // Dashboard.test.tsx for why.
       vi.mocked(api.getJobRuns).mockResolvedValue([
         makeRun({ id: 'active-run', status: 'running', check_status: null }),
       ])
       vi.mocked(api.cancelRun).mockResolvedValue(undefined)
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
 
       renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
-      const btn = await screen.findByRole('button', { name: /^stop$/i })
-      await userEvent.setup().click(btn)
+      const user = userEvent.setup()
+      await user.click(await screen.findByRole('button', { name: /^stop$/i }))
+
+      const dialog = await screen.findByRole('dialog')
+      await user.click(within(dialog).getByRole('button', { name: /stop backup/i }))
       await waitFor(() => expect(vi.mocked(api.cancelRun)).toHaveBeenCalledWith('active-run'))
-      confirmSpy.mockRestore()
     })
   })
 

@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
+import { Toaster } from 'sonner'
 import App from './App'
 import './index.css'
 
@@ -12,6 +13,23 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <BrowserRouter>
       <QueryClientProvider client={queryClient}>
         <App />
+        {/*
+          Transient confirmations only — "it worked, carry on". Anything the
+          user has to act on (a validation message, a failed create, a rename
+          that was refused) stays inline next to the control that caused it,
+          where they are already looking and where it survives longer than a
+          toast's few seconds.
+        */}
+        <Toaster
+          position="bottom-right"
+          toastOptions={{
+            classNames: {
+              toast:
+                'rounded-lg border border-border bg-card text-card-foreground shadow-sm text-sm',
+              description: 'text-muted-foreground',
+            },
+          }}
+        />
       </QueryClientProvider>
     </BrowserRouter>
   </React.StrictMode>

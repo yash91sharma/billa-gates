@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import * as api from '../lib/api'
 import type { BackupRun } from '../lib/types'
 import { renderWithProviders } from '../test/utils'
@@ -401,10 +401,12 @@ describe('RunDetail', () => {
     it('renders a "prune" kind label on prune runs', async () => {
       vi.mocked(api.getRun).mockResolvedValue(makeRun({ kind: 'prune' }))
       renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
-      // The kind badge appears next to the run-status badge in the header.
-      // Use exact text match to avoid conflict with the "Prune:" status row
-      // label that also matches /prune/i.
-      await waitFor(() => expect(screen.getByText('prune')).toBeInTheDocument())
+      // The kind names the page: the heading reads "Prune run", so a prune is
+      // identifiable from the tab title and the heading outline, not only from
+      // a badge someone has to notice.
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { level: 1, name: /prune run/i })).toBeInTheDocument()
+      )
     })
 
     it('hides the Verification row entirely for prune runs', async () => {
@@ -412,8 +414,10 @@ describe('RunDetail', () => {
       // would just say "Verification: skipped" — pure noise. Hide it.
       vi.mocked(api.getRun).mockResolvedValue(makeRun({ kind: 'prune', check_status: 'skipped' }))
       renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
-      await waitFor(() => expect(screen.getByText('prune')).toBeInTheDocument())
-      expect(screen.queryByText(/^Verification:/)).not.toBeInTheDocument()
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { level: 1, name: /prune run/i })).toBeInTheDocument()
+      )
+      expect(screen.queryByText(/^Verification$/)).not.toBeInTheDocument()
     })
   })
 
@@ -453,26 +457,29 @@ describe('RunDetail', () => {
       const { default: userEvent } = await import('@testing-library/user-event')
       vi.mocked(api.getRun).mockResolvedValue(makeRun({ status: 'running', check_status: null }))
       vi.mocked(api.cancelRun).mockResolvedValue(undefined)
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
 
       renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
-      const btn = await screen.findByRole('button', { name: /stop|cancel/i })
-      await userEvent.setup().click(btn)
+      const user = userEvent.setup()
+      await user.click(await screen.findByRole('button', { name: /^stop$/i }))
+
+      const dialog = await screen.findByRole('dialog')
+      await user.click(within(dialog).getByRole('button', { name: /stop backup/i }))
       await waitFor(() => expect(vi.mocked(api.cancelRun)).toHaveBeenCalledWith('run-1'))
-      confirmSpy.mockRestore()
     })
 
     it('does not call cancelRun if user dismisses the confirm dialog', async () => {
       const { default: userEvent } = await import('@testing-library/user-event')
       vi.mocked(api.getRun).mockResolvedValue(makeRun({ status: 'running', check_status: null }))
       vi.mocked(api.cancelRun).mockResolvedValue(undefined)
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
 
       renderWithProviders(<RunDetail />, { route: '/runs/run-1' })
-      const btn = await screen.findByRole('button', { name: /stop|cancel/i })
-      await userEvent.setup().click(btn)
+      const user = userEvent.setup()
+      await user.click(await screen.findByRole('button', { name: /^stop$/i }))
+
+      const dialog = await screen.findByRole('dialog')
+      await user.click(within(dialog).getByRole('button', { name: /keep running/i }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
       expect(vi.mocked(api.cancelRun)).not.toHaveBeenCalled()
-      confirmSpy.mockRestore()
     })
   })
 

@@ -13,10 +13,24 @@ import { render } from '@testing-library/react'
 import { page } from '@vitest/browser/context'
 import { afterEach, test } from 'vitest'
 
+import { HardDriveDownload } from 'lucide-react'
+import { MemoryRouter } from 'react-router-dom'
+import EmptyState from '../components/EmptyState'
 import FieldLabel from '../components/FieldLabel'
+import PageHeader from '../components/PageHeader'
 import RunStatusBadge from '../components/RunStatusBadge'
 import ScheduleInput from '../components/ScheduleInput'
 import SnapshotList from '../components/SnapshotList'
+import { Button } from '../components/ui/button'
+import { Skeleton } from '../components/ui/skeleton'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '../components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../components/ui/tooltip'
 import type { Snapshot } from '../lib/types'
 
@@ -172,4 +186,93 @@ test('SnapshotList - populated', async () => {
   const result = render(<SnapshotList snapshots={snaps} />)
   cleanup = result.unmount
   await page.screenshot({ path: `${OUT}/SnapshotList--populated.png` })
+})
+
+// ── The shared shell + state components ──────────────────────────────────────
+//
+// These are wide by nature (a page header, a table, a full-width empty state),
+// so they need a viewport that fits them — the default crops the copy. Set at
+// the end of the file so the badge and field captures above keep the tight
+// framing they were tuned for.
+const WIDE = async () => {
+  await page.viewport(1024, 768)
+}
+
+test('PageHeader - with breadcrumb, status and actions', async () => {
+  await WIDE()
+  const result = render(
+    <MemoryRouter>
+      <div style={{ width: 900, padding: 24 }}>
+        <PageHeader
+          breadcrumb={[{ label: 'Jobs', to: '/jobs' }, { label: 'Documents Backup' }]}
+          title="Documents Backup"
+          description="Every configured backup, its schedule, and how its last run went."
+          status={<RunStatusBadge status="success" />}
+          actions={<Button size="lg">Run Now</Button>}
+        />
+      </div>
+    </MemoryRouter>
+  )
+  cleanup = result.unmount
+  await page.screenshot({ path: `${OUT}/PageHeader.png` })
+})
+
+test('EmptyState - with icon and action', async () => {
+  await WIDE()
+  const result = render(
+    <div style={{ width: 640, padding: 24 }}>
+      <EmptyState
+        icon={HardDriveDownload}
+        title="No backup jobs configured yet"
+        description="A job pairs a source mount with a destination repository and a schedule. Create one to start backing up."
+        action={<Button>Create Job</Button>}
+      />
+    </div>
+  )
+  cleanup = result.unmount
+  await page.screenshot({ path: `${OUT}/EmptyState.png` })
+})
+
+test('Table - numeric alignment and tabular figures', async () => {
+  await WIDE()
+  const result = render(
+    <div style={{ width: 640, padding: 24 }}>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Job</TableHead>
+            <TableHead numeric>Duration</TableHead>
+            <TableHead numeric>Added</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          <TableRow>
+            <TableCell>Documents Backup</TableCell>
+            <TableCell numeric>120s</TableCell>
+            <TableCell numeric>50 MB</TableCell>
+          </TableRow>
+          <TableRow>
+            <TableCell>Photos &amp; Media</TableCell>
+            <TableCell numeric>4,180s</TableCell>
+            <TableCell numeric>1.4 GB</TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
+    </div>
+  )
+  cleanup = result.unmount
+  await page.screenshot({ path: `${OUT}/Table.png` })
+})
+
+test('Skeleton - loading row', async () => {
+  await WIDE()
+  const result = render(
+    <div style={{ width: 420, padding: 24, display: 'grid', gap: 12 }}>
+      <Skeleton style={{ height: 12, width: '35%' }} />
+      <Skeleton style={{ height: 16, width: '100%' }} />
+      <Skeleton style={{ height: 16, width: '80%' }} />
+    </div>
+  )
+  cleanup = result.unmount
+  await page.screenshot({ path: `${OUT}/Skeleton.png` })
 })

@@ -606,8 +606,8 @@ describe('JobForm', () => {
       const onSubmit = vi.fn()
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
-      const cb = screen.getByLabelText(/exclude caches/i) as HTMLInputElement
-      expect(cb.checked).toBe(false)
+      const cb = screen.getByLabelText(/exclude caches/i)
+      expect(cb).not.toBeChecked()
       await user.click(cb)
       await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
@@ -677,7 +677,7 @@ describe('JobForm', () => {
       expect((screen.getByLabelText(/exclude patterns/i) as HTMLTextAreaElement).value).toBe(
         '*.tmp'
       )
-      expect((screen.getByLabelText(/exclude caches/i) as HTMLInputElement).checked).toBe(true)
+      expect(screen.getByLabelText(/exclude caches/i)).toBeChecked()
       expect((screen.getByLabelText(/^tags/i) as HTMLInputElement).value).toBe('daily')
       expect((screen.getByLabelText(/^compression/i) as HTMLSelectElement).value).toBe('max')
       expect((screen.getByLabelText(/^timeout \(hours\)/i) as HTMLInputElement).value).toBe('6')
@@ -920,8 +920,8 @@ describe('JobForm', () => {
       const onSubmit = vi.fn()
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
-      const cb = screen.getByLabelText(/one file system/i) as HTMLInputElement
-      expect(cb.checked).toBe(false)
+      const cb = screen.getByLabelText(/one file system/i)
+      expect(cb).not.toBeChecked()
       await user.click(cb)
       await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
@@ -932,8 +932,8 @@ describe('JobForm', () => {
       const onSubmit = vi.fn()
       const user = userEvent.setup()
       render(<JobForm onSubmit={onSubmit} sourceMounts={['m']} destinationMounts={['d']} />)
-      const cb = screen.getByLabelText(/no scan/i) as HTMLInputElement
-      expect(cb.checked).toBe(false)
+      const cb = screen.getByLabelText(/no scan/i)
+      expect(cb).not.toBeChecked()
       await user.click(cb)
       await user.type(screen.getByLabelText(/name/i), 'Test Job')
       await user.click(screen.getByRole('button', { name: /save|create|submit/i }))
@@ -983,8 +983,8 @@ describe('JobForm', () => {
       expect((screen.getByLabelText(/exclude if present/i) as HTMLTextAreaElement).value).toBe(
         '.nobackup'
       )
-      expect((screen.getByLabelText(/one file system/i) as HTMLInputElement).checked).toBe(true)
-      expect((screen.getByLabelText(/no scan/i) as HTMLInputElement).checked).toBe(true)
+      expect(screen.getByLabelText(/one file system/i)).toBeChecked()
+      expect(screen.getByLabelText(/no scan/i)).toBeChecked()
       expect((screen.getByLabelText(/pack size/i) as HTMLInputElement).value).toBe('128')
       expect((screen.getByLabelText(/read concurrency/i) as HTMLInputElement).value).toBe('2')
 

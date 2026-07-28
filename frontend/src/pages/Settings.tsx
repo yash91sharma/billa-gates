@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import * as api from '../lib/api'
-import FieldLabel, { HelpIcon, helpId, type FieldHelp } from '../components/FieldLabel'
+import FieldLabel, { HelpIcon, helpId, labelId, type FieldHelp } from '../components/FieldLabel'
+import PageHeader from '../components/PageHeader'
+import { Button } from '../components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
+import { Input } from '../components/ui/input'
+import { Switch } from '../components/ui/switch'
 import { TooltipProvider } from '../components/ui/tooltip'
 
 const HELP: Record<string, FieldHelp> = {
@@ -104,8 +110,6 @@ export default function Settings() {
   // The long-form help is collapsed; the one line that stops the destructive
   // misreading ("it moves my data") is rendered unconditionally above it.
   const [renameHelpOpen, setRenameHelpOpen] = useState(false)
-  // Delay ntfy form rendering so rename section is findable before ntfy labels appear
-  const [ntfyVisible, setNtfyVisible] = useState(false)
 
   const { data: settings, error: settingsError } = useQuery({
     queryKey: ['settings'],
@@ -136,15 +140,17 @@ export default function Settings() {
       setKeepLastRuns(settings.keep_last_runs)
       setAutoUnlock(settings.auto_unlock)
       setMetadataTimeout(settings.metadata_timeout_seconds)
-      setTimeout(() => setNtfyVisible(true), 100)
     }
   }, [settings])
 
   if (settingsError) {
     return (
-      <div className="p-6">
-        <p>Error: could not load settings.</p>
-      </div>
+      <>
+        <PageHeader title="Settings" />
+        <Card className="border border-destructive/30 bg-destructive/5">
+          <CardContent className="text-destructive">Error: could not load settings.</CardContent>
+        </Card>
+      </>
     )
   }
 
@@ -180,6 +186,10 @@ export default function Settings() {
         auto_unlock: autoUnlock,
         metadata_timeout_seconds: metadataTimeout,
       })
+      // Saving used to give no sign at all that anything had happened — the
+      // button just stopped being pressed. A failure still renders inline
+      // below the form, where it stays put.
+      toast.success('Settings saved')
     } catch {
       setSaveError('Error: failed to save settings.')
     }
@@ -222,36 +232,40 @@ export default function Settings() {
 
   return (
     <TooltipProvider>
-      <div className="p-6 space-y-6">
-        {ntfyVisible && (
-          <div>
-            <h1 className="text-2xl font-bold mb-4">Settings</h1>
-            <div className="space-y-3">
+      <PageHeader
+        title="Settings"
+        description="Notification delivery, run defaults, and the destination-label tools."
+      />
+      <div className="space-y-6">
+        <Card>
+          <CardHeader>
+            <CardTitle as="h2">Notifications</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
               <div>
                 <FieldLabel htmlFor="ntfy-server-url" help={HELP.ntfyServerUrl} />
-                <input
+                <Input
                   id="ntfy-server-url"
                   type="text"
                   value={serverUrl}
                   onChange={(e) => setServerUrl(e.target.value)}
                   aria-describedby={helpId('ntfy-server-url')}
-                  className="border rounded px-2 py-1 text-sm w-full"
                 />
               </div>
               <div>
                 <FieldLabel htmlFor="ntfy-topic" help={HELP.ntfyTopic} />
-                <input
+                <Input
                   id="ntfy-topic"
                   type="text"
                   value={topic}
                   onChange={(e) => setTopic(e.target.value)}
                   aria-describedby={helpId('ntfy-topic')}
-                  className="border rounded px-2 py-1 text-sm w-full"
                 />
               </div>
               <div>
                 <FieldLabel htmlFor="ntfy-token" help={HELP.ntfyToken} />
-                <input
+                <Input
                   id="ntfy-token"
                   type="password"
                   value={token}
@@ -260,293 +274,330 @@ export default function Settings() {
                     setTokenDirty(true)
                   }}
                   aria-describedby={helpId('ntfy-token')}
-                  className="border rounded px-2 py-1 text-sm w-full"
                 />
               </div>
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <input
-                    id="notify-start"
-                    type="checkbox"
-                    checked={notifyStart}
-                    onChange={(e) => setNotifyStart(e.target.checked)}
-                    aria-describedby={helpId('notify-start')}
-                  />
+            </div>
+
+            <div className="divide-y divide-border rounded-lg border border-border">
+              <ToggleRow
+                id="notify-start"
+                checked={notifyStart}
+                onCheckedChange={setNotifyStart}
+                label={
                   <FieldLabel htmlFor="notify-start" help={HELP.notifyOnStart} variant="inline" />
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    id="notify-success"
-                    type="checkbox"
-                    checked={notifySuccess}
-                    onChange={(e) => setNotifySuccess(e.target.checked)}
-                    aria-describedby={helpId('notify-success')}
-                  />
-                  {/* Split "success" across spans so getByText(/success/) doesn't find this label */}
+                }
+              />
+              <ToggleRow
+                id="notify-success"
+                checked={notifySuccess}
+                onCheckedChange={setNotifySuccess}
+                label={
+                  /* Split "success" across spans so getByText(/success/) doesn't find this label */
                   <div className="flex items-center gap-1.5">
-                    <label htmlFor="notify-success" className="text-sm">
+                    <label
+                      id={labelId('notify-success')}
+                      htmlFor="notify-success"
+                      className="text-sm font-medium"
+                    >
                       Notify on <span>succ</span>
                       <span>ess</span>
                     </label>
                     <HelpIcon htmlFor="notify-success" help={HELP.notifyOnSuccess} />
                   </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    id="notify-failure"
-                    type="checkbox"
-                    checked={notifyFailure}
-                    onChange={(e) => setNotifyFailure(e.target.checked)}
-                    aria-describedby={helpId('notify-failure')}
-                  />
+                }
+              />
+              <ToggleRow
+                id="notify-failure"
+                checked={notifyFailure}
+                onCheckedChange={setNotifyFailure}
+                label={
                   <FieldLabel
                     htmlFor="notify-failure"
                     help={HELP.notifyOnFailure}
                     variant="inline"
                   />
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    id="notify-warning"
-                    type="checkbox"
-                    checked={notifyWarning}
-                    onChange={(e) => setNotifyWarning(e.target.checked)}
-                    aria-describedby={helpId('notify-warning')}
-                  />
+                }
+              />
+              <ToggleRow
+                id="notify-warning"
+                checked={notifyWarning}
+                onCheckedChange={setNotifyWarning}
+                label={
                   <FieldLabel
                     htmlFor="notify-warning"
                     help={HELP.notifyOnWarning}
                     variant="inline"
                   />
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    id="notify-verification"
-                    type="checkbox"
-                    checked={notifyVerification}
-                    onChange={(e) => setNotifyVerification(e.target.checked)}
-                    aria-describedby={helpId('notify-verification')}
-                  />
+                }
+              />
+              <ToggleRow
+                id="notify-verification"
+                checked={notifyVerification}
+                onCheckedChange={setNotifyVerification}
+                label={
                   <FieldLabel
                     htmlFor="notify-verification"
                     help={HELP.notifyOnVerification}
                     variant="inline"
                   />
-                </div>
-              </div>
+                }
+              />
+            </div>
+
+            {saveError && <p className="text-sm text-destructive">{saveError}</p>}
+
+            <div className="flex flex-wrap gap-2">
+              <Button size="lg" onClick={handleSave}>
+                Save
+              </Button>
+              <Button variant="outline" size="lg" onClick={handleTestNtfy}>
+                Test Notification
+              </Button>
+            </div>
+
+            {ntfyMessage && <p className="text-sm">{ntfyMessage}</p>}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle as="h2">Run defaults</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <FieldLabel htmlFor="timeout" help={HELP.defaultTimeout} />
-                <input
+                <Input
                   id="timeout"
                   type="number"
                   value={timeoutHours}
                   onChange={(e) => setTimeoutHours(Number(e.target.value))}
                   aria-describedby={helpId('timeout')}
-                  className="border rounded px-2 py-1 text-sm w-24"
+                  className="w-24 tabular-nums"
                   min={1}
                   max={168}
                 />
               </div>
               <div>
                 <FieldLabel htmlFor="keep-last-runs" help={HELP.keepLastRuns} />
-                <input
+                <Input
                   id="keep-last-runs"
                   type="number"
                   value={keepLastRuns}
                   onChange={(e) => setKeepLastRuns(Number(e.target.value))}
                   aria-describedby={helpId('keep-last-runs')}
-                  className="border rounded px-2 py-1 text-sm w-24"
+                  className="w-24 tabular-nums"
                   min={1}
                   max={10000}
                 />
               </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <input
-                    id="auto-unlock"
-                    type="checkbox"
-                    checked={autoUnlock}
-                    onChange={(e) => setAutoUnlock(e.target.checked)}
-                    aria-describedby={helpId('auto-unlock')}
-                  />
-                  <FieldLabel htmlFor="auto-unlock" help={HELP.autoUnlock} variant="inline" />
-                </div>
-              </div>
             </div>
-
-            {saveError && <p className="text-destructive mt-2 text-sm">{saveError}</p>}
-
-            <div className="flex gap-2 mt-4">
-              <button
-                className="bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded-sm text-sm"
-                onClick={handleSave}
-              >
-                Save
-              </button>
-              <button className="border px-4 py-2 rounded text-sm" onClick={handleTestNtfy}>
-                Test Notification
-              </button>
+            <div className="divide-y divide-border rounded-lg border border-border">
+              <ToggleRow
+                id="auto-unlock"
+                checked={autoUnlock}
+                onCheckedChange={setAutoUnlock}
+                label={<FieldLabel htmlFor="auto-unlock" help={HELP.autoUnlock} variant="inline" />}
+              />
             </div>
+          </CardContent>
+        </Card>
 
-            {ntfyMessage && <p className="mt-2 text-sm">{ntfyMessage}</p>}
+        <Card>
+          <CardHeader>
+            <CardTitle as="h2">Restic</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-sm">{versionDisplay}</p>
+            <Button variant="outline" size="lg" onClick={() => refetchUpdateCheck()}>
+              Check Now
+            </Button>
+          </CardContent>
+        </Card>
 
-            <div className="mt-4">
-              <h2 className="text-lg font-semibold mb-2">Restic</h2>
-              <p className="text-sm">{versionDisplay}</p>
-              <button
-                className="border px-3 py-1 rounded text-sm mt-1"
-                onClick={() => refetchUpdateCheck()}
-              >
-                Check Now
-              </button>
-            </div>
-          </div>
-        )}
-
-        <div>
-          <h2 className="text-lg font-semibold mb-1">Rename Destination</h2>
-          {/* The action's name reads like a filesystem operation, which it is
+        <Card>
+          <CardHeader>
+            <CardTitle as="h2">Rename Destination</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {/* The action's name reads like a filesystem operation, which it is
               not — it only repoints job rows at another mount label. Anyone
               who reads it the other way loses nothing on disk but breaks every
               later run, so the correction is stated before the controls and
               cannot be collapsed away. */}
-          <p className="text-sm text-muted-foreground max-w-prose">
-            Points jobs at a different mount label under /destinations. It rewrites the label stored
-            on each job and nothing on disk is touched — no folder is created, moved or copied for
-            you.
-          </p>
-          <button
-            type="button"
-            aria-expanded={renameHelpOpen}
-            aria-controls="rename-help"
-            onClick={() => setRenameHelpOpen((open) => !open)}
-            className="text-sm underline text-muted-foreground hover:text-foreground mt-1"
-          >
-            {renameHelpOpen ? 'Hide the details' : 'When should I use this?'}
-          </button>
-          {renameHelpOpen && (
-            <div
-              id="rename-help"
-              className="mt-2 mb-3 border rounded p-3 text-sm max-w-prose space-y-3 bg-muted/40"
+            <p className="text-sm text-muted-foreground max-w-prose">
+              Points jobs at a different mount label under /destinations. It rewrites the label
+              stored on each job and nothing on disk is touched — no folder is created, moved or
+              copied for you.
+            </p>
+            <button
+              type="button"
+              aria-expanded={renameHelpOpen}
+              aria-controls="rename-help"
+              onClick={() => setRenameHelpOpen((open) => !open)}
+              className="text-sm underline text-muted-foreground hover:text-foreground mt-1"
             >
-              <div>
-                <h3 className="font-semibold">What it does</h3>
-                <ul className="list-disc pl-5 space-y-1">
-                  <li>
-                    Rewrites the mount label stored on every job that points at the old one, so
-                    later runs read and write under the new one.
-                  </li>
-                  <li>
-                    Takes hold on each job&apos;s next run. Run history and snapshots already
-                    recorded stay exactly as they are.
-                  </li>
-                  <li>
-                    Covers every job on that mount at once — there is no per-job choice, and no way
-                    to move only some of them.
-                  </li>
-                </ul>
-              </div>
-              <div>
-                <h3 className="font-semibold">What it does not do</h3>
-                <ul className="list-disc pl-5 space-y-1">
-                  <li>
-                    It creates, moves and renames nothing on disk. The old folder is left where it
-                    is, untouched.
-                  </li>
-                  <li>
-                    It copies no repository data. If the backups live somewhere else now, you move
-                    the repository folder over <em>yourself</em>, before pressing the button —{' '}
-                    <code>/destinations/&lt;old&gt;/&lt;job name&gt;</code> →{' '}
-                    <code>/destinations/&lt;new&gt;/&lt;job name&gt;</code>.
-                  </li>
-                  <li>
-                    It does not confirm a repository is really there. That surfaces on the next run,
-                    which stops at the repository step rather than starting a fresh empty repository
-                    — your snapshots are never silently discarded.
-                  </li>
-                  <li>
-                    It changes neither a job&apos;s name nor its repository password. Those two stay
-                    fixed for the life of the job.
-                  </li>
-                </ul>
-              </div>
-              <div>
-                <h3 className="font-semibold">When to use it</h3>
-                <ul className="list-disc pl-5 space-y-1">
-                  <li>
-                    The mount label itself changed — the drive is now mapped to /destinations/wd-4tb
-                    where it used to be /destinations/main.
-                  </li>
-                  <li>
-                    The repositories moved to another drive, which is mounted under a label of its
-                    own.
-                  </li>
-                  <li>You simply want a tidier label than the one you picked back then.</li>
-                  <li>
-                    In all three cases this is the only route: a destination addresses the
-                    repository, so the job edit form keeps it fixed once the job is created.
-                  </li>
-                </ul>
-              </div>
-              <div>
-                <h3 className="font-semibold">Before you use it</h3>
-                <ol className="list-decimal pl-5 space-y-1">
-                  <li>
-                    Mount the new drive or folder at /destinations/&lt;new label&gt;. It has to be
-                    there already, or the request is turned down.
-                  </li>
-                  <li>
-                    Put the <code>.billa_gates_check</code> marker file at its root, or later runs
-                    stop at the mount probe.
-                  </li>
-                  <li>Bring each job&apos;s repository folder across, as described above.</li>
-                  <li>
-                    Pick a moment when no job on that mount is running — the request is turned down
-                    while one is in flight.
-                  </li>
-                </ol>
-              </div>
-            </div>
-          )}
-          <div className="space-y-2 mt-3">
-            {destinations !== undefined && (
-              <div>
-                <FieldLabel htmlFor="old-label" help={HELP.renameOldLabel} />
-                <select
-                  id="old-label"
-                  value={oldLabel}
-                  onChange={(e) => setOldLabel(e.target.value)}
-                  aria-describedby={helpId('old-label')}
-                  className="border rounded px-2 py-1 text-sm"
-                >
-                  <option value="">— select —</option>
-                  {destinations.map((d) => (
-                    <option key={d} value={d}>
-                      {d}
-                    </option>
-                  ))}
-                </select>
+              {renameHelpOpen ? 'Hide the details' : 'When should I use this?'}
+            </button>
+            {renameHelpOpen && (
+              <div
+                id="rename-help"
+                className="mt-2 mb-3 border rounded p-3 text-sm max-w-prose space-y-3 bg-muted/40"
+              >
+                <div>
+                  <h3 className="font-semibold">What it does</h3>
+                  <ul className="list-disc pl-5 space-y-1">
+                    <li>
+                      Rewrites the mount label stored on every job that points at the old one, so
+                      later runs read and write under the new one.
+                    </li>
+                    <li>
+                      Takes hold on each job&apos;s next run. Run history and snapshots already
+                      recorded stay exactly as they are.
+                    </li>
+                    <li>
+                      Covers every job on that mount at once — there is no per-job choice, and no
+                      way to move only some of them.
+                    </li>
+                  </ul>
+                </div>
+                <div>
+                  <h3 className="font-semibold">What it does not do</h3>
+                  <ul className="list-disc pl-5 space-y-1">
+                    <li>
+                      It creates, moves and renames nothing on disk. The old folder is left where it
+                      is, untouched.
+                    </li>
+                    <li>
+                      It copies no repository data. If the backups live somewhere else now, you move
+                      the repository folder over <em>yourself</em>, before pressing the button —{' '}
+                      <code>/destinations/&lt;old&gt;/&lt;job name&gt;</code> →{' '}
+                      <code>/destinations/&lt;new&gt;/&lt;job name&gt;</code>.
+                    </li>
+                    <li>
+                      It does not confirm a repository is really there. That surfaces on the next
+                      run, which stops at the repository step rather than starting a fresh empty
+                      repository — your snapshots are never silently discarded.
+                    </li>
+                    <li>
+                      It changes neither a job&apos;s name nor its repository password. Those two
+                      stay fixed for the life of the job.
+                    </li>
+                  </ul>
+                </div>
+                <div>
+                  <h3 className="font-semibold">When to use it</h3>
+                  <ul className="list-disc pl-5 space-y-1">
+                    <li>
+                      The mount label itself changed — the drive is now mapped to
+                      /destinations/wd-4tb where it used to be /destinations/main.
+                    </li>
+                    <li>
+                      The repositories moved to another drive, which is mounted under a label of its
+                      own.
+                    </li>
+                    <li>You simply want a tidier label than the one you picked back then.</li>
+                    <li>
+                      In all three cases this is the only route: a destination addresses the
+                      repository, so the job edit form keeps it fixed once the job is created.
+                    </li>
+                  </ul>
+                </div>
+                <div>
+                  <h3 className="font-semibold">Before you use it</h3>
+                  <ol className="list-decimal pl-5 space-y-1">
+                    <li>
+                      Mount the new drive or folder at /destinations/&lt;new label&gt;. It has to be
+                      there already, or the request is turned down.
+                    </li>
+                    <li>
+                      Put the <code>.billa_gates_check</code> marker file at its root, or later runs
+                      stop at the mount probe.
+                    </li>
+                    <li>Bring each job&apos;s repository folder across, as described above.</li>
+                    <li>
+                      Pick a moment when no job on that mount is running — the request is turned
+                      down while one is in flight.
+                    </li>
+                  </ol>
+                </div>
               </div>
             )}
-            <div>
-              <FieldLabel htmlFor="new-label" help={HELP.renameNewLabel} />
-              <input
-                id="new-label"
-                type="text"
-                value={newLabel}
-                onChange={(e) => setNewLabel(e.target.value)}
-                aria-describedby={helpId('new-label')}
-                className="border rounded px-2 py-1 text-sm"
-              />
+            <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2">
+              {destinations !== undefined && (
+                <div>
+                  <FieldLabel htmlFor="old-label" help={HELP.renameOldLabel} />
+                  <select
+                    id="old-label"
+                    value={oldLabel}
+                    onChange={(e) => setOldLabel(e.target.value)}
+                    aria-describedby={helpId('old-label')}
+                    className="h-8 w-full rounded-md border border-input bg-background px-2.5 text-sm"
+                  >
+                    <option value="">— select —</option>
+                    {destinations.map((d) => (
+                      <option key={d} value={d}>
+                        {d}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div>
+                <FieldLabel htmlFor="new-label" help={HELP.renameNewLabel} />
+                <Input
+                  id="new-label"
+                  type="text"
+                  value={newLabel}
+                  onChange={(e) => setNewLabel(e.target.value)}
+                  aria-describedby={helpId('new-label')}
+                />
+              </div>
             </div>
-          </div>
-          <button className="border px-3 py-1 rounded text-sm mt-2" onClick={handleRename}>
-            Rename
-          </button>
-          {renameResult && <p className="mt-2 text-sm text-green-700">{renameResult}</p>}
-          {renameError && <p className="mt-2 text-sm text-destructive">{renameError}</p>}
-        </div>
+            <Button variant="outline" size="lg" className="mt-4" onClick={handleRename}>
+              Rename
+            </Button>
+            {renameResult && (
+              <p className="mt-2 text-sm text-success-subtle-foreground">{renameResult}</p>
+            )}
+            {renameError && <p className="mt-2 text-sm text-destructive">{renameError}</p>}
+          </CardContent>
+        </Card>
       </div>
     </TooltipProvider>
+  )
+}
+
+/**
+ * One setting, one switch, one row.
+ *
+ * These were native `<input type="checkbox">`, which is why the notification
+ * block read as a form to fill in rather than a set of switches to flip. A
+ * `<label for>` cannot name a Radix switch (it renders a button, which is not
+ * a labelable element), so the row wires `aria-labelledby` to the label's id
+ * instead — without it the control has no accessible name at all.
+ */
+function ToggleRow({
+  id,
+  checked,
+  onCheckedChange,
+  label,
+}: {
+  id: string
+  checked: boolean
+  onCheckedChange: (checked: boolean) => void
+  label: React.ReactNode
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 px-3 py-2.5">
+      {label}
+      <Switch
+        id={id}
+        checked={checked}
+        onCheckedChange={onCheckedChange}
+        aria-labelledby={labelId(id)}
+        aria-describedby={helpId(id)}
+      />
+    </div>
   )
 }

@@ -1,5 +1,8 @@
-import { render, screen } from '@testing-library/react'
 import TriggeredByIcon from './TriggeredByIcon'
+// Rendered through the shared harness because the tooltip provider is
+// app-level (App.tsx) rather than per-icon — one provider for a whole table,
+// not one per row.
+import { renderWithProviders as render, screen } from '../test/utils'
 
 // Radix's tooltip uses ResizeObserver — install a no-op stub for jsdom.
 beforeAll(() => {

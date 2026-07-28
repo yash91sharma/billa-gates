@@ -1,103 +1,189 @@
+@import 'tailwindcss';
 @import 'tw-animate-css';
+@import '@fontsource-variable/geist';
+
 /*
- * No `@import 'shadcn/tailwind.css'` here. That file is Tailwind v4 syntax
- * (@theme inline, @custom-variant, @utility, @slot) and this project is on
- * Tailwind v3, so v3's PostCSS pass could not interpret any of it — the
- * at-rules were copied verbatim into the bundle, where browsers ignored them.
- * It contributed 0 bytes of applied style while making the `shadcn` CLI a
- * runtime dependency of the build (and with it a vulnerable @hono/node-server
- * via @modelcontextprotocol/sdk). Removing it is byte-for-byte identical in
- * every rule a browser actually applies. Re-adding it only makes sense as part
- * of a real Tailwind v4 migration.
+ * Tailwind v4. The theme lives here, in CSS — there is no tailwind.config.js
+ * any more (v4 reads `@theme`, and content paths are auto-detected).
+ *
+ * The components in src/components/ui were scaffolded from shadcn's
+ * `radix-nova` registry, which targets v4: they use `ring-3`, `rounded-4xl`,
+ * `has-data-[…]`, `data-checked:` and `var(--radius-md)`. Under the v3 build
+ * those compiled to nothing, so the primitives rendered half-styled and every
+ * page hand-rolled its own buttons instead. This file is what makes them real.
  */
-@import '@fontsource/carlito/400.css';
-@import '@fontsource/carlito/700.css';
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+
+/*
+ * Light-only theme. Tailwind v4 binds `dark:` to prefers-color-scheme by
+ * default, and every primitive in components/ui carries `dark:` classes — so
+ * without this, a visitor whose OS is in dark mode would get those styles
+ * applied on top of the light palette. Pointing the variant at a `.dark`
+ * ancestor that is never mounted keeps them inert, and leaves one seam to
+ * open if the app ever grows a real dark theme.
+ */
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Arctic Light — modern, minimal, light-pastel. One accent (soft sky blue),
+ * cool light-grey borders, sharp 4px corners.
+ *
+ * Values are raw colours here and mapped onto Tailwind's namespace in the
+ * `@theme inline` block below, which is what lets a utility like
+ * `bg-background/60` resolve. src/test/theme.test.ts pins them.
+ */
+:root {
+  /* Page + surfaces */
+  --background: hsl(210 20% 98.5%); /* #FAFBFC near-white page */
+  --foreground: hsl(220 22% 16%); /* #1F2937 slate-900 body text */
+  --card: hsl(0 0% 100%); /* #FFFFFF card surface */
+  --card-foreground: hsl(220 22% 16%);
+  --popover: hsl(0 0% 100%);
+  --popover-foreground: hsl(220 22% 16%);
+
+  /* Accent (single accent — used sparingly) */
+  --primary: hsl(213 92% 67%); /* #5B9DF9 soft sky blue */
+  --primary-foreground: hsl(0 0% 100%); /* white on accent */
+  --secondary: hsl(210 30% 96%); /* very pale blue-grey */
+  --secondary-foreground: hsl(220 22% 16%);
+  --accent: hsl(213 92% 67%);
+  --accent-foreground: hsl(0 0% 100%);
+
+  /* Muted (sidebar items, helper text, table headers) */
+  --muted: hsl(210 22% 95%);
+  --muted-foreground: hsl(220 9% 46%); /* #6B7280 slate-500 */
+
+  /* Status — solid, for text and filled surfaces */
+  --destructive: hsl(0 84% 60%); /* coral-red 500 */
+  --destructive-foreground: hsl(0 0% 100%);
+  --success: hsl(142 76% 36%); /* mint 600 */
+  --success-foreground: hsl(0 0% 100%);
+  --warning: hsl(38 92% 50%); /* amber 500 */
+  --warning-foreground: hsl(220 22% 16%);
+
+  /*
+   * Status — subtle, for badges and callouts: a pale tonal fill with matching
+   * darker text. These replace the ~35 hardcoded `bg-green-100 text-green-800`
+   * style pairs scattered across the pages, which bypassed the theme entirely
+   * and drifted apart (running was blue-100 in one place, sky-100 in another).
+   * Named for the role, not the hue, so the badge palette can be retuned in
+   * one place.
+   */
+  --success-subtle: hsl(141 84% 93%);
+  --success-subtle-foreground: hsl(143 64% 24%);
+  --warning-subtle: hsl(48 96% 89%);
+  --warning-subtle-foreground: hsl(23 83% 31%);
+  --danger-subtle: hsl(0 93% 94%);
+  --danger-subtle-foreground: hsl(0 70% 35%);
+  --info-subtle: hsl(214 95% 93%); /* in progress, backup kind */
+  --info-subtle-foreground: hsl(224 76% 40%);
+  --neutral-subtle: hsl(210 40% 96%); /* skipped, canceled, pending */
+  --neutral-subtle-foreground: hsl(215 19% 35%);
+  --verify-subtle: hsl(269 100% 95%); /* integrity check kind */
+  --verify-subtle-foreground: hsl(273 67% 39%);
+
+  /* Borders, inputs, focus ring */
+  --border: hsl(214 24% 91%); /* #E5E9F0 cool light grey hairline */
+  --input: hsl(214 24% 91%);
+  --ring: hsl(213 92% 67%); /* accent */
+
+  /* Sidebar — slightly cooler than the page so it reads as a distinct surface */
+  --sidebar: hsl(215 25% 96%); /* #F1F4F9 */
+  --sidebar-foreground: hsl(220 22% 16%);
+
+  /* Sharp corners */
+  --radius: 0.25rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-success-subtle: var(--success-subtle);
+  --color-success-subtle-foreground: var(--success-subtle-foreground);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-warning-subtle-foreground: var(--warning-subtle-foreground);
+  --color-danger-subtle: var(--danger-subtle);
+  --color-danger-subtle-foreground: var(--danger-subtle-foreground);
+  --color-info-subtle: var(--info-subtle);
+  --color-info-subtle-foreground: var(--info-subtle-foreground);
+  --color-neutral-subtle: var(--neutral-subtle);
+  --color-neutral-subtle-foreground: var(--neutral-subtle-foreground);
+  --color-verify-subtle: var(--verify-subtle);
+  --color-verify-subtle-foreground: var(--verify-subtle-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+
+  /*
+   * The radius scale is derived from --radius rather than left at Tailwind's
+   * defaults (rounded-lg 0.5rem, rounded-xl 0.75rem, rounded-4xl 2rem). The
+   * ui/ primitives reach for those names freely — card.tsx is `rounded-xl`,
+   * badge.tsx is `rounded-4xl` — so the stock scale would round the whole app
+   * well past the 4px this theme is built on.
+   */
+  --radius-sm: calc(var(--radius) - 2px); /* 2px */
+  --radius-md: calc(var(--radius) - 1px); /* 3px */
+  --radius-lg: var(--radius); /* 4px */
+  --radius-xl: calc(var(--radius) + 2px); /* 6px */
+  --radius-2xl: calc(var(--radius) + 4px); /* 8px */
+
+  --font-sans: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-heading: var(--font-sans);
+  --font-mono:
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  /*
+   * Elevation. Cool-tinted rather than neutral black so shadows sit in the
+   * same colour family as the borders; at 4px radius an untinted shadow reads
+   * as grime. Kept shallow — this is a light, flat theme, and the shadow is
+   * there to separate a surface from the page, not to lift it off it.
+   */
+  --shadow-xs: 0 1px 2px 0 hsl(220 30% 20% / 0.05);
+  --shadow-sm: 0 1px 2px 0 hsl(220 30% 20% / 0.06), 0 1px 3px 0 hsl(220 30% 20% / 0.04);
+  --shadow-md: 0 2px 4px -1px hsl(220 30% 20% / 0.07), 0 4px 8px -2px hsl(220 30% 20% / 0.05);
+}
 
 @layer base {
   /*
-   * Arctic Light theme — modern, minimal, light-pastel.
-   * One accent (soft sky blue), cool light-grey borders, sharp 4px corners.
-   * Designed in HSL so shadcn utilities (bg-background, text-foreground,
-   * border-border, ring-ring, etc.) resolve correctly through Tailwind.
+   * v4 defaults the border colour to currentColor; every `border` in the app
+   * predates that and expects the theme hairline.
    */
-  :root {
-    /* Page + surfaces */
-    --background: 210 20% 98.5%; /* #FAFBFC near-white page */
-    --foreground: 220 22% 16%; /* #1F2937 slate-900 body text */
-    --card: 0 0% 100%; /* #FFFFFF flat card surface */
-    --card-foreground: 220 22% 16%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 220 22% 16%;
-
-    /* Accent (single accent — used sparingly) */
-    --primary: 213 92% 67%; /* #5B9DF9 soft sky blue */
-    --primary-foreground: 0 0% 100%; /* white on accent */
-    --secondary: 210 30% 96%; /* very pale blue-grey */
-    --secondary-foreground: 220 22% 16%;
-    --accent: 213 92% 67%;
-    --accent-foreground: 0 0% 100%;
-
-    /* Muted (sidebar items, helper text, table headers) */
-    --muted: 210 22% 95%;
-    --muted-foreground: 220 9% 46%; /* #6B7280 slate-500 */
-
-    /* Status — soft pastels */
-    --destructive: 0 84% 60%; /* coral-red 500 for solid contexts */
-    --destructive-foreground: 0 0% 100%;
-    --success: 142 76% 36%; /* mint 600 */
-    --success-foreground: 0 0% 100%;
-    --warning: 38 92% 50%; /* amber 500 */
-    --warning-foreground: 220 22% 16%;
-
-    /* Borders, inputs, focus ring */
-    --border: 214 24% 91%; /* #E5E9F0 cool light grey hairline */
-    --input: 214 24% 91%;
-    --ring: 213 92% 67%; /* accent */
-
-    /* Sidebar — slightly cooler than the page so it reads as a distinct surface */
-    --sidebar: 215 25% 96%; /* #F1F4F9 */
-    --sidebar-foreground: 220 22% 16%;
-
-    /* Sharp corners */
-    --radius: 0.25rem;
-  }
-
-  /* Use border-border by default everywhere a border appears. */
   * {
-    border-color: hsl(var(--border));
+    border-color: var(--border);
   }
 
   body {
-    background-color: hsl(var(--background));
-    color: hsl(var(--foreground));
-    font-family:
-      'Carlito',
-      Calibri,
-      -apple-system,
-      BlinkMacSystemFont,
-      'Segoe UI',
-      sans-serif;
+    @apply bg-background text-foreground font-sans;
   }
 
   html {
     scroll-behavior: smooth;
-    font-family:
-      'Carlito',
-      Calibri,
-      -apple-system,
-      BlinkMacSystemFont,
-      'Segoe UI',
-      sans-serif;
   }
 
   /* Visible, on-brand focus ring for keyboard users. */
   *:focus-visible {
-    outline: 2px solid hsl(var(--ring));
+    outline: 2px solid var(--ring);
     outline-offset: 2px;
-    box-shadow: 0 0 0 4px hsl(var(--ring) / 0.18);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--ring) 18%, transparent);
   }
 
   /* Thinner default stroke for lucide icons so they read as light + modern. */

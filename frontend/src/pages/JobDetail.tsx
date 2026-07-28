@@ -1,20 +1,47 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  AlertTriangle,
+  History,
+  KeyRound,
+  Pencil,
+  Play,
+  ShieldCheck,
+  Square,
+  Trash2,
+  X,
+} from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import ActionTooltip from '../components/ActionTooltip'
+import EmptyState from '../components/EmptyState'
 import JobForm from '../components/JobForm'
+import PageHeader from '../components/PageHeader'
 import RunStatusBadge from '../components/RunStatusBadge'
 import TriggeredByIcon from '../components/TriggeredByIcon'
+import { StopRunDialog } from './Dashboard'
 import * as api from '../lib/api'
 import type { BackupRun, JobCommand } from '../lib/types'
 import { formatBytes, parseApiError, type ConflictingJob } from '../lib/utils'
+import { Button } from '../components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogDescription,
 } from '../components/ui/dialog'
+import { Skeleton } from '../components/ui/skeleton'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '../components/ui/table'
 import { TooltipProvider } from '../components/ui/tooltip'
 
 type Tab = 'runs' | 'snapshots' | 'commands' | 'settings'
@@ -101,6 +128,7 @@ export default function JobDetail() {
   const [editError, setEditError] = useState<string | null>(null)
   const [editConflict, setEditConflict] = useState<ConflictingJob | null>(null)
   const [isCheckModalOpen, setIsCheckModalOpen] = useState(false)
+  const [stopOpen, setStopOpen] = useState(false)
   const [checkMode, setCheckMode] = useState<'structural' | 'subset' | 'full'>('structural')
   const [checkSubsetPercent, setCheckSubsetPercent] = useState('5')
   const [checkTimeoutHours, setCheckTimeoutHours] = useState('')
@@ -144,21 +172,21 @@ export default function JobDetail() {
 
   if (jobError) {
     const status = (jobError as { status?: number }).status
-    if (status === 404) {
-      return (
-        <div className="p-6">
-          <p>Job not found (404).</p>
-        </div>
-      )
-    }
     return (
-      <div className="p-6">
-        <p>Error: could not load job.</p>
-      </div>
+      <>
+        <PageHeader title="Job" breadcrumb={[{ label: 'Jobs', to: '/jobs' }]} />
+        <Card className="border border-destructive/30 bg-destructive/5">
+          <CardContent className="text-destructive">
+            {status === 404 ? 'Job not found (404).' : 'Error: could not load job.'}
+          </CardContent>
+        </Card>
+      </>
     )
   }
 
-  if (!job) return null
+  // The page used to render nothing until the job landed, which showed a blank
+  // white frame on every navigation into a job.
+  if (!job) return <JobDetailSkeleton />
 
   const unlockDisabled =
     runs === undefined || runs.some((r) => r.status === 'running' || r.check_status === null)
@@ -204,11 +232,9 @@ export default function JobDetail() {
     }
   }
 
-  async function handleStop() {
+  async function handleConfirmStop() {
+    setStopOpen(false)
     if (!activeRun) return
-    if (!window.confirm('Cancel this running backup? Already-uploaded data is kept.')) {
-      return
-    }
     try {
       await api.cancelRun(activeRun.id)
       await queryClient.invalidateQueries({ queryKey: ['jobRuns', id] })
@@ -254,104 +280,126 @@ export default function JobDetail() {
 
   return (
     <TooltipProvider>
-      <div className="p-6 space-y-4">
-        <div className="flex items-center gap-3 flex-wrap">
-          <h1 className="text-2xl font-bold">{job.name}</h1>
-          <span
-            className={
-              job.enabled
-                ? 'bg-green-100 text-green-800 rounded-sm px-2 py-0.5 text-sm'
-                : 'bg-slate-100 text-slate-600 rounded-sm px-2 py-0.5 text-sm'
-            }
-          >
-            {job.enabled ? 'Enabled' : 'Disabled'}
-          </span>
-          <ActionTooltip content={ACTION_HELP.runNow}>
-            <button
-              onClick={handleRunNow}
-              className="bg-primary text-primary-foreground hover:bg-primary/90 px-3 py-1 rounded-sm text-sm"
+      <div className="space-y-4">
+        <PageHeader
+          breadcrumb={[{ label: 'Jobs', to: '/jobs' }]}
+          title={job.name}
+          status={
+            <span
+              className={`inline-flex items-center rounded-sm px-2 py-0.5 text-xs font-medium ${
+                job.enabled
+                  ? 'bg-success-subtle text-success-subtle-foreground'
+                  : 'bg-neutral-subtle text-neutral-subtle-foreground'
+              }`}
             >
-              Run Now
-            </button>
-          </ActionTooltip>
-          {activeRun && (
-            <ActionTooltip content={ACTION_HELP.stop}>
-              <button
-                onClick={handleStop}
-                className="border border-destructive/40 text-destructive hover:bg-destructive/10 px-3 py-1 rounded-sm text-sm"
+              {job.enabled ? 'Enabled' : 'Disabled'}
+            </span>
+          }
+          actions={
+            <>
+              <ActionTooltip content={ACTION_HELP.runNow}>
+                <Button size="lg" onClick={handleRunNow}>
+                  <Play aria-hidden="true" />
+                  Run Now
+                </Button>
+              </ActionTooltip>
+              {activeRun && (
+                <ActionTooltip content={ACTION_HELP.stop}>
+                  <Button
+                    variant="outline"
+                    size="lg"
+                    className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    onClick={() => setStopOpen(true)}
+                  >
+                    <Square aria-hidden="true" />
+                    Stop
+                  </Button>
+                </ActionTooltip>
+              )}
+              <ActionTooltip content={ACTION_HELP.prune}>
+                <Button variant="outline" size="lg" onClick={handlePruneNow}>
+                  <Trash2 aria-hidden="true" />
+                  Prune Old Files
+                </Button>
+              </ActionTooltip>
+              <ActionTooltip content={ACTION_HELP.check}>
+                <Button
+                  variant="outline"
+                  size="lg"
+                  onClick={() => {
+                    setCheckError(null)
+                    setIsCheckModalOpen(true)
+                  }}
+                >
+                  <ShieldCheck aria-hidden="true" />
+                  Integrity Check
+                </Button>
+              </ActionTooltip>
+              <ActionTooltip
+                content={
+                  editDisabled
+                    ? ACTION_HELP.editDisabled
+                    : isEditing
+                      ? ACTION_HELP.cancelEdit
+                      : ACTION_HELP.edit
+                }
+                disabled={editDisabled}
               >
-                Stop
-              </button>
-            </ActionTooltip>
-          )}
-          <ActionTooltip content={ACTION_HELP.prune}>
-            <button onClick={handlePruneNow} className="border px-3 py-1 rounded text-sm">
-              Prune Old Files
-            </button>
-          </ActionTooltip>
-          <ActionTooltip content={ACTION_HELP.check}>
-            <button
-              onClick={() => {
-                setCheckError(null)
-                setIsCheckModalOpen(true)
-              }}
-              className="border px-3 py-1 rounded text-sm"
-            >
-              Integrity Check
-            </button>
-          </ActionTooltip>
-          <ActionTooltip
-            content={
-              editDisabled
-                ? ACTION_HELP.editDisabled
-                : isEditing
-                  ? ACTION_HELP.cancelEdit
-                  : ACTION_HELP.edit
-            }
-            disabled={editDisabled}
-          >
-            <button
-              onClick={() => {
-                setEditError(null)
-                setEditConflict(null)
-                setIsEditing((v) => !v)
-              }}
-              aria-pressed={isEditing}
-              // A live run reads job fields mid-pipeline and the backend rejects
-              // PUT with 409 — don't offer an edit that can only fail. The run
-              // must be stopped first. (Kept clickable while already editing so
-              // the form can still be closed.)
-              disabled={editDisabled}
-              className="border px-3 py-1 rounded text-sm disabled:opacity-50"
-            >
-              {isEditing ? 'Cancel Edit' : 'Edit'}
-            </button>
-          </ActionTooltip>
-          <ActionTooltip
-            content={unlockDisabled ? ACTION_HELP.unlockDisabled : ACTION_HELP.unlock}
-            disabled={unlockDisabled}
-          >
-            <button
-              onClick={handleUnlock}
-              disabled={unlockDisabled}
-              className="border px-3 py-1 rounded text-sm disabled:opacity-50"
-            >
-              Unlock
-            </button>
-          </ActionTooltip>
-        </div>
+                <Button
+                  variant="outline"
+                  size="lg"
+                  onClick={() => {
+                    setEditError(null)
+                    setEditConflict(null)
+                    setIsEditing((v) => !v)
+                  }}
+                  aria-pressed={isEditing}
+                  // A live run reads job fields mid-pipeline and the backend rejects
+                  // PUT with 409 — don't offer an edit that can only fail. The run
+                  // must be stopped first. (Kept clickable while already editing so
+                  // the form can still be closed.)
+                  disabled={editDisabled}
+                >
+                  {isEditing ? <X aria-hidden="true" /> : <Pencil aria-hidden="true" />}
+                  {isEditing ? 'Cancel Edit' : 'Edit'}
+                </Button>
+              </ActionTooltip>
+              <ActionTooltip
+                content={unlockDisabled ? ACTION_HELP.unlockDisabled : ACTION_HELP.unlock}
+                disabled={unlockDisabled}
+              >
+                <Button
+                  variant="outline"
+                  size="lg"
+                  onClick={handleUnlock}
+                  disabled={unlockDisabled}
+                >
+                  <KeyRound aria-hidden="true" />
+                  Unlock
+                </Button>
+              </ActionTooltip>
+            </>
+          }
+        />
 
-        {runError && <p className="text-destructive text-sm">{runError}</p>}
-        {pruneError && <p className="text-destructive text-sm">{pruneError}</p>}
-        {unlockOutput && <p className="text-sm text-green-700">Output: {unlockOutput}</p>}
+        {runError && <p className="text-sm text-destructive">{runError}</p>}
+        {pruneError && <p className="text-sm text-destructive">{pruneError}</p>}
+        {unlockOutput && (
+          <p className="rounded-lg border border-success/30 bg-success-subtle px-3 py-2 text-sm text-success-subtle-foreground">
+            Output: {unlockOutput}
+          </p>
+        )}
         {unlockError && <p className="text-sm text-destructive">{unlockError}</p>}
 
-        <div className="bg-warning/15 border border-warning/40 rounded-sm p-3 text-xs text-foreground">
-          ⚠️ <strong>Notice on Disk Space:</strong> Restic retention policies (forgetting snapshots)
-          only remove snapshot metadata reference points. They <strong>do not</strong> automatically
-          free physical disk space. To reclaim physical space and avoid silent disk space
-          accumulation, you must click the <strong>Prune Old Files</strong> button above. Pruning is
-          not scheduled or automated to avoid performance impact.
+        <div className="flex items-start gap-2.5 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden="true" />
+          <span>
+            <strong>Notice on Disk Space:</strong> Restic retention policies (forgetting snapshots)
+            only remove snapshot metadata reference points. They <strong>do not</strong>{' '}
+            automatically free physical disk space. To reclaim physical space and avoid silent disk
+            space accumulation, you must click the <strong>Prune Old Files</strong> button above.
+            Pruning is not scheduled or automated to avoid performance impact.
+          </span>
         </div>
 
         {isEditing && (
@@ -395,217 +443,254 @@ export default function JobDetail() {
           </div>
         )}
 
-        <div role="tablist" className="flex gap-2 border-b">
-          <button
-            role="tab"
-            aria-selected={tab === 'runs'}
-            onClick={() => setTab('runs')}
-            className={`px-3 py-1 text-sm ${tab === 'runs' ? 'border-b-2 border-primary text-primary font-medium' : ''}`}
-          >
-            Runs
-          </button>
-          <button
-            role="tab"
-            aria-selected={tab === 'snapshots'}
-            onClick={() => setTab('snapshots')}
-            className={`px-3 py-1 text-sm ${tab === 'snapshots' ? 'border-b-2 border-primary text-primary font-medium' : ''}`}
-          >
-            Snapshots
-          </button>
-          <button
-            role="tab"
-            aria-selected={tab === 'commands'}
-            onClick={() => setTab('commands')}
-            className={`px-3 py-1 text-sm ${tab === 'commands' ? 'border-b-2 border-primary text-primary font-medium' : ''}`}
-          >
-            Commands
-          </button>
-          <button
-            role="tab"
-            aria-selected={tab === 'settings'}
-            onClick={() => setTab('settings')}
-            className={`px-3 py-1 text-sm ${tab === 'settings' ? 'border-b-2 border-primary text-primary font-medium' : ''}`}
-          >
-            Settings
-          </button>
-        </div>
-
-        {tab === 'runs' && (
-          <div>
-            <p className="text-xs text-muted-foreground mb-2">
-              Run history is capped by the global "Keep last runs" setting (default 100). Older run
-              records are deleted automatically after each run. Backup snapshots in the repo are not
-              affected — those are governed by this job's Retention Policy.
-            </p>
-            {(runs ?? []).length === 0 ? (
-              <p className="text-muted-foreground text-sm">No runs yet.</p>
-            ) : (
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left border-b">
-                    <th className="py-2 pr-4">Kind</th>
-                    <th className="py-2 pr-4">Status</th>
-                    <th className="py-2 pr-4">Retention</th>
-                    <th className="py-2 pr-4">Started</th>
-                    <th className="py-2 pr-4">Duration</th>
-                    <th className="py-2 pr-4">Total Size</th>
-                    <th className="py-2 pr-4">Added</th>
-                    <th className="py-2 pr-4">Files</th>
-                    <th className="py-2 pr-4">Snapshot</th>
-                    <th className="py-2">Triggered By</th>
-                  </tr>
-                </thead>
-                <tbody className="[&>tr:nth-child(even)]:bg-muted/40">
-                  {(runs ?? []).map((r) => (
-                    <tr key={r.id} className="border-b hover:bg-muted/60">
-                      <td className="py-2 pr-4 capitalize">{r.kind}</td>
-                      <td className="py-2 pr-4">
-                        <Link to={`/runs/${r.id}`} className="hover:underline">
-                          <RunStatusBadge status={r.status} />
-                        </Link>
-                      </td>
-                      {/* `restic forget` is the retention policy; when it fails
-                        it keeps failing, so the pattern has to be visible
-                        across the history rather than one run at a time. */}
-                      <td className="py-2 pr-4">
-                        <RunStatusBadge status={r.prune_status} />
-                      </td>
-                      <td className="py-2 pr-4">{new Date(r.started_at).toLocaleString()}</td>
-                      <td className="py-2 pr-4">
-                        {r.duration_seconds != null ? `${r.duration_seconds}s` : '—'}
-                      </td>
-                      <td className="py-2 pr-4">{formatBytes(r.total_bytes_processed)}</td>
-                      <td className="py-2 pr-4">{formatBytes(r.data_added_bytes)}</td>
-                      <td className="py-2 pr-4">
-                        {r.files_new != null ||
-                        r.files_changed != null ||
-                        r.files_unmodified != null
-                          ? `+${r.files_new ?? 0} / ~${r.files_changed ?? 0} / =${r.files_unmodified ?? 0}`
-                          : '—'}
-                      </td>
-                      <td className="py-2 pr-4 font-mono">
-                        {r.snapshot_id ? r.snapshot_id.substring(0, 8) : '—'}
-                      </td>
-                      <td className="py-2">
-                        <TriggeredByIcon value={r.triggered_by} />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+        <Tabs value={tab} onValueChange={(v) => setTab(v as Tab)}>
+          {/* The rule runs the full width; the tabs sit at its left end rather
+              than stretching to fill it, so four short labels don't end up a
+              screen apart. */}
+          <div className="border-b border-border">
+            <TabsList variant="line" className="w-fit justify-start">
+              <TabsTrigger value="runs" className="flex-none px-3">
+                Runs
+              </TabsTrigger>
+              <TabsTrigger value="snapshots" className="flex-none px-3">
+                Snapshots
+              </TabsTrigger>
+              <TabsTrigger value="commands" className="flex-none px-3">
+                Commands
+              </TabsTrigger>
+              <TabsTrigger value="settings" className="flex-none px-3">
+                Settings
+              </TabsTrigger>
+            </TabsList>
           </div>
-        )}
 
-        {tab === 'snapshots' && (
-          <div>
-            {snapshotsError ? (
-              // Never render a failed listing as "no snapshots" — the repository
-              // is created with the job, so a failure here means the drive is
-              // detached, not that the backups are gone. Saying "none" would
-              // invite the user to delete and recreate the job.
-              <div className="bg-warning/15 border border-warning/40 rounded-sm p-3 text-sm space-y-1">
-                <p>
-                  <strong>Could not list snapshots.</strong> The repository at{' '}
-                  <code>
-                    /destinations/{job.destination_label}/{job.name}
-                  </code>{' '}
-                  is not reachable — check that the destination drive is mounted. Your snapshots are
-                  not affected by this.
-                </p>
+          <TabsContent value="runs">
+            <Card>
+              <CardContent className="space-y-3">
                 <p className="text-xs text-muted-foreground">
-                  {parseApiError(snapshotsError).message ?? 'The listing request failed.'}
+                  Run history is capped by the global "Keep last runs" setting (default 100). Older
+                  run records are deleted automatically after each run. Backup snapshots in the repo
+                  are not affected — those are governed by this job's Retention Policy.
                 </p>
-              </div>
-            ) : (snapshots ?? []).length === 0 ? (
-              <p className="text-muted-foreground text-sm">No snapshots yet.</p>
-            ) : (
-              <ul className="space-y-1 text-sm">
-                {(snapshots ?? []).map((s) => (
-                  <li key={s.snapshot_id}>
-                    <span>{s.snapshot_id.substring(0, 8)}</span>
-                    {' — '}
-                    {new Date(s.snapshot_time).toLocaleString()}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
+                {(runs ?? []).length === 0 ? (
+                  <EmptyState
+                    icon={History}
+                    title="No runs yet"
+                    description="This job has not run. It will appear here on its next scheduled run, or as soon as you use Run Now."
+                  />
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Kind</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Retention</TableHead>
+                        <TableHead>Started</TableHead>
+                        <TableHead numeric>Duration</TableHead>
+                        <TableHead numeric>Total Size</TableHead>
+                        <TableHead numeric>Added</TableHead>
+                        <TableHead numeric>Files</TableHead>
+                        <TableHead>Snapshot</TableHead>
+                        <TableHead>Triggered By</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {(runs ?? []).map((r) => (
+                        <TableRow key={r.id}>
+                          <TableCell className="capitalize">{r.kind}</TableCell>
+                          <TableCell>
+                            <Link to={`/runs/${r.id}`} className="hover:underline">
+                              <RunStatusBadge status={r.status} />
+                            </Link>
+                          </TableCell>
+                          {/* `restic forget` is the retention policy; when it fails
+                            it keeps failing, so the pattern has to be visible
+                            across the history rather than one run at a time. */}
+                          <TableCell>
+                            <RunStatusBadge status={r.prune_status} />
+                          </TableCell>
+                          <TableCell className="tabular-nums whitespace-nowrap">
+                            {new Date(r.started_at).toLocaleString()}
+                          </TableCell>
+                          <TableCell numeric>
+                            {r.duration_seconds != null ? `${r.duration_seconds}s` : '—'}
+                          </TableCell>
+                          <TableCell numeric>{formatBytes(r.total_bytes_processed)}</TableCell>
+                          <TableCell numeric>{formatBytes(r.data_added_bytes)}</TableCell>
+                          <TableCell numeric className="whitespace-nowrap">
+                            {r.files_new != null ||
+                            r.files_changed != null ||
+                            r.files_unmodified != null
+                              ? `+${r.files_new ?? 0} / ~${r.files_changed ?? 0} / =${r.files_unmodified ?? 0}`
+                              : '—'}
+                          </TableCell>
+                          <TableCell className="font-mono">
+                            {r.snapshot_id ? r.snapshot_id.substring(0, 8) : '—'}
+                          </TableCell>
+                          <TableCell>
+                            <TriggeredByIcon value={r.triggered_by} />
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
 
-        {tab === 'commands' && (
-          <div className="space-y-6">
-            <p className="text-xs text-muted-foreground">
-              The exact restic commands this job causes. They are generated by the same code that
-              runs them and are rebuilt from this job's current settings, so editing the job changes
-              what you see here.
-            </p>
-            {commandsError ? (
-              <div className="bg-warning/15 border border-warning/40 rounded-sm p-3 text-sm space-y-1">
-                <p>
-                  <strong>Could not load the commands for this job.</strong>
-                </p>
+          <TabsContent value="snapshots">
+            <Card>
+              <CardContent>
+                {snapshotsError ? (
+                  // Never render a failed listing as "no snapshots" — the repository
+                  // is created with the job, so a failure here means the drive is
+                  // detached, not that the backups are gone. Saying "none" would
+                  // invite the user to delete and recreate the job.
+                  <div className="flex items-start gap-2.5 rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+                    <AlertTriangle
+                      className="mt-0.5 size-4 shrink-0 text-warning"
+                      aria-hidden="true"
+                    />
+                    <div className="space-y-1">
+                      <p>
+                        <strong>Could not list snapshots.</strong> The repository at{' '}
+                        <code className="font-mono">
+                          /destinations/{job.destination_label}/{job.name}
+                        </code>{' '}
+                        is not reachable — check that the destination drive is mounted. Your
+                        snapshots are not affected by this.
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {parseApiError(snapshotsError).message ?? 'The listing request failed.'}
+                      </p>
+                    </div>
+                  </div>
+                ) : (snapshots ?? []).length === 0 ? (
+                  <EmptyState
+                    icon={History}
+                    title="No snapshots yet."
+                    description="The repository is reachable but holds nothing yet — the first successful backup writes a snapshot here."
+                  />
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Snapshot</TableHead>
+                        <TableHead>Taken</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {(snapshots ?? []).map((s) => (
+                        <TableRow key={s.snapshot_id}>
+                          <TableCell className="font-mono">
+                            {s.snapshot_id.substring(0, 8)}
+                          </TableCell>
+                          <TableCell className="tabular-nums">
+                            {new Date(s.snapshot_time).toLocaleString()}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="commands">
+            <Card>
+              <CardContent className="space-y-6">
                 <p className="text-xs text-muted-foreground">
-                  {parseApiError(commandsError).message ?? 'The request failed.'}
+                  The exact restic commands this job causes. They are generated by the same code
+                  that runs them and are rebuilt from this job's current settings, so editing the
+                  job changes what you see here.
                 </p>
-              </div>
-            ) : (
-              <>
-                <section aria-labelledby="commands-backup-run" className="space-y-3">
-                  <h2 id="commands-backup-run" className="text-base font-semibold">
-                    Backup run
-                  </h2>
-                  <p className="text-xs text-muted-foreground">
-                    What one backup run issues, in the order the runner issues them — this is what
-                    the schedule does, unattended.
-                  </p>
-                  <CommandList commands={backupRunCommands} />
-                </section>
+                {commandsError ? (
+                  <div className="flex items-start gap-2.5 rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+                    <AlertTriangle
+                      className="mt-0.5 size-4 shrink-0 text-warning"
+                      aria-hidden="true"
+                    />
+                    <div className="space-y-1">
+                      <p>
+                        <strong>Could not load the commands for this job.</strong>
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {parseApiError(commandsError).message ?? 'The request failed.'}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <section aria-labelledby="commands-backup-run" className="space-y-3">
+                      <h2 id="commands-backup-run" className="text-base font-semibold">
+                        Backup run
+                      </h2>
+                      <p className="text-xs text-muted-foreground">
+                        What one backup run issues, in the order the runner issues them — this is
+                        what the schedule does, unattended.
+                      </p>
+                      <CommandList commands={backupRunCommands} />
+                    </section>
 
-                {/* Kept visibly apart from the pipeline above: a backup and a
+                    {/* Kept visibly apart from the pipeline above: a backup and a
                   button click are different promises, and listing `restic
                   prune` among the backup steps would tell an operator their
                   schedule reclaims disk space, which it never does. */}
-                <section aria-labelledby="commands-on-demand" className="space-y-3">
-                  <h2 id="commands-on-demand" className="text-base font-semibold">
-                    Only when you click a button
-                  </h2>
-                  <p className="text-xs text-muted-foreground">
-                    These are <strong>not part of a backup</strong> and they{' '}
-                    <strong>never run on a schedule</strong>. Each one happens only when you use the
-                    matching action at the top of this page.
-                  </p>
-                  <CommandList commands={onDemandCommands} />
-                </section>
-              </>
-            )}
-          </div>
-        )}
+                    <section aria-labelledby="commands-on-demand" className="space-y-3">
+                      <h2 id="commands-on-demand" className="text-base font-semibold">
+                        Only when you click a button
+                      </h2>
+                      <p className="text-xs text-muted-foreground">
+                        These are <strong>not part of a backup</strong> and they{' '}
+                        <strong>never run on a schedule</strong>. Each one happens only when you use
+                        the matching action at the top of this page.
+                      </p>
+                      <CommandList commands={onDemandCommands} />
+                    </section>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
 
-        {tab === 'settings' && (
-          <div className="space-y-2 text-sm">
-            <div>
-              Source: <span>{job.source_label}</span>
-            </div>
-            <div>
-              Destination: <span>{job.destination_label}</span>
-            </div>
-            <div>
-              Schedule: <span>{job.schedule_value}</span>
-            </div>
-          </div>
-        )}
+          <TabsContent value="settings">
+            <Card>
+              <CardContent>
+                <dl className="grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-3">
+                  <div>
+                    <dt className="text-xs text-muted-foreground">Source</dt>
+                    <dd className="text-sm">{job.source_label}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-muted-foreground">Destination</dt>
+                    <dd className="text-sm">{job.destination_label}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-muted-foreground">Schedule</dt>
+                    <dd className="text-sm tabular-nums">{job.schedule_value}</dd>
+                  </div>
+                </dl>
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
 
-        <div className="mt-6">
-          <h2 className="text-lg font-semibold mb-2">Restore</h2>
-          <pre className="bg-muted rounded-sm p-3 text-xs overflow-auto">
-            {`# Restore with restic
+        <Card>
+          <CardHeader>
+            <CardTitle as="h2">Restore</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <pre className="overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
+              {`# Restore with restic
 export RESTIC_REPOSITORY=/destinations/${job.destination_label}/${job.name}
 export RESTIC_PASSWORD=your-password-here
 restic snapshots
 restic restore latest --target ./restored`}
-          </pre>
-        </div>
+            </pre>
+          </CardContent>
+        </Card>
 
         <Dialog open={isCheckModalOpen} onOpenChange={setIsCheckModalOpen}>
           <DialogContent className="sm:max-w-md">
@@ -634,7 +719,7 @@ restic restore latest --target ./restored`}
                   id="modal-check-mode"
                   value={checkMode}
                   onChange={(e) => setCheckMode(e.target.value as any)}
-                  className="border rounded px-2 py-1 text-sm w-full bg-background"
+                  className="h-8 w-full rounded-md border border-input bg-background px-2.5 text-sm focus-visible:border-ring"
                 >
                   <option value="structural">Structural</option>
                   <option value="subset">Subset</option>
@@ -657,7 +742,7 @@ restic restore latest --target ./restored`}
                     max={100}
                     value={checkSubsetPercent}
                     onChange={(e) => setCheckSubsetPercent(e.target.value)}
-                    className="border rounded px-2 py-1 text-sm w-full bg-background"
+                    className="h-8 w-full rounded-md border border-input bg-background px-2.5 text-sm focus-visible:border-ring"
                     required
                   />
                 </div>
@@ -678,29 +763,50 @@ restic restore latest --target ./restored`}
                   value={checkTimeoutHours}
                   onChange={(e) => setCheckTimeoutHours(e.target.value)}
                   placeholder="24"
-                  className="border rounded px-2 py-1 text-sm w-full bg-background"
+                  className="h-8 w-full rounded-md border border-input bg-background px-2.5 text-sm focus-visible:border-ring"
                 />
               </div>
 
-              <div className="flex justify-end gap-2 pt-2 border-t mt-4">
-                <button
+              <DialogFooter className="mt-4 border-t pt-4">
+                <Button
                   type="button"
+                  variant="outline"
+                  size="lg"
                   onClick={() => setIsCheckModalOpen(false)}
-                  className="px-4 py-2 border rounded text-sm hover:bg-muted font-medium"
                 >
                   Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 bg-primary text-primary-foreground hover:bg-primary/90 rounded text-sm font-medium"
-                >
+                </Button>
+                <Button type="submit" size="lg">
                   Run Check
-                </button>
-              </div>
+                </Button>
+              </DialogFooter>
             </form>
           </DialogContent>
         </Dialog>
+
+        <StopRunDialog open={stopOpen} onOpenChange={setStopOpen} onConfirm={handleConfirmStop} />
       </div>
     </TooltipProvider>
+  )
+}
+
+/**
+ * Shown while the job itself is loading. Mirrors the real page's shape — a
+ * header band, an action row, and a table — so the layout doesn't jump when
+ * the data arrives.
+ */
+function JobDetailSkeleton() {
+  return (
+    <div className="space-y-4">
+      <PageHeader title="Job" breadcrumb={[{ label: 'Jobs', to: '/jobs' }]} />
+      <Card>
+        <CardContent className="space-y-3">
+          <Skeleton className="h-4 w-48" />
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-8 w-full" />
+          ))}
+        </CardContent>
+      </Card>
+    </div>
   )
 }

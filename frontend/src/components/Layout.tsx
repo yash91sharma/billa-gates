@@ -7,6 +7,21 @@ import Sidebar from './Sidebar'
 
 const MOBILE_BREAKPOINT_PX = 768
 
+// The desktop rail's expanded/collapsed state is a preference, not page state:
+// someone who collapses it wants it collapsed on the next page and the next
+// visit. It used to be plain component state, so every reload re-expanded it.
+const SIDEBAR_STORAGE_KEY = 'billa-gates:sidebar-expanded'
+
+function readStoredExpanded(): boolean {
+  try {
+    return window.localStorage.getItem(SIDEBAR_STORAGE_KEY) !== 'false'
+  } catch {
+    // Private-mode / disabled storage — the preference is not worth failing
+    // the whole shell over.
+    return true
+  }
+}
+
 /**
  * App shell with a left sidebar and a content outlet.
  *
@@ -21,8 +36,19 @@ const MOBILE_BREAKPOINT_PX = 768
  * transitions easy to reason about.
  */
 export default function Layout() {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(readStoredExpanded)
   const [mobileOpen, setMobileOpen] = useState(false)
+
+  function toggleExpanded() {
+    setExpanded((v) => {
+      try {
+        window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(!v))
+      } catch {
+        // Preference not persisted; the toggle still works for this session.
+      }
+      return !v
+    })
+  }
 
   // Auto-close the mobile drawer when the viewport grows past the breakpoint,
   // so resizing from mobile → desktop doesn't leave a stale overlay open.
@@ -61,7 +87,7 @@ export default function Layout() {
       >
         <Sidebar
           expanded={expanded}
-          onToggle={() => setExpanded((v) => !v)}
+          onToggle={toggleExpanded}
           onNavigate={() => setMobileOpen(false)}
         />
       </aside>
@@ -87,8 +113,14 @@ export default function Layout() {
           <span className="font-semibold tracking-tight">Billa-Gates</span>
         </header>
 
-        <main className="min-w-0 flex-1 overflow-x-auto">
-          <Outlet />
+        {/* One content frame for every route. Pages used to declare their own
+            `p-6`, and none of them capped their width, so on a wide monitor a
+            seven-column table stretched to the full viewport and the eye had
+            to travel the whole way to pair a job with its status. */}
+        <main className="min-w-0 flex-1">
+          <div className="mx-auto w-full max-w-[1400px] px-4 py-6 sm:px-6">
+            <Outlet />
+          </div>
         </main>
       </div>
     </div>

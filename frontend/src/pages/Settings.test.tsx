@@ -242,14 +242,12 @@ describe('Settings', () => {
 
     it('shows old label dropdown', async () => {
       renderWithProviders(<Settings />)
-      await waitFor(() =>
-        expect(screen.getByLabelText(/current.*label|old.*label|from/i)).toBeInTheDocument()
-      )
+      await waitFor(() => expect(screen.getByLabelText(/current label/i)).toBeInTheDocument())
     })
 
     it('shows new label input', async () => {
       renderWithProviders(<Settings />)
-      await waitFor(() => expect(screen.getByLabelText(/new.*label|to/i)).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByLabelText(/new label/i)).toBeInTheDocument())
     })
 
     it('shows affected jobs count on success', async () => {
@@ -261,9 +259,9 @@ describe('Settings', () => {
         ],
       })
       renderWithProviders(<Settings />)
-      await waitFor(() => screen.getByLabelText(/current.*label|old.*label|from/i))
-      await user.selectOptions(screen.getByLabelText(/current.*label|old.*label|from/i), 'main')
-      await user.type(screen.getByLabelText(/new.*label|to/i), 'primary')
+      await waitFor(() => screen.getByLabelText(/current label/i))
+      await user.selectOptions(screen.getByLabelText(/current label/i), 'main')
+      await user.type(screen.getByLabelText(/new label/i), 'primary')
       await user.click(screen.getByRole('button', { name: /rename/i }))
       await waitFor(() =>
         expect(screen.getByText(/2.*job|job.*updated|affected/i)).toBeInTheDocument()
@@ -276,8 +274,8 @@ describe('Settings', () => {
         Object.assign(new Error('Conflict'), { status: 409 })
       )
       renderWithProviders(<Settings />)
-      await waitFor(() => screen.getByLabelText(/new.*label|to/i))
-      await user.type(screen.getByLabelText(/new.*label|to/i), 'existing')
+      await waitFor(() => screen.getByLabelText(/new label/i))
+      await user.type(screen.getByLabelText(/new label/i), 'existing')
       await user.click(screen.getByRole('button', { name: /rename/i }))
       await waitFor(() =>
         expect(screen.getByText(/already exists|conflict|409/i)).toBeInTheDocument()
@@ -290,8 +288,8 @@ describe('Settings', () => {
         Object.assign(new Error('Unprocessable Entity'), { status: 422 })
       )
       renderWithProviders(<Settings />)
-      await waitFor(() => screen.getByLabelText(/new.*label|to/i))
-      await user.type(screen.getByLabelText(/new.*label|to/i), 'invalid label!')
+      await waitFor(() => screen.getByLabelText(/new label/i))
+      await user.type(screen.getByLabelText(/new label/i), 'invalid label!')
       await user.click(screen.getByRole('button', { name: /rename/i }))
       await waitFor(() => expect(screen.getByText(/invalid|validation|422/i)).toBeInTheDocument())
     })
@@ -302,8 +300,8 @@ describe('Settings', () => {
         Object.assign(new Error('Not Found'), { status: 404 })
       )
       renderWithProviders(<Settings />)
-      await waitFor(() => screen.getByLabelText(/current.*label|old.*label|from/i))
-      await user.selectOptions(screen.getByLabelText(/current.*label|old.*label|from/i), 'main')
+      await waitFor(() => screen.getByLabelText(/current label/i))
+      await user.selectOptions(screen.getByLabelText(/current label/i), 'main')
       await user.click(screen.getByRole('button', { name: /rename/i }))
       await waitFor(() =>
         expect(screen.getByText(/not found|no longer.*exist|404/i)).toBeInTheDocument()
