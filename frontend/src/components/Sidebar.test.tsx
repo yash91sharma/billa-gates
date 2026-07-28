@@ -57,4 +57,13 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: /jobs/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /settings/i })).toBeInTheDocument()
   })
+
+  it('logo links to home (dashboard) view and calls onNavigate', async () => {
+    const onNavigate = vi.fn()
+    renderWithProviders(<Sidebar expanded={true} onToggle={() => {}} onNavigate={onNavigate} />)
+    const logoLink = screen.getByRole('link', { name: /billa-gates/i })
+    expect(logoLink).toHaveAttribute('href', '/')
+    await userEvent.click(logoLink)
+    expect(onNavigate).toHaveBeenCalledTimes(1)
+  })
 })

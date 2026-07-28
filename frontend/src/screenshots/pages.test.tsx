@@ -34,6 +34,8 @@ const OUT = '../../screenshots/pages'
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
+const FIXED_NOW = new Date('2026-06-01T12:00:00Z')
+
 const job: BackupJob = {
   id: 'job-1',
   name: 'Documents Backup',
@@ -71,7 +73,7 @@ const job: BackupJob = {
   check_timeout_hours: null,
   created_at: '2026-05-01T10:00:00Z',
   updated_at: '2026-05-15T10:00:00Z',
-  next_run_time: new Date(Date.now() + (26 * 3600 + 120) * 1000).toISOString(),
+  next_run_time: '2026-06-02T14:02:00Z',
   last_run: {
     id: 'run-1',
     kind: 'backup',
@@ -268,7 +270,7 @@ const job2: BackupJob = {
   name: 'Photos & Media Backup',
   source_label: 'photos',
   destination_label: 'archive',
-  next_run_time: new Date(Date.now() + (2 * 3600 + 300) * 1000).toISOString(),
+  next_run_time: '2026-06-01T14:30:00Z',
 }
 
 const job3: BackupJob = {
@@ -277,12 +279,13 @@ const job3: BackupJob = {
   name: 'System Configuration',
   source_label: 'etc',
   destination_label: 'main',
-  next_run_time: new Date(Date.now() + (50 * 3600 + 600) * 1000).toISOString(),
+  next_run_time: '2026-06-03T14:10:00Z',
 }
 
 // ── Mock setup ───────────────────────────────────────────────────────────────
 
 beforeEach(() => {
+  vi.useFakeTimers({ now: FIXED_NOW, shouldAdvanceTime: true })
   vi.mocked(api.listJobs).mockResolvedValue([job, job2, job3])
   vi.mocked(api.getJob).mockResolvedValue(job)
   vi.mocked(api.getJobRuns).mockResolvedValue([run])
@@ -311,6 +314,7 @@ beforeEach(async () => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   cleanup?.()
   cleanup = undefined
 })
