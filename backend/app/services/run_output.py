@@ -177,6 +177,48 @@ def format_partial_backup_error(failed_items: List[str], stderr: str) -> str:
     return "\n".join(parts)
 
 
+def format_scan_errors(failed_items: List[str]) -> str:
+    """Build `error_output` for a backup that exited **0** while restic reported
+    errors on stderr.
+
+    These are the ones nothing else catches. restic's scan pass hands an
+    unlistable directory to `ScannerError`, which prints
+    `{"message_type":"error","during":"scan",...}` to stderr, returns nil and
+    never touches `error_count` — so the process still exits 0, the run is a
+    clean success, and (until this) the app discarded the stderr that said
+    otherwise. What the operator sees instead is the symptom: a progress line
+    whose totals are a fraction of the real source, because the scan is what
+    produces `total_files`/`total_bytes` and everything derived from them.
+
+    The wording has to hold two things at once. It is not data loss — the
+    archiver walks the tree itself and would have exited 3 had it failed to read
+    something, so an rc=0 snapshot contains everything restic could see. But a
+    share that fails to list a directory once is not healthy, and the run's
+    reported size and percentage cannot be trusted, so it is not nothing either.
+
+    The item list goes through :func:`render_failed_items`, like every other
+    formatter here — see its docstring for why that is not optional.
+    """
+    if not failed_items:
+        return ""
+
+    count: int = len(failed_items)
+    parts: List[str] = [
+        f"Backup completed, but restic could not read {count}"
+        f"{_at_least_suffix(count)} item(s) while sizing the source. restic "
+        "reports these and keeps going, so the exit code was still 0.",
+        "",
+        "The snapshot was saved and every file restic could see was archived. "
+        "What is affected is the estimate: the file count, size and percentage "
+        "shown while this run was in flight were computed against an "
+        "under-counted source. Check the item(s) below on the mount — a share "
+        "that cannot list a directory once may be failing intermittently.",
+        "",
+    ]
+    parts.extend(render_failed_items(failed_items))
+    return "\n".join(parts)
+
+
 def format_backup_error(rc: int, json_errors: List[str], stderr: str) -> str:
     """Build the user-visible error_output string for a failed backup run.
 

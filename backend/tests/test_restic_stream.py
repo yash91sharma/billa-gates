@@ -19,8 +19,11 @@ import pytest
 
 from app.services.restic_stream import (
     MAX_RETAINED_LINE_CHARS,
+    SCAN_STABLE_SECONDS,
+    STALL_SECONDS,
     BackupOutputCollector,
     BoundedOutput,
+    ScanState,
     _format_bytes,
     _format_eta,
     format_progress,
@@ -78,6 +81,16 @@ def test_format_eta_omitted_when_unknown_or_invalid(value):
     assert _format_eta(value) is None
 
 
+def scanned(**fields):
+    """A status line from *after* restic finished sizing the source.
+
+    restic gates `seconds_remaining` on its internal `scanFinished`
+    (internal/ui/backup/progress.go), so an eta in the line is the app's proof
+    that the totals next to it are final rather than a running subtotal.
+    """
+    return {"message_type": "status", "seconds_remaining": 125, **fields}
+
+
 def test_format_progress_on_an_empty_status_line():
     """Better a bare "running" than an empty string the UI renders as a blank
     progress area."""
@@ -86,25 +99,25 @@ def test_format_progress_on_an_empty_status_line():
 
 def test_format_progress_full_line_orders_parts_for_reading():
     rendered = format_progress(
-        {
-            "message_type": "status",
-            "percent_done": 0.4567,
-            "files_done": 1234,
-            "total_files": 5000,
-            "bytes_done": 1024**3,
-            "total_bytes": 4 * 1024**3,
-            "seconds_remaining": 125,
-            "error_count": 3,
-        }
+        scanned(
+            percent_done=0.4567,
+            files_done=1234,
+            total_files=5000,
+            bytes_done=1024**3,
+            total_bytes=4 * 1024**3,
+            seconds_elapsed=600,
+            error_count=3,
+        )
     )
     assert rendered == (
-        "progress: 46% · 1,234/5,000 files · 1.0 GiB/4.0 GiB · eta 2m · 3 errors"
+        "progress: 46% · 1,234/5,000 files · 1.0 GiB/4.0 GiB · "
+        "10m elapsed · 1.7 MiB/s avg · eta 2m · 3 errors"
     )
 
 
 def test_format_progress_thousands_separators_on_large_counts():
     """A seven-digit file count without separators is unreadable at a glance."""
-    rendered = format_progress({"files_done": 1234567, "total_files": 2000000})
+    rendered = format_progress(scanned(files_done=1234567, total_files=2000000))
     assert "1,234,567/2,000,000 files" in rendered
 
 
@@ -147,12 +160,279 @@ def test_format_progress_omits_error_tally_when_absent_or_zero(error_count):
         {"files_done": True, "total_files": True},
         {"percent_done": "50%"},
         {"files_done": None},
+        {"seconds_elapsed": "600", "bytes_done": 1024},
+        {"total_files": "many", "total_bytes": None},
     ),
 )
 def test_format_progress_ignores_fields_of_the_wrong_type(status):
     """Never raise on restic's output — a malformed status line must degrade to a
     shorter progress line, not abort the run's progress persistence."""
     assert format_progress(status).startswith("progress:")
+
+
+# ── ScanState: telling a running subtotal from a final one ───────────────────
+
+
+def test_the_scan_is_unfinished_until_restic_can_estimate():
+    """restic's scanner reports a *running* subtotal after every item and runs
+    concurrently with the archiver, so until it is done the totals are a moving
+    denominator and nothing derived from them can be trusted."""
+    state = ScanState()
+    state.observe({"total_files": 300, "total_bytes": 10**8, "bytes_done": 10**7})
+    assert state.finished is False
+
+
+def test_an_eta_proves_the_scan_finished():
+    state = ScanState()
+    state.observe({"total_files": 300, "total_bytes": 10**8, "seconds_remaining": 90})
+    assert state.finished is True
+
+
+def test_the_scan_stays_finished_after_the_eta_disappears():
+    """restic drops `seconds_remaining` again whenever the measured rate falls to
+    ≤1024 B/s (and `omitempty` removes the zero), which is routine on a slow
+    share. Re-entering the scanning display then would be a lie in the other
+    direction, so the flag is sticky."""
+    state = ScanState()
+    state.observe({"total_bytes": 10**8, "seconds_remaining": 90})
+    state.observe({"total_bytes": 10**8, "bytes_done": 5 * 10**7})
+    assert state.finished is True
+
+
+def test_totals_holding_still_end_the_scan_when_restic_never_estimates():
+    """The eta is a one-way signal — absent on a share too slow for restic to
+    estimate. Without this fallback such a run would show "scanning source…" for
+    its entire length."""
+    state = ScanState()
+    state.observe({"total_files": 300, "total_bytes": 10**8, "seconds_elapsed": 1})
+    state.observe(
+        {
+            "total_files": 300,
+            "total_bytes": 10**8,
+            "seconds_elapsed": 1 + SCAN_STABLE_SECONDS,
+        }
+    )
+    assert state.finished is True
+
+
+def test_the_stable_totals_guess_is_taken_back_if_the_scan_resumes():
+    """The fallback is a guess, unlike the eta. A scanner stuck on one huge
+    directory for longer than the threshold — the exact case this class exists
+    for, on a slow share — would otherwise pin a wrong percentage on the rest of
+    the run."""
+    state = ScanState()
+    state.observe({"total_files": 300, "total_bytes": 10**8, "seconds_elapsed": 1})
+    state.observe(
+        {
+            "total_files": 300,
+            "total_bytes": 10**8,
+            "seconds_elapsed": 1 + SCAN_STABLE_SECONDS,
+        }
+    )
+    assert state.finished is True
+
+    state.observe(
+        {
+            "total_files": 9000,
+            "total_bytes": 10**10,
+            "seconds_elapsed": 2 + SCAN_STABLE_SECONDS,
+        }
+    )
+    assert state.finished is False
+
+
+def test_an_eta_is_never_taken_back_by_a_growing_total():
+    """restic's own signal outranks ours. It gates the eta on `scanFinished`, so
+    totals that move afterwards are restic's business, not evidence against it."""
+    state = ScanState()
+    state.observe({"total_files": 300, "total_bytes": 10**8, "seconds_remaining": 42})
+    state.observe({"total_files": 900, "total_bytes": 10**9, "seconds_elapsed": 5})
+    assert state.finished is True
+
+
+def test_growing_totals_keep_the_scan_open():
+    state = ScanState()
+    for i in range(10):
+        state.observe(
+            {
+                "total_files": 300 + i,
+                "total_bytes": 10**8 + i,
+                "seconds_elapsed": i * SCAN_STABLE_SECONDS,
+            }
+        )
+    assert state.finished is False
+
+
+def test_no_scan_is_not_a_scan_in_progress():
+    """`--no-scan` means restic never sizes the source: no totals ever arrive and
+    `percent_done` stays 0.0 for the whole run. That is not a scan the operator
+    is waiting on, and the line must not claim it is."""
+    state = ScanState()
+    state.observe({"percent_done": 0.0, "files_done": 42, "bytes_done": 2048})
+    assert state.has_totals is False
+
+    rendered = format_progress(
+        {"percent_done": 0.0, "files_done": 42, "bytes_done": 2048}, state
+    )
+    assert "scanning" not in rendered
+    assert "0%" not in rendered, "percent_done is pinned at 0.0 under --no-scan"
+    assert "42 files" in rendered
+
+
+# ── Progress rendering across the phases of a run ────────────────────────────
+
+
+def test_the_percentage_is_withheld_while_the_denominator_is_still_moving():
+    """The reported symptom: `43% · 72/3,086 files · 1.6 GiB/3.7 GiB` on a 40 GB
+    source. `percent_done` is `bytes_done / total_bytes`, so mid-scan it is a
+    ratio of two moving numbers — showing it invites the operator to plan around
+    a number that will fall as the scan catches up."""
+    state = ScanState()
+    status = {
+        "percent_done": 0.43,
+        "files_done": 72,
+        "total_files": 3086,
+        "bytes_done": 1717986918,
+        "total_bytes": 3972844749,
+    }
+    state.observe(status)
+    rendered = format_progress(status, state)
+
+    assert "43%" not in rendered
+    assert rendered.startswith("progress: scanning source…")
+    # The totals are marked as floors, not answers.
+    assert "72/3,086+ files" in rendered
+    assert "1.6 GiB/3.7+ GiB" in rendered
+
+
+def test_the_percentage_returns_once_the_scan_is_done():
+    state = ScanState()
+    status = scanned(
+        percent_done=0.43,
+        files_done=72,
+        total_files=3086,
+        bytes_done=1717986918,
+        total_bytes=3972844749,
+    )
+    state.observe(status)
+    rendered = format_progress(status, state)
+
+    assert rendered.startswith("progress: 43% · 72/3,086 files")
+    assert "+" not in rendered
+    assert "scanning" not in rendered
+
+
+def test_elapsed_and_average_rate_are_reported():
+    """`seconds_elapsed` is in every status line and was being dropped. Without it
+    the line cannot be sanity-checked: a 40 GB backup crawling at 300 KiB/s and
+    one running at 300 MiB/s look identical."""
+    rendered = format_progress(
+        scanned(bytes_done=600 * 1024 * 1024, total_bytes=10**10, seconds_elapsed=600)
+    )
+    assert "10m elapsed" in rendered
+    assert "1.0 MiB/s avg" in rendered
+
+
+def test_the_rate_is_labelled_an_average_not_a_current_speed():
+    """It is cumulative (bytes_done / seconds_elapsed), unlike restic's own eta,
+    which uses a windowed estimator. Unlabelled, the two disagreeing looks like a
+    bug in the page."""
+    rendered = format_progress(
+        scanned(bytes_done=1024**3, seconds_elapsed=1024, total_bytes=2 * 1024**3)
+    )
+    assert "/s avg" in rendered
+
+
+@pytest.mark.parametrize(
+    "status",
+    (
+        {"percent_done": 1.4, "total_bytes": 100, "bytes_done": 140},
+        {"files_done": 4001, "total_files": 4000, "total_bytes": 100},
+    ),
+)
+def test_passing_the_estimate_is_reported_instead_of_a_percentage_over_100(status):
+    """The fingerprint of a scan that under-counted: the archiver walks the tree
+    itself, so it keeps going past whatever the scanner managed to count. "140%"
+    reads as a display bug and gets ignored; naming it points at the source."""
+    state = ScanState()
+    state.observe(scanned(**status))
+    rendered = format_progress(scanned(**status), state)
+
+    assert state.exceeded is True
+    assert "%" not in rendered
+    assert "past scan estimate" in rendered
+    assert "under-counted" in rendered
+
+
+def test_no_eta_is_shown_once_the_estimate_has_been_passed():
+    """Captured live from restic 0.19.1: with one directory unreadable during
+    the scan and readable by the time the archiver reached it, the run ended at
+    435,042/435,041 files and restic reported `seconds_remaining=3639421728`.
+    It computes the eta as `total.Bytes - processed.Bytes` over **unsigned**
+    integers, so overtaking the estimate underflows the subtraction — the line
+    read `eta 1010950h 28m`."""
+    status = {
+        "percent_done": 1.0000000001,
+        "files_done": 435042,
+        "total_files": 435041,
+        "bytes_done": 43110463919,
+        "total_bytes": 43110463913,
+        "seconds_remaining": 3639421728,
+        "seconds_elapsed": 8,
+    }
+    state = ScanState()
+    state.observe(status)
+    rendered = format_progress(status, state)
+
+    assert "eta" not in rendered
+    assert "past scan estimate" in rendered
+
+
+def test_a_stalled_backup_says_how_long_nothing_has_been_read():
+    """The run that prompted this sat at 1.6 GiB for 30+ minutes while its eta
+    drifted from 24m to 1h 6m — restic keeps quoting an eta from a decaying rate
+    estimate, and nothing on the page said the byte count had stopped moving."""
+    state = ScanState()
+    first = scanned(bytes_done=1717986918, total_bytes=4 * 10**9, seconds_elapsed=1000)
+    state.observe(first)
+    later = scanned(
+        bytes_done=1717986918,
+        total_bytes=4 * 10**9,
+        seconds_elapsed=1000 + STALL_SECONDS + 120,
+    )
+    state.observe(later)
+
+    assert "no data read for 7m" in format_progress(later, state)
+
+
+def test_progress_that_is_still_moving_is_not_called_a_stall():
+    state = ScanState()
+    for i in range(10):
+        status = scanned(
+            bytes_done=10**8 * (i + 1),
+            total_bytes=10**10,
+            seconds_elapsed=i * STALL_SECONDS,
+        )
+        state.observe(status)
+    assert "no data read" not in format_progress(status, state)
+
+
+def test_format_progress_judges_a_lone_status_line_on_its_own_evidence():
+    """Called without state (the contract tests, and any future caller with a
+    single recorded line), the line still has to be classified — from the eta it
+    carries."""
+    assert "scanning source…" in format_progress(
+        {"total_files": 10, "total_bytes": 100, "bytes_done": 50}
+    )
+    assert "50%" in format_progress(
+        {
+            "percent_done": 0.5,
+            "total_files": 10,
+            "total_bytes": 100,
+            "bytes_done": 50,
+            "seconds_remaining": 30,
+        }
+    )
 
 
 # ── BoundedOutput ────────────────────────────────────────────────────────────
@@ -225,12 +505,45 @@ def test_bounded_output_appends_extra_last():
 def test_collector_never_retains_the_status_firehose():
     collector = BackupOutputCollector(password="")
     for pct in (0.1, 0.2, 0.3):
-        collector.feed(json.dumps({"message_type": "status", "percent_done": pct}))
+        collector.feed(json.dumps(scanned(percent_done=pct, total_bytes=10**9)))
 
     text = collector.text()
     assert "message_type" not in text
     assert text.count("progress:") == 1
     assert "30%" in text, "the newest status line wins"
+
+
+def test_collector_carries_scan_state_across_status_lines():
+    """A single status line cannot say whether the scan has finished — only the
+    sequence can. The collector is the only thing that sees the sequence, so it
+    owns the state and hands it to the (pure) formatter."""
+    collector = BackupOutputCollector(password="")
+    collector.feed(
+        json.dumps(
+            {"message_type": "status", "total_bytes": 10**9, "bytes_done": 10**8}
+        )
+    )
+    assert "scanning source…" in (collector.progress or "")
+
+    # restic estimates once, then stops (rate too slow) — the line must not fall
+    # back to calling it a scan.
+    collector.feed(
+        json.dumps(
+            {"message_type": "status", "total_bytes": 10**9, "seconds_remaining": 60}
+        )
+    )
+    collector.feed(
+        json.dumps(
+            {
+                "message_type": "status",
+                "percent_done": 0.5,
+                "total_bytes": 10**9,
+                "bytes_done": 5 * 10**8,
+            }
+        )
+    )
+    assert "50%" in (collector.progress or "")
+    assert "scanning" not in (collector.progress or "")
 
 
 def test_collector_captures_and_retains_the_summary():

@@ -23,6 +23,7 @@ from app.services.run_output import (
     filter_backup_output,
     format_backup_error,
     format_partial_backup_error,
+    format_scan_errors,
     render_failed_items,
 )
 
@@ -38,6 +39,17 @@ RC3_STDERR_DOUBLE_REPORTED = (
     '"item":"/sources/Docs/locked"}\n'
     '{"message_type":"exit_error","code":3,"message":"Warning: at least one '
     'source file could not be read"}'
+)
+
+# stderr from a backup that exited **0**. A directory the scanner cannot list
+# goes to restic's `ScannerError`, which prints this, returns nil and leaves
+# `error_count` untouched — so the run is a clean success whose size estimate
+# silently missed a subtree. No exit_error line: restic is not reporting a
+# problem at all.
+RC0_STDERR_SCAN_ERRORS = (
+    '{"message_type":"error","error":{"message":"openfile for readdirnames '
+    'failed: open /sources/Docs/private: permission denied"},"during":"scan",'
+    '"item":"/sources/Docs/private"}'
 )
 
 
@@ -256,9 +268,35 @@ def test_both_error_formatters_cap_the_item_list_identically():
     the limit is exactly how the asymmetry appeared; they now share one
     renderer, and this fails the moment either grows a second one."""
     items = _flood(200)
-    assert _item_lines(format_backup_error(1, items, "Fatal: nope")) == _item_lines(
-        format_partial_backup_error(items, "Fatal: nope")
+    rendered = (
+        format_backup_error(1, items, "Fatal: nope"),
+        format_partial_backup_error(items, "Fatal: nope"),
+        format_scan_errors(items),
     )
+    first = _item_lines(rendered[0])
+    assert all(_item_lines(other) == first for other in rendered[1:])
+
+
+def test_format_scan_errors_names_the_paths_and_the_consequence():
+    """The whole point of the column: restic swallows these, exits 0, and leaves
+    `error_count` untouched, so without them the operator sees a green run whose
+    size and percentage were computed against an undercount."""
+    items = extract_failed_items(RC0_STDERR_SCAN_ERRORS)
+    rendered = format_scan_errors(items)
+
+    assert "/sources/Docs/private" in rendered
+    assert "1 item(s)" in rendered, "the count leads, so the scale reads at a glance"
+    # It must say what it means for the numbers, not just that something failed.
+    assert "under" in rendered.lower()
+    # And it must not read as data loss: the archiver walks the tree itself, so
+    # an rc=0 run wrote every file it could see.
+    assert "snapshot" in rendered.lower()
+
+
+def test_format_scan_errors_is_empty_for_a_clean_run():
+    """The caller checks the item list, but a formatter that invents a headline
+    from nothing would put a scary empty note on every successful run."""
+    assert format_scan_errors([]) == ""
 
 
 def test_error_output_stays_small_enough_to_load_on_every_fetch():

@@ -131,7 +131,8 @@ describe('RunDetail', () => {
         makeRun({
           status: 'running',
           check_status: null,
-          backup_output: 'progress: 62% · 41,203/68,900 files · 12.4 GiB/19.8 GiB · eta 47m',
+          backup_output:
+            'progress: 62% · 41,203/68,900 files · 12.4 GiB/19.8 GiB · 1h 12m elapsed · 2.9 MiB/s avg · eta 47m',
         })
       )
       renderWithProviders(<RunDetail />, { route: '/runs/run-1' })

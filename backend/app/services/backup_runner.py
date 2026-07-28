@@ -645,6 +645,11 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
         # Carried out of the backup step so the completion push can say how
         # many items failed, not just that something did.
         failed_item_count: int = 0
+        # Set when restic exited 0 but still reported unreadable items on
+        # stderr — its scan pass swallows those (see the rc==0 branch below).
+        # Separate from `backup_warning` because it must not withhold retention.
+        scan_errors_found: bool = False
+        scan_error_count: int = 0
         summary: Optional[Dict[str, Any]] = None
         stdout: str = ""
 
@@ -706,10 +711,38 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
 
                 if rc == 0:
                     backup_success = True
+                    # A clean exit is not proof restic read everything. Its scan
+                    # pass hands an unlistable directory to ScannerError, which
+                    # prints to stderr, returns nil and leaves `error_count`
+                    # alone — the process still exits 0. Those subtrees drop out
+                    # of `total_files`/`total_bytes`, which is what made a 40 GB
+                    # source report `43% · 72/3,086 files · 1.6 GiB/3.7 GiB`.
+                    # This branch used to discard stderr entirely, so the only
+                    # record of why was deleted and the run went out green.
+                    scan_errors = run_output.extract_failed_items(stderr)
+                    scan_error_count = len(scan_errors)
                     logger.info(
                         f"job_id={job_id} run_id={run_id} "
-                        f"step=backup_execution status=success"
+                        f"step=backup_execution status=success "
+                        f"scan_errors={scan_error_count}"
                     )
+                    if scan_errors:
+                        # Deliberately *not* `backup_warning`: that flag also
+                        # withholds retention (step 8), which is right for a
+                        # partial snapshot and wrong here — the archiver walks
+                        # the tree itself and reported no read failure, so this
+                        # snapshot is complete and must count toward the policy.
+                        scan_errors_found = True
+                        logger.warning(
+                            f"job_id={job_id} run_id={run_id} "
+                            f"step=backup_execution rc=0 scan_errors_swallowed "
+                            f"count={scan_error_count} first={scan_errors[:3]}"
+                        )
+                        await run_records.update(
+                            factory,
+                            run_id,
+                            error_output=run_output.format_scan_errors(scan_errors),
+                        )
                 elif rc == 3:
                     backup_success = True
                     backup_warning = True
@@ -880,7 +913,7 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
             run_id,
             status=(
                 RunStatus.warning
-                if (backup_warning or retention_failed)
+                if (backup_warning or retention_failed or scan_errors_found)
                 else RunStatus.success
             ),
             # A step that already failed the run has the final say.
@@ -906,6 +939,13 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 elif backup_warning:
                     reasons.append(
                         "some files could not be read; snapshot was still saved"
+                    )
+                if scan_errors_found:
+                    reasons.append(
+                        f"{scan_error_count} item(s) could not be read while "
+                        "sizing the source; the snapshot was saved, but the "
+                        "size and percentage reported for this run were "
+                        "computed against an under-counted source"
                     )
                 if retention_failed:
                     reasons.append(

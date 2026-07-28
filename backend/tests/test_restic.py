@@ -663,17 +663,27 @@ def test_format_progress_reports_error_count():
     """restic's status line carries `error_count`, and dropping it is why a run
     could show `100% · 1,234/1,234 files` next to a warning badge with nothing
     connecting the two."""
-    from app.services.restic_stream import format_progress
+    from app.services.restic_stream import ScanState, format_progress
 
-    line = format_progress(
-        {
-            "message_type": "status",
-            "percent_done": 1,
-            "total_files": 1234,
-            "files_done": 1234,
-            "error_count": 3,
-        }
+    # A real run reaches 100% with no `seconds_remaining` — it is zero by then,
+    # and `omitempty` drops it — so the state has to carry the eta restic sent
+    # earlier. Rendering this line on its own would (correctly) read as a scan
+    # still in progress.
+    state = ScanState()
+    state.observe(
+        {"message_type": "status", "total_bytes": 4096, "seconds_remaining": 9}
     )
+    final = {
+        "message_type": "status",
+        "percent_done": 1,
+        "total_files": 1234,
+        "files_done": 1234,
+        "total_bytes": 4096,
+        "bytes_done": 4096,
+        "error_count": 3,
+    }
+    state.observe(final)
+    line = format_progress(final, state)
     assert "100%" in line
     assert "3 errors" in line
 

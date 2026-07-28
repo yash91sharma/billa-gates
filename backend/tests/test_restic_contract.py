@@ -33,7 +33,11 @@ import pytest
 
 from app.services import repository
 from app.services.restic import _newest_snapshot, _parse_snapshot_time
-from app.services.restic_stream import BackupOutputCollector, format_progress
+from app.services.restic_stream import (
+    BackupOutputCollector,
+    ScanState,
+    format_progress,
+)
 from app.services.run_output import extract_failed_items
 from app.services.snapshot_listing import _normalize
 
@@ -225,6 +229,54 @@ def test_format_progress_renders_a_real_status_line():
     assert str(status["total_bytes"]) not in rendered
     assert any(unit in rendered for unit in ("B", "KiB", "MiB", "GiB"))
     assert "eta" in rendered, "seconds_remaining is present in the recording"
+
+
+def test_seconds_remaining_is_the_signal_that_the_totals_are_final():
+    """The load-bearing fact behind the whole scan-phase display: restic gates
+    `seconds_remaining` on its internal `scanFinished`, so an eta in a status
+    line proves the totals beside it are the answer and not a running subtotal.
+
+    Asserted against the recording rather than trusted: `omitempty` means the
+    field also vanishes whenever the eta is zero, so the recording is the only
+    place the app can see both shapes actually occur.
+    """
+    statuses = [
+        o
+        for o in jsonl(read("backup_progress.stdout"))
+        if o["message_type"] == "status"
+    ]
+    with_eta = [s for s in statuses if s.get("seconds_remaining")]
+    without_eta = [s for s in statuses if not s.get("seconds_remaining")]
+
+    assert with_eta, "recording must contain a line restic put an eta on"
+    assert without_eta, (
+        "recording must contain a line with the eta omitted — that is why the "
+        "app needs the stable-totals fallback as well"
+    )
+    # Both shapes carry totals, which is exactly why the eta (not the totals'
+    # presence) is what separates the two phases.
+    assert all("total_bytes" in s for s in statuses)
+
+
+def test_a_real_status_line_without_an_eta_is_rendered_as_provisional():
+    """Real bytes through the scanning branch: no percentage, totals marked as
+    floors."""
+    statuses = [
+        o
+        for o in jsonl(read("backup_progress.stdout"))
+        if o["message_type"] == "status"
+    ]
+    status = next(s for s in statuses if not s.get("seconds_remaining"))
+
+    state = ScanState()
+    state.observe(status)
+    rendered = format_progress(status, state)
+
+    assert "scanning source…" in rendered
+    assert "%" not in rendered
+    assert "+ " in rendered or rendered.endswith("+"), (
+        "the totals restic is still counting must read as floors"
+    )
 
 
 def test_collector_classifies_a_real_backup_stream():

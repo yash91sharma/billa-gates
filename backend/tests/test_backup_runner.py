@@ -1482,6 +1482,154 @@ async def test_run_history_keeps_newest_runs(engine):
     assert old_ids[2] in surviving
 
 
+# ── Step 5: rc=0 does not mean restic read everything ────────────────────────
+#
+# restic's scan pass hands a directory it cannot list to `ScannerError`
+# (internal/ui/backup/progress.go), which prints the line below to stderr,
+# returns nil, and never touches `error_count`. The archiver walks the tree
+# separately, so it can succeed where the scanner failed — and then the process
+# exits **0** with a subtree missing from `total_files`/`total_bytes`. That is
+# what turned a 40 GB source into `43% · 72/3,086 files · 1.6 GiB/3.7 GiB` on
+# the run page, and this branch used to throw the stderr away.
+
+RC0_STDERR_SCAN_ERRORS = (
+    '{"message_type":"error","error":{"message":"openfile for readdirnames '
+    'failed: open /sources/Docs/private: permission denied"},"during":"scan",'
+    '"item":"/sources/Docs/private"}'
+)
+
+
+async def _run_rc0(engine, *, stderr: str, run_id: str, forget_called: dict) -> list:
+    """Drive a full rc=0 backup with the given stderr, capturing ntfy bodies."""
+    from app.db.models import AppSettings, BackupRun, RunStatus, TriggeredBy
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        # `_setup_job` leaves the topic empty, and every push is gated on one —
+        # without this the notification assertions would pass vacuously.
+        settings = await s.get(AppSettings, 1)
+        settings.ntfy_topic = "alerts"
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    pushes: list = []
+
+    async def fake_notify(*args, **kwargs):
+        pushes.append((args, kwargs))
+        return True
+
+    async def fake_forget(*args, **kwargs):
+        forget_called["v"] = True
+        return (0, "", "")
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, json.dumps(BACKUP_SUMMARY), stderr, BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_forget", side_effect=fake_forget),
+        patch(
+            "app.services.run_notifications.send_notification", side_effect=fake_notify
+        ),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    return pushes
+
+
+async def test_step5_rc0_with_swallowed_scan_errors_is_a_warning(engine):
+    """The run that prompted all this went out green. restic said nothing an
+    exit code could carry, so the only signal is the stderr this branch was
+    discarding."""
+    from app.db.models import RunStatus
+
+    await _setup_job(engine, retain_keep_last=5)
+    run_id = str(uuid.uuid4())
+    forget_called = {"v": False}
+    pushes = await _run_rc0(
+        engine,
+        stderr=RC0_STDERR_SCAN_ERRORS,
+        run_id=run_id,
+        forget_called=forget_called,
+    )
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.warning
+    assert run.snapshot_id is not None, "rc=0 wrote a snapshot; nothing is lost"
+    assert "/sources/Docs/private" in run.error_output, (
+        "the path restic could not list is the one actionable thing here"
+    )
+    assert "scan" in run.error_output
+    # The push has to say which kind of warning this is — an operator who reads
+    # "files could not be read" goes looking for a partial snapshot.
+    assert any("sizing the source" in str(p) for p in pushes)
+
+
+async def test_step5_rc0_scan_errors_still_apply_retention(engine):
+    """The divergence from rc=3, and the reason this does not reuse
+    `backup_warning`. A partial snapshot withholds `restic forget` because it is
+    missing files. This snapshot is not: the archiver walks the tree itself and
+    would have exited 3 had a read failed. Withholding here would grow the
+    repository every time the share hiccups during the estimate pass."""
+    from app.db.models import PruneStatus
+
+    await _setup_job(engine, retain_keep_last=5)
+    run_id = str(uuid.uuid4())
+    forget_called = {"v": False}
+    await _run_rc0(
+        engine,
+        stderr=RC0_STDERR_SCAN_ERRORS,
+        run_id=run_id,
+        forget_called=forget_called,
+    )
+
+    assert forget_called["v"] is True, "a complete snapshot must count for retention"
+    run = await _get_run(engine, run_id)
+    assert run.prune_status == PruneStatus.passed
+
+
+async def test_step5_rc0_with_clean_stderr_is_still_a_plain_success(engine):
+    """The guard against the obvious over-reach: parsing stderr on every clean
+    exit must not turn ordinary runs yellow."""
+    from app.db.models import RunStatus
+
+    await _setup_job(engine, retain_keep_last=5)
+    run_id = str(uuid.uuid4())
+    await _run_rc0(engine, stderr="", run_id=run_id, forget_called={"v": False})
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.success
+    assert not run.error_output
+
+
+async def test_step5_rc0_ignores_stderr_that_names_no_failure(engine):
+    """restic writes plenty to stderr that is not a `message_type=error` line.
+    Only the parsed items may flip a run, or a chatty backend makes every run a
+    warning."""
+    from app.db.models import RunStatus
+
+    await _setup_job(engine, retain_keep_last=5)
+    run_id = str(uuid.uuid4())
+    await _run_rc0(
+        engine,
+        stderr="using parent snapshot 1a2b3c4d\nsome unstructured diagnostic\n",
+        run_id=run_id,
+        forget_called={"v": False},
+    )
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.success
+
+
 # ── Step 7: stats update ──────────────────────────────────────────────────────
 
 
