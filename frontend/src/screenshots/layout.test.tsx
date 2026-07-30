@@ -7,6 +7,7 @@
  */
 import { render } from '@testing-library/react'
 import { page } from '@vitest/browser/context'
+import { capture } from './capture'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, test } from 'vitest'
 
@@ -50,13 +51,13 @@ function renderSidebarOnly(expanded: boolean) {
 test('Sidebar - expanded', async () => {
   const result = renderSidebarOnly(true)
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/Sidebar--expanded.png` })
+  await capture(`${OUT}/Sidebar--expanded.png`)
 })
 
 test('Sidebar - collapsed', async () => {
   const result = renderSidebarOnly(false)
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/Sidebar--collapsed.png` })
+  await capture(`${OUT}/Sidebar--collapsed.png`)
 })
 
 test('Layout - desktop default', async () => {
@@ -78,5 +79,5 @@ test('Layout - desktop default', async () => {
     </MemoryRouter>
   )
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/Layout--desktop.png` })
+  await capture(`${OUT}/Layout--desktop.png`)
 })

@@ -8,6 +8,7 @@
 import { waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { page } from '@vitest/browser/context'
+import { capture } from './capture'
 import { Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, test, vi } from 'vitest'
 
@@ -403,7 +404,7 @@ test('Dashboard - populated', async () => {
       throw new Error('dashboard not ready')
     }
   })
-  await page.screenshot({ path: `${OUT}/Dashboard.png` })
+  await capture(`${OUT}/Dashboard.png`)
 })
 
 test('Jobs - populated', async () => {
@@ -414,7 +415,7 @@ test('Jobs - populated', async () => {
       throw new Error('jobs not ready')
     }
   })
-  await page.screenshot({ path: `${OUT}/Jobs.png` })
+  await capture(`${OUT}/Jobs.png`)
 })
 
 test('Jobs - create form open', async () => {
@@ -443,7 +444,7 @@ test('Jobs - create form open', async () => {
       throw new Error('source dropdown not populated yet')
     }
   })
-  await page.screenshot({ path: `${OUT}/Jobs--create-form.png` })
+  await capture(`${OUT}/Jobs--create-form.png`)
 })
 
 test('Jobs - create in flight', async () => {
@@ -477,7 +478,7 @@ test('Jobs - create in flight', async () => {
   // Let the overlay fade and the modal zoom in finish, or the shot catches a
   // half-transparent dialog over an unblurred page.
   await new Promise((r) => setTimeout(r, 300))
-  await page.screenshot({ path: `${OUT}/Jobs--create-in-flight.png` })
+  await capture(`${OUT}/Jobs--create-in-flight.png`)
 })
 
 test('JobDetail - populated', async () => {
@@ -488,7 +489,7 @@ test('JobDetail - populated', async () => {
       throw new Error('job detail not ready')
     }
   })
-  await page.screenshot({ path: `${OUT}/JobDetail.png` })
+  await capture(`${OUT}/JobDetail.png`)
 })
 
 test('JobDetail - commands tab', async () => {
@@ -512,7 +513,7 @@ test('JobDetail - commands tab', async () => {
       throw new Error('commands not ready')
     }
   })
-  await page.screenshot({ path: `${OUT}/JobDetail-commands.png` })
+  await capture(`${OUT}/JobDetail-commands.png`)
 })
 
 test('RunDetail - success', async () => {
@@ -523,7 +524,7 @@ test('RunDetail - success', async () => {
       throw new Error('run detail not ready')
     }
   })
-  await page.screenshot({ path: `${OUT}/RunDetail.png` })
+  await capture(`${OUT}/RunDetail.png`)
 })
 
 // ── Cancel-feature scenarios ─────────────────────────────────────────────────
@@ -585,7 +586,7 @@ test('Dashboard - running run with Stop button', async () => {
     )
     if (!hasStop) throw new Error('Stop button not rendered yet')
   })
-  await page.screenshot({ path: `${OUT}/Dashboard--running.png` })
+  await capture(`${OUT}/Dashboard--running.png`)
 })
 
 // The live-run row highlight (tint + pulsing accent bar) is invisible to the
@@ -618,7 +619,7 @@ test('Jobs - running job row highlighted', async () => {
       throw new Error('running row not rendered yet')
     }
   })
-  await page.screenshot({ path: `${OUT}/Jobs--running.png` })
+  await capture(`${OUT}/Jobs--running.png`)
 })
 
 test('JobDetail - running run with Stop button', async () => {
@@ -632,7 +633,7 @@ test('JobDetail - running run with Stop button', async () => {
     )
     if (!hasStop) throw new Error('Stop button not rendered yet')
   })
-  await page.screenshot({ path: `${OUT}/JobDetail--running.png` })
+  await capture(`${OUT}/JobDetail--running.png`)
 })
 
 // Real-browser coverage for the header action tooltips: jsdom has no layout,
@@ -656,7 +657,7 @@ test('JobDetail - action tooltip on hover', async () => {
   })
   // Let the fade/zoom-in finish, or the shot catches a half-opaque bubble.
   await new Promise((resolve) => setTimeout(resolve, 300))
-  await page.screenshot({ path: `${OUT}/JobDetail--action-tooltip.png` })
+  await capture(`${OUT}/JobDetail--action-tooltip.png`)
 
   // Moving away must close it — the behaviour the jsdom suite cannot assert.
   await user.unhover(prune)
@@ -677,7 +678,7 @@ test('RunDetail - running with Stop button', async () => {
     )
     if (!hasStop) throw new Error('Stop button not rendered yet')
   })
-  await page.screenshot({ path: `${OUT}/RunDetail--running.png` })
+  await capture(`${OUT}/RunDetail--running.png`)
 })
 
 test('RunDetail - canceled run', async () => {
@@ -690,7 +691,7 @@ test('RunDetail - canceled run', async () => {
       throw new Error('canceled badge not rendered yet')
     }
   })
-  await page.screenshot({ path: `${OUT}/RunDetail--canceled.png` })
+  await capture(`${OUT}/RunDetail--canceled.png`)
 })
 
 test('Settings - populated', async () => {
@@ -708,7 +709,7 @@ test('Settings - populated', async () => {
     },
     { timeout: 1000 }
   )
-  await page.screenshot({ path: `${OUT}/Settings.png` })
+  await capture(`${OUT}/Settings.png`)
 })
 
 test('Destinations - populated', async () => {
@@ -719,7 +720,7 @@ test('Destinations - populated', async () => {
       throw new Error('destinations not ready')
     }
   })
-  await page.screenshot({ path: `${OUT}/Destinations.png` })
+  await capture(`${OUT}/Destinations.png`)
 })
 
 test('Destinations - caveats expanded', async () => {
@@ -737,7 +738,7 @@ test('Destinations - caveats expanded', async () => {
       throw new Error('caveats not expanded')
     }
   })
-  await page.screenshot({ path: `${OUT}/Destinations--caveats.png` })
+  await capture(`${OUT}/Destinations--caveats.png`)
 })
 
 test('Destinations - a drive that did not answer', async () => {
@@ -771,5 +772,5 @@ test('Destinations - a drive that did not answer', async () => {
       throw new Error('destinations not ready')
     }
   })
-  await page.screenshot({ path: `${OUT}/Destinations--unavailable.png` })
+  await capture(`${OUT}/Destinations--unavailable.png`)
 })

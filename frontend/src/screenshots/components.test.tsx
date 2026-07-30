@@ -11,6 +11,7 @@
  */
 import { render } from '@testing-library/react'
 import { page } from '@vitest/browser/context'
+import { capture } from './capture'
 import { afterEach, test } from 'vitest'
 
 import { HardDriveDownload } from 'lucide-react'
@@ -61,14 +62,14 @@ for (const status of STATUSES) {
   test(`RunStatusBadge - ${status}`, async () => {
     const result = render(<RunStatusBadge status={status} />)
     cleanup = result.unmount
-    await page.screenshot({ path: `${OUT}/RunStatusBadge--${status}.png` })
+    await capture(`${OUT}/RunStatusBadge--${status}.png`)
   })
 }
 
 test('RunStatusBadge - null (pending)', async () => {
   const result = render(<RunStatusBadge status={null} />)
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/RunStatusBadge--pending.png` })
+  await capture(`${OUT}/RunStatusBadge--pending.png`)
 })
 
 // ── ScheduleInput — interval and cron modes ──────────────────────────────────
@@ -78,7 +79,7 @@ test('ScheduleInput - interval empty', async () => {
     <ScheduleInput value={{ type: 'interval', value: '' }} onChange={() => {}} />
   )
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/ScheduleInput--interval-empty.png` })
+  await capture(`${OUT}/ScheduleInput--interval-empty.png`)
 })
 
 test('ScheduleInput - interval valid 6h', async () => {
@@ -86,7 +87,7 @@ test('ScheduleInput - interval valid 6h', async () => {
     <ScheduleInput value={{ type: 'interval', value: '6h' }} onChange={() => {}} />
   )
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/ScheduleInput--interval-6h.png` })
+  await capture(`${OUT}/ScheduleInput--interval-6h.png`)
 })
 
 test('ScheduleInput - cron mode', async () => {
@@ -94,7 +95,7 @@ test('ScheduleInput - cron mode', async () => {
     <ScheduleInput value={{ type: 'cron', value: '0 3 * * *' }} onChange={() => {}} />
   )
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/ScheduleInput--cron.png` })
+  await capture(`${OUT}/ScheduleInput--cron.png`)
 })
 
 // ── SnapshotList — empty vs populated ────────────────────────────────────────
@@ -102,7 +103,7 @@ test('ScheduleInput - cron mode', async () => {
 test('SnapshotList - empty', async () => {
   const result = render(<SnapshotList snapshots={[]} />)
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/SnapshotList--empty.png` })
+  await capture(`${OUT}/SnapshotList--empty.png`)
 })
 
 // ── Tooltip — opened, with FieldLabel for context ────────────────────────────
@@ -135,7 +136,7 @@ test('FieldLabel - tooltip open', async () => {
     </TooltipProvider>
   )
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/Tooltip--open.png` })
+  await capture(`${OUT}/Tooltip--open.png`)
 })
 
 test('FieldLabel - row preview', async () => {
@@ -162,7 +163,7 @@ test('FieldLabel - row preview', async () => {
     </TooltipProvider>
   )
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/FieldLabel--row.png` })
+  await capture(`${OUT}/FieldLabel--row.png`)
 })
 
 test('SnapshotList - populated', async () => {
@@ -186,7 +187,7 @@ test('SnapshotList - populated', async () => {
   ]
   const result = render(<SnapshotList snapshots={snaps} />)
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/SnapshotList--populated.png` })
+  await capture(`${OUT}/SnapshotList--populated.png`)
 })
 
 // ── The shared shell + state components ──────────────────────────────────────
@@ -215,7 +216,7 @@ test('PageHeader - with breadcrumb, status and actions', async () => {
     </MemoryRouter>
   )
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/PageHeader.png` })
+  await capture(`${OUT}/PageHeader.png`)
 })
 
 test('EmptyState - with icon and action', async () => {
@@ -231,7 +232,7 @@ test('EmptyState - with icon and action', async () => {
     </div>
   )
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/EmptyState.png` })
+  await capture(`${OUT}/EmptyState.png`)
 })
 
 test('Table - numeric alignment and tabular figures', async () => {
@@ -262,7 +263,7 @@ test('Table - numeric alignment and tabular figures', async () => {
     </div>
   )
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/Table.png` })
+  await capture(`${OUT}/Table.png`)
 })
 
 test('Table - active row (a live run)', async () => {
@@ -307,7 +308,7 @@ test('Table - active row (a live run)', async () => {
     </div>
   )
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/Table--active-row.png` })
+  await capture(`${OUT}/Table--active-row.png`)
 })
 
 test('Skeleton - loading row', async () => {
@@ -320,7 +321,7 @@ test('Skeleton - loading row', async () => {
     </div>
   )
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/Skeleton.png` })
+  await capture(`${OUT}/Skeleton.png`)
 })
 
 test('CapacityBar - tones and unknown', async () => {
@@ -335,5 +336,5 @@ test('CapacityBar - tones and unknown', async () => {
     </div>
   )
   cleanup = result.unmount
-  await page.screenshot({ path: `${OUT}/CapacityBar.png` })
+  await capture(`${OUT}/CapacityBar.png`)
 })

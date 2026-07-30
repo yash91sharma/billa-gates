@@ -14,6 +14,7 @@ import tailwindcss from '@tailwindcss/vite'
  * generating screenshots, not on every unit-test run.
  */
 import pkg from './package.json' with { type: 'json' }
+import { writeScreenshotIfChanged } from './src/screenshots/write-if-changed'
 
 export default defineConfig({
   define: { __APP_VERSION__: JSON.stringify(pkg.version) },
@@ -40,6 +41,11 @@ export default defineConfig({
       provider: 'playwright',
       screenshotDirectory: 'screenshots',
       instances: [{ browser: 'chromium' }],
+      // The tests capture through `capture()` (src/screenshots/capture.ts),
+      // which routes the bytes here so an unchanged image is left untouched
+      // instead of rewritten. Without it every run touched all 40 files and the
+      // ones that actually moved were impossible to spot.
+      commands: { writeScreenshotIfChanged },
     },
   },
 })
