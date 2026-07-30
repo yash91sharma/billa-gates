@@ -21,6 +21,7 @@ notified.
 - **Retention & pruning** — `forget`/`prune` policies applied after each run.
 - **Integrity checks** — optional `restic check` verification per job.
 - **Snapshot browsing** — view snapshots and run history in the UI.
+- **Drive capacity** — a Backup Destinations page showing total, used and free space per drive.
 - **Notifications** — push run results to [ntfy](https://ntfy.sh/).
 - **Single container** — FastAPI serves both the API and the React frontend.
 
@@ -85,6 +86,20 @@ touch /path/to/backup/drive/.billa_gates_check  # each destination
 - Create the file once, on the underlying drive/share — not on a temporary mountpoint.
 - If a run fails with a missing-sentinel error, it usually means the mount actually dropped. Check the mount before recreating the file.
 - Application state (SQLite DB + restic cache) lives in `/app/data`.
+
+## Backup Destinations page
+
+**Destinations** in the sidebar lists every drive mounted under `/destinations` (plus any destination a job still points at, even if its folder has gone) with total, used and free space.
+
+A few things about the numbers:
+
+- **Used + free does not add up to total.** Filesystems hold blocks back. **Free** is the figure to plan against: it is what a backup can actually write, and it matches the `Avail` column of `df -h` exactly.
+- **The percentage is measured against total**, so it is derivable from the numbers beside it. `df` computes its `Use%` against used + free instead, so `df` reads a few points higher on the same drive. A drive can also show 95% used with **zero bytes free**, which is why the "no space left" flag keys on free space rather than on the percentage.
+- **Nothing is stored and no history is kept.** Figures are read from the filesystem when the page loads, and re-read after any job run finishes; **Refresh** forces a fresh read. Restarting the container simply measures again.
+- **Two labels can be folders on one drive** (or a label may not be a real mount at all, in which case it reports the container's own filesystem). Those rows are marked, and their capacities must not be added together — which is why the page shows no total.
+- **A drive that is detached, unreadable, or too slow to answer** shows dashes and a reason for that row alone; the other drives still load.
+
+Note restic deduplicates and compresses, so a source larger than the free space shown may still fit. The page sizes the drive, not the next snapshot.
 
 ## Recovering a job after losing the database
 

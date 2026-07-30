@@ -38,6 +38,31 @@ export function parseApiError(err: unknown): ApiErrorDetail {
   return { message: null, conflictingJob: null }
 }
 
+// Always one decimal, so a column of percentages lines up under `tabular-nums`
+// and 60% never renders as "60" beside "82.4". Null is a reading that could not
+// be taken, which is different from a drive that is 0% full — hence the dash
+// rather than "0.0%", matching formatBytes' contract.
+export function formatPercent(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—'
+  return `${value.toFixed(1)}%`
+}
+
+// Drive capacities are the one place in the app that reaches terabytes, and a
+// 4 TB disk rendered as "4096 GB" is not how anyone reads a disk. Everything
+// below 1 TB is handed to formatBytes so there is still only one definition of
+// the KB/MB/GB tiers. formatBytes itself is deliberately left alone: it renders
+// per-run snapshot sizes, and changing what those show is a change to a
+// different feature.
+export function formatCapacity(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined) return '—'
+  const TB = 1099511627776
+  if (bytes >= TB) {
+    const val = bytes / TB
+    return `${val % 1 === 0 ? val.toFixed(0) : val.toFixed(1)} TB`
+  }
+  return formatBytes(bytes)
+}
+
 export function formatBytes(bytes: number | null | undefined): string {
   if (bytes === null || bytes === undefined) return '—'
   const GB = 1073741824

@@ -40,6 +40,7 @@ from app.db.models import (
     TriggeredBy,
 )
 from app.services import (
+    destination_usage,
     process_registry,
     repository,
     restic,
@@ -980,6 +981,15 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
             factory, run_id, error_output=run_records.crash_message("Backup", exc)
         )
     finally:
+        # This run just wrote to the destination, so its cached capacity is
+        # stale. Invalidating here rather than beside the finalize step is
+        # deliberate: a cancel and a missing-sentinel refusal both `return` from
+        # inside the try, and a crash lands in `except`, so only `finally` covers
+        # every terminal path — and a canceled or crashed run has usually
+        # already written data. Scoped to this job's destination so another
+        # drive's good measurement (possibly bought with a 10s probe) survives.
+        # A dict.pop cannot raise, so it cannot strand the row at `running`.
+        destination_usage.invalidate(job.destination_label)
         # active_jobs cleanup is handled by run_dispatch so the lifecycle owner
         # holds full responsibility for the in-memory state. The pipeline
         # focuses on the backup itself + the history trim.
@@ -1087,6 +1097,10 @@ async def run_prune(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
             check_status=CheckStatus.skipped,
         )
     finally:
+        # Freeing space is the whole point of prune, so the cached figure is
+        # certainly stale — see the note in run_backup's finally for why this
+        # lives here and is scoped to one label.
+        destination_usage.invalidate(job.destination_label)
         await run_records.trim_history(factory, str(job_id))
         logger.info(f"job_id={job_id} run_id={run_id} prune_completed")
 
@@ -1196,5 +1210,9 @@ async def run_check(
             prune_status=PruneStatus.skipped,
         )
     finally:
+        # A check writes no data, but it does touch lock files and can run for
+        # hours — long enough for the cached number to have aged out of being
+        # worth keeping. Same placement and scope as the other two pipelines.
+        destination_usage.invalidate(job.destination_label)
         await run_records.trim_history(factory, str(job_id))
         logger.info(f"job_id={job_id} run_id={run_id} check_completed")

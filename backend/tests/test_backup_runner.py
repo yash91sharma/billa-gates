@@ -4,7 +4,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -4902,3 +4902,191 @@ async def test_run_check_unhandled_exception_finalizes_run_to_failed(engine):
     assert run.finished_at is not None
     assert run.duration_seconds is not None
     assert run.prune_status == PruneStatus.skipped
+
+
+# ── Destination-usage cache invalidation ─────────────────────────────────────
+#
+# The Backup Destinations page refreshes "after a job completes" without
+# polling, which only works if every terminal path drops the cached capacity for
+# the drive the run just wrote to. The call therefore lives in each pipeline's
+# `finally` — not beside finalize, where the early returns would skip it.
+
+
+def _seed_usage_cache(*labels: str) -> None:
+    from app.services import destination_usage
+
+    destination_usage._clear_cache()
+    for label in labels:
+        destination_usage._cache[label] = (
+            MagicMock(name=f"measurement-{label}"),
+            9e9,
+        )
+
+
+async def test_a_completed_backup_invalidates_the_destination_usage_cache(engine):
+    """A backup just wrote to the drive, so the cached free-space figure is
+    stale the moment the run ends."""
+    from app.services import destination_usage
+
+    await _setup_job(engine)
+    run_id = await _make_running_row(engine)
+    _seed_usage_cache("main")
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
+        patch("app.services.run_notifications.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert "main" not in destination_usage._cache
+
+
+async def test_a_canceled_backup_still_invalidates_the_destination_usage_cache(engine):
+    """The Stop path returns from inside the try, skipping everything beside
+    finalize — a canceled run has usually already written data, so the figure
+    is stale all the same."""
+    from app.db.models import RunStatus
+    from app.services import destination_usage, process_registry
+
+    await _setup_job(engine)
+    run_id = await _make_running_row(engine)
+    _seed_usage_cache("main")
+    process_registry.mark_canceled(uuid.UUID(run_id))
+
+    try:
+        with patch("app.services.run_notifications.send_notification"):
+            await run_backup(JOB_ID, uuid.UUID(run_id))
+    finally:
+        process_registry.clear_canceled(uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.canceled
+    assert "main" not in destination_usage._cache
+
+
+async def test_a_run_that_fails_the_destination_sentinel_still_invalidates(engine):
+    """Another early return from inside the try."""
+    from app.db.models import RunStatus
+    from app.services import destination_usage
+
+    await _setup_job(engine)
+    run_id = await _make_running_row(engine)
+    _seed_usage_cache("main")
+
+    with (
+        patch(
+            "app.services.backup_runner.check_destination_mount_file_exists",
+            return_value=False,
+        ),
+        patch("app.services.run_notifications.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert "main" not in destination_usage._cache
+
+
+async def test_a_crashing_backup_still_invalidates_the_destination_usage_cache(engine):
+    """The crash handler is in `except`; the invalidation has to be in
+    `finally` to survive it."""
+    from app.db.models import RunStatus
+    from app.services import destination_usage
+
+    await _setup_job(engine)
+    run_id = await _make_running_row(engine)
+    _seed_usage_cache("main")
+
+    with (
+        patch(
+            "app.services.restic.restic_cat_config",
+            side_effect=RuntimeError("boom"),
+        ),
+        patch("app.services.run_notifications.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert "main" not in destination_usage._cache
+
+
+async def test_prune_invalidates_the_destination_usage_cache(engine):
+    """Freeing space is the entire purpose of prune: a capacity figure that
+    doesn't move after the click reads as "prune did nothing"."""
+    from app.services import destination_usage
+
+    await _setup_job(engine)
+    run_id = await _make_running_row(engine)
+    _seed_usage_cache("main")
+
+    with (
+        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
+        patch("app.services.run_notifications.send_notification"),
+    ):
+        await run_prune(JOB_ID, uuid.UUID(run_id))
+
+    assert "main" not in destination_usage._cache
+
+
+async def test_a_failed_prune_still_invalidates_the_destination_usage_cache(engine):
+    from app.services import destination_usage
+
+    await _setup_job(engine)
+    run_id = await _make_running_row(engine)
+    _seed_usage_cache("main")
+
+    with (
+        patch("app.services.restic.restic_prune", return_value=(1, "", "failed")),
+        patch("app.services.run_notifications.send_notification"),
+    ):
+        await run_prune(JOB_ID, uuid.UUID(run_id))
+
+    assert "main" not in destination_usage._cache
+
+
+async def test_an_integrity_check_invalidates_the_destination_usage_cache(engine):
+    from app.services import destination_usage
+
+    await _setup_job(engine)
+    run_id = await _make_running_row(engine)
+    _seed_usage_cache("main")
+
+    with (
+        patch("app.services.restic.restic_check", return_value=(0, "", "")),
+        patch("app.services.run_notifications.send_notification"),
+    ):
+        await run_check(JOB_ID, uuid.UUID(run_id), "structural", None, None)
+
+    assert "main" not in destination_usage._cache
+
+
+async def test_invalidation_is_scoped_to_the_jobs_own_destination(engine):
+    """A global clear would throw away a good measurement of a hung share this
+    run never touched, making the next page load eat a probe timeout."""
+    from app.services import destination_usage
+
+    await _setup_job(engine)
+    run_id = await _make_running_row(engine)
+    _seed_usage_cache("main", "offsite")
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
+        patch("app.services.run_notifications.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert "main" not in destination_usage._cache
+    assert "offsite" in destination_usage._cache, (
+        "another drive's measurement must survive a run that never touched it"
+    )

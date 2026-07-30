@@ -6,18 +6,24 @@ can patch them via 'app.api.routes.mounts.SOURCES_ROOT', etc.
 
 import os
 import uuid
-from typing import List
+from datetime import datetime, timezone
+from typing import Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_session
-from app.api.schemas.mounts import RenameDestinationRequest, RenameDestinationResult
+from app.api.schemas.mounts import (
+    DestinationUsage,
+    DestinationUsageResponse,
+    RenameDestinationRequest,
+    RenameDestinationResult,
+)
 from app.core import fs
 from app.core.logging import get_logger, log_call
 from app.db.models import BackupJob
-from app.services import backup_runner
+from app.services import backup_runner, destination_usage
 
 logger = get_logger(__name__)
 
@@ -68,6 +74,87 @@ async def list_destinations() -> List[str]:
     than a frozen event loop.
     """
     return await fs.run_probe(_list_dirs, DESTINATIONS_ROOT, default=[])
+
+
+# ── GET /api/mounts/destinations/usage ───────────────────────────────────────
+
+
+@router.get("/destinations/usage", response_model=DestinationUsageResponse)
+@log_call
+async def destination_usage_report(
+    refresh: bool = Query(
+        False,
+        description=(
+            "Re-read every destination instead of serving the cached "
+            "measurement. Sent by the page's Refresh button."
+        ),
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> DestinationUsageResponse:
+    """Report capacity for every destination this install knows about.
+
+    The label set is the union of two things, and the second half matters: the
+    directories under DESTINATIONS_ROOT, **plus** every destination_label a job
+    references. A drive whose directory has gone entirely would otherwise vanish
+    from the one page whose job is to tell you about drives — it is listed as
+    unavailable instead.
+
+    Always 200, even when a destination is detached or hung: failure is carried
+    per row (`available=false` plus a reason). This is deliberately unlike
+    GET /api/jobs/{id}/snapshots, which 503s — there the whole response is one
+    repository, whereas here one dead drive among four must cost one row.
+
+    The sentinel checker is handed to the service rather than imported by it, so
+    the marker-file path stays derived in the single place that owns it
+    (backup_runner) and no import cycle is created.
+    """
+    labels = set(await fs.run_probe(_list_dirs, DESTINATIONS_ROOT, default=[]))
+
+    result = await session.execute(select(BackupJob))
+    jobs = result.scalars().all()
+    job_names: Dict[str, List[str]] = {}
+    for job in jobs:
+        job_names.setdefault(job.destination_label, []).append(job.name)
+    labels |= set(job_names)
+
+    measurements = await destination_usage.list_usage(
+        labels,
+        sentinel_check=backup_runner.check_destination_mount_file_exists,
+        use_cache=not refresh,
+    )
+
+    destinations = [
+        DestinationUsage(
+            label=m.label,
+            path=m.path,
+            available=m.available,
+            unavailable_reason=m.unavailable_reason,
+            total_bytes=m.total_bytes,
+            used_bytes=m.used_bytes,
+            free_bytes=m.free_bytes,
+            reserved_bytes=m.reserved_bytes,
+            percent_used=m.percent_used,
+            filesystem_id=m.filesystem_id,
+            is_separate_mount=m.is_separate_mount,
+            shares_filesystem_with=list(m.shares_filesystem_with),
+            sentinel_present=m.sentinel_present,
+            job_count=len(job_names.get(m.label, [])),
+            job_names=sorted(job_names.get(m.label, [])),
+            measured_at=m.measured_at,
+        )
+        for m in measurements
+    ]
+
+    return DestinationUsageResponse(
+        # The stalest row's stamp: the page renders this as "as of …", and a
+        # fresher one would misdate every cached figure under it.
+        measured_at=(
+            min(d.measured_at for d in destinations)
+            if destinations
+            else datetime.now(timezone.utc).replace(tzinfo=None)
+        ),
+        destinations=destinations,
+    )
 
 
 # ── POST /api/mounts/destinations/rename ─────────────────────────────────────

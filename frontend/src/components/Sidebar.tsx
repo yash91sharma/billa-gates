@@ -1,4 +1,11 @@
-import { Briefcase, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Settings } from 'lucide-react'
+import {
+  Briefcase,
+  HardDrive,
+  LayoutDashboard,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Settings,
+} from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
 import { Link, NavLink } from 'react-router-dom'
 import billaLogo from '@/assets/billa.png'
@@ -16,6 +23,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/jobs', label: 'Jobs', icon: Briefcase, matchChildren: true },
+  { to: '/destinations', label: 'Destinations', icon: HardDrive },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
 

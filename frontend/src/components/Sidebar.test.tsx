@@ -58,6 +58,26 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: /settings/i })).toBeInTheDocument()
   })
 
+  it('links to the backup destinations page', () => {
+    renderWithProviders(<Sidebar expanded={true} onToggle={() => {}} />)
+    const nav = screen.getByRole('navigation', { name: /primary/i })
+    expect(within(nav).getByRole('link', { name: /destinations/i })).toHaveAttribute(
+      'href',
+      '/destinations'
+    )
+  })
+
+  it('marks the destinations link active on its own route only', () => {
+    renderWithProviders(<Sidebar expanded={true} onToggle={() => {}} />, {
+      route: '/destinations',
+    })
+    expect(screen.getByRole('link', { name: /destinations/i })).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
+    expect(screen.getByRole('link', { name: /jobs/i })).not.toHaveAttribute('aria-current', 'page')
+  })
+
   it('logo links to home (dashboard) view and calls onNavigate', async () => {
     const onNavigate = vi.fn()
     renderWithProviders(<Sidebar expanded={true} onToggle={() => {}} onNavigate={onNavigate} />)

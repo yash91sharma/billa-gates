@@ -17,11 +17,14 @@ import type {
   AppSettings,
   BackupJob,
   BackupRun,
+  DestinationUsage,
+  DestinationUsageResponse,
   HealthStatus,
   JobCommand,
   Snapshot,
 } from '../lib/types'
 import Dashboard from '../pages/Dashboard'
+import Destinations from '../pages/Destinations'
 import JobDetail from '../pages/JobDetail'
 import Jobs from '../pages/Jobs'
 import RunDetail from '../pages/RunDetail'
@@ -284,6 +287,61 @@ const job3: BackupJob = {
 
 // ── Mock setup ───────────────────────────────────────────────────────────────
 
+const TB = 1024 ** 4
+const GB = 1024 ** 3
+
+const destination = (overrides: Partial<DestinationUsage> = {}): DestinationUsage => ({
+  label: 'main',
+  path: '/destinations/main',
+  available: true,
+  unavailable_reason: null,
+  total_bytes: 4 * TB,
+  used_bytes: 1.8 * TB,
+  free_bytes: 2.1 * TB,
+  reserved_bytes: 0.1 * TB,
+  percent_used: 45,
+  filesystem_id: '8:1',
+  is_separate_mount: true,
+  shares_filesystem_with: [],
+  sentinel_present: true,
+  job_count: 2,
+  job_names: ['Documents Backup', 'Photos Backup'],
+  measured_at: '2026-06-01T11:58:00Z',
+  ...overrides,
+})
+
+const destinationUsage: DestinationUsageResponse = {
+  measured_at: '2026-06-01T11:58:00Z',
+  destinations: [
+    destination(),
+    destination({
+      label: 'offsite',
+      path: '/destinations/offsite',
+      total_bytes: 4 * TB,
+      used_bytes: 3.64 * TB,
+      free_bytes: 0.36 * TB,
+      percent_used: 91,
+      filesystem_id: '8:2',
+      job_count: 1,
+      job_names: ['Archive Backup'],
+    }),
+    destination({
+      label: 'scratch',
+      path: '/destinations/scratch',
+      total_bytes: 500 * GB,
+      used_bytes: 12 * GB,
+      free_bytes: 488 * GB,
+      percent_used: 2,
+      filesystem_id: '8:1',
+      shares_filesystem_with: ['main'],
+      is_separate_mount: false,
+      sentinel_present: false,
+      job_count: 0,
+      job_names: [],
+    }),
+  ],
+}
+
 beforeEach(() => {
   vi.useFakeTimers({ now: FIXED_NOW, shouldAdvanceTime: true })
   vi.mocked(api.listJobs).mockResolvedValue([job, job2, job3])
@@ -302,6 +360,7 @@ beforeEach(() => {
   })
   vi.mocked(api.listSourceMounts).mockResolvedValue(['documents', 'photos'])
   vi.mocked(api.listDestinationMounts).mockResolvedValue(['main', 'archive'])
+  vi.mocked(api.getDestinationUsage).mockResolvedValue(destinationUsage)
 })
 
 let cleanup: (() => void) | undefined
@@ -650,4 +709,67 @@ test('Settings - populated', async () => {
     { timeout: 1000 }
   )
   await page.screenshot({ path: `${OUT}/Settings.png` })
+})
+
+test('Destinations - populated', async () => {
+  const result = renderPage('/destinations', <Destinations />)
+  cleanup = result.unmount
+  await waitFor(() => {
+    if (!result.container.textContent?.includes('offsite')) {
+      throw new Error('destinations not ready')
+    }
+  })
+  await page.screenshot({ path: `${OUT}/Destinations.png` })
+})
+
+test('Destinations - caveats expanded', async () => {
+  const result = renderPage('/destinations', <Destinations />)
+  cleanup = result.unmount
+  await waitFor(() => {
+    if (!result.container.textContent?.includes('offsite')) {
+      throw new Error('destinations not ready')
+    }
+  })
+  const trigger = result.container.querySelector('[data-slot="collapsible-trigger"]') as HTMLElement
+  await userEvent.click(trigger)
+  await waitFor(() => {
+    if (!result.container.textContent?.includes('must not be added')) {
+      throw new Error('caveats not expanded')
+    }
+  })
+  await page.screenshot({ path: `${OUT}/Destinations--caveats.png` })
+})
+
+test('Destinations - a drive that did not answer', async () => {
+  vi.mocked(api.getDestinationUsage).mockResolvedValue({
+    measured_at: '2026-06-01T11:58:00Z',
+    destinations: [
+      destinationUsage.destinations[0],
+      destination({
+        label: 'nas',
+        path: '/destinations/nas',
+        available: false,
+        unavailable_reason:
+          '/destinations/nas did not respond within 10.0s — the mount may be detached or hung',
+        total_bytes: null,
+        used_bytes: null,
+        free_bytes: null,
+        reserved_bytes: null,
+        percent_used: null,
+        filesystem_id: null,
+        is_separate_mount: null,
+        sentinel_present: null,
+        job_count: 1,
+        job_names: ['Offsite Backup'],
+      }),
+    ],
+  })
+  const result = renderPage('/destinations', <Destinations />)
+  cleanup = result.unmount
+  await waitFor(() => {
+    if (!result.container.textContent?.includes('did not respond')) {
+      throw new Error('destinations not ready')
+    }
+  })
+  await page.screenshot({ path: `${OUT}/Destinations--unavailable.png` })
 })

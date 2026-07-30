@@ -155,3 +155,39 @@ export interface ResticUpdateCheck {
 export interface RenameDestinationResult {
   affected_jobs: Array<{ id: string; name: string }>
 }
+
+/**
+ * Capacity of one backup destination, as measured by the backend.
+ *
+ * `used_bytes + free_bytes` deliberately does NOT equal `total_bytes`: the gap
+ * is `reserved_bytes` (root-reserved blocks, ~5% on ext4). `free_bytes` is what
+ * a backup may actually write and is the number a "nearly full" warning keys on
+ * — a drive can report 95% used with zero bytes free. Every figure is nullable
+ * because a detached, unreadable or hung drive comes back with `available:
+ * false` and a reason instead of invented zeros.
+ */
+export interface DestinationUsage {
+  label: string
+  path: string
+  available: boolean
+  unavailable_reason: string | null
+  total_bytes: number | null
+  used_bytes: number | null
+  free_bytes: number | null
+  reserved_bytes: number | null
+  percent_used: number | null
+  /** Opaque device id; equal on two labels that are folders on one drive. */
+  filesystem_id: string | null
+  is_separate_mount: boolean | null
+  shares_filesystem_with: string[]
+  sentinel_present: boolean | null
+  job_count: number
+  job_names: string[]
+  measured_at: string
+}
+
+export interface DestinationUsageResponse {
+  /** The oldest row's timestamp — never fresher than the stalest figure shown. */
+  measured_at: string
+  destinations: DestinationUsage[]
+}

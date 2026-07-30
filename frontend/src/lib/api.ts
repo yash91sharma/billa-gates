@@ -2,6 +2,7 @@ import type {
   AppSettings,
   BackupJob,
   BackupRun,
+  DestinationUsageResponse,
   HealthStatus,
   JobCommand,
   RenameDestinationResult,
@@ -90,6 +91,11 @@ export const cancelRun = async (id: string): Promise<void> => {
 // ── Mounts ────────────────────────────────────────────────────────────────────
 export const listSourceMounts = () => request<string[]>('/mounts/sources')
 export const listDestinationMounts = () => request<string[]>('/mounts/destinations')
+// `refresh` re-reads every drive instead of serving the backend's cached
+// measurement — what the Backup Destinations page's Refresh button sends, since
+// a button that hands back a five-minute-old number reads as broken.
+export const getDestinationUsage = (refresh = false) =>
+  request<DestinationUsageResponse>(`/mounts/destinations/usage${refresh ? '?refresh=true' : ''}`)
 export const renameDestination = (old_label: string, new_label: string) =>
   request<RenameDestinationResult>('/mounts/destinations/rename', {
     method: 'POST',

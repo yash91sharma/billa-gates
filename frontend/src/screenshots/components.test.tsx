@@ -15,6 +15,7 @@ import { afterEach, test } from 'vitest'
 
 import { HardDriveDownload } from 'lucide-react'
 import { MemoryRouter } from 'react-router-dom'
+import CapacityBar from '../components/CapacityBar'
 import EmptyState from '../components/EmptyState'
 import FieldLabel from '../components/FieldLabel'
 import PageHeader from '../components/PageHeader'
@@ -320,4 +321,19 @@ test('Skeleton - loading row', async () => {
   )
   cleanup = result.unmount
   await page.screenshot({ path: `${OUT}/Skeleton.png` })
+})
+
+test('CapacityBar - tones and unknown', async () => {
+  await WIDE()
+  const result = render(
+    <div style={{ width: 420, padding: 24, display: 'grid', gap: 12 }}>
+      <CapacityBar percent={12} label="calm" />
+      <CapacityBar percent={45} label="calm" />
+      <CapacityBar percent={82} label="warning" />
+      <CapacityBar percent={96} label="danger" />
+      <CapacityBar percent={null} label="unknown" />
+    </div>
+  )
+  cleanup = result.unmount
+  await page.screenshot({ path: `${OUT}/CapacityBar.png` })
 })

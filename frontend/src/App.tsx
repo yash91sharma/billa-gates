@@ -2,6 +2,7 @@ import { Route, Routes } from 'react-router-dom'
 import Layout from './components/Layout'
 import { TooltipProvider } from './components/ui/tooltip'
 import Dashboard from './pages/Dashboard'
+import Destinations from './pages/Destinations'
 import JobDetail from './pages/JobDetail'
 import Jobs from './pages/Jobs'
 import RunDetail from './pages/RunDetail'
@@ -18,6 +19,7 @@ export default function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/jobs" element={<Jobs />} />
           <Route path="/jobs/:id" element={<JobDetail />} />
+          <Route path="/destinations" element={<Destinations />} />
           <Route path="/runs/:id" element={<RunDetail />} />
           <Route path="/settings" element={<Settings />} />
         </Route>
