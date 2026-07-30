@@ -232,7 +232,10 @@ export default function Dashboard() {
               </TableHeader>
               <TableBody>
                 {(runs ?? []).map((run) => (
-                  <TableRow key={run.id}>
+                  // A live run is the one row here that is time-sensitive: it
+                  // is the only one carrying a Stop button, and the only one
+                  // whose numbers are still moving.
+                  <TableRow key={run.id} active={run.status === 'running'}>
                     <TableCell className="font-medium">
                       <Link to={`/runs/${run.id}`} className="text-primary hover:underline">
                         {run.job_name ?? run.job_id}

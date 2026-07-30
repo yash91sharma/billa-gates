@@ -529,6 +529,39 @@ test('Dashboard - running run with Stop button', async () => {
   await page.screenshot({ path: `${OUT}/Dashboard--running.png` })
 })
 
+// The live-run row highlight (tint + pulsing accent bar) is invisible to the
+// jsdom suite, which runs with css: false — this is where it gets reviewed.
+// One running job beside two idle ones is the comparison that matters: the
+// highlight has to be obvious without making the other rows look broken.
+test('Jobs - running job row highlighted', async () => {
+  vi.mocked(api.listJobs).mockResolvedValue([
+    {
+      ...job,
+      last_run: {
+        id: runningRun.id,
+        kind: 'backup',
+        status: 'running',
+        check_status: null,
+        started_at: runningRun.started_at,
+        finished_at: null,
+        duration_seconds: null,
+        triggered_by: 'manual',
+      },
+    },
+    job2,
+    job3,
+  ])
+
+  const result = renderPage('/jobs', <Jobs />)
+  cleanup = result.unmount
+  await waitFor(() => {
+    if (!result.container.querySelector('tr[data-active="true"]')) {
+      throw new Error('running row not rendered yet')
+    }
+  })
+  await page.screenshot({ path: `${OUT}/Jobs--running.png` })
+})
+
 test('JobDetail - running run with Stop button', async () => {
   vi.mocked(api.getJobRuns).mockResolvedValue([runningRun])
 

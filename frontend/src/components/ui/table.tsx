@@ -46,12 +46,32 @@ function TableFooter({ className, ...props }: React.ComponentProps<'tfoot'>) {
   )
 }
 
-function TableRow({ className, ...props }: React.ComponentProps<'tr'>) {
+/**
+ * `active` marks the row of something that is happening right now — a live
+ * backup run, or the job it belongs to.
+ *
+ * The status badge is the honest signal (and stays: colour is never the only
+ * cue), but it puts it inside one cell of a table that is eight to ten columns
+ * wide and up to a hundred rows deep, where the eye walks past it. The row
+ * carries a tint from the same `info` family as the badge, keeps that tint
+ * under the pointer — the grey hover fill would erase the highlight exactly as
+ * the user reaches for the row's Stop button — and gets a pulsing accent bar
+ * down its left edge, declared as a `tr[data-active]::before` in index.css
+ * (a box-shadow or left border on a `<tr>` is unreliable under
+ * `border-collapse`, and a border would also shift the first column's text).
+ */
+function TableRow({
+  className,
+  active = false,
+  ...props
+}: React.ComponentProps<'tr'> & { active?: boolean }) {
   return (
     <tr
       data-slot="table-row"
+      data-active={active ? 'true' : undefined}
       className={cn(
         'border-b border-border transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted',
+        active && 'bg-info-subtle/60 hover:bg-info-subtle/80',
         className
       )}
       {...props}

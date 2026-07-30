@@ -286,6 +286,39 @@ describe('JobDetail', () => {
     })
   })
 
+  describe('run history highlights the live run', () => {
+    // The run history is ten columns wide and up to 100 rows deep (the "Keep
+    // last runs" cap), so a badge in one cell is easy to walk past. The row
+    // itself is marked, and `<TableRow active>` turns that into the tint and
+    // accent bar declared in index.css.
+    async function runRows(): Promise<HTMLElement[]> {
+      const table = await screen.findByRole('table')
+      return Array.from(table.querySelectorAll('tbody tr'))
+    }
+
+    it('marks the running run row as active', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([
+        makeRun({ id: 'r-live', status: 'running', check_status: null }),
+        makeRun({ id: 'r-old', status: 'success' }),
+      ])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      const rows = await runRows()
+      expect(rows[0]).toHaveAttribute('data-active', 'true')
+    })
+
+    it('leaves terminal run rows unmarked', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([
+        makeRun({ id: 'r-live', status: 'running', check_status: null }),
+        makeRun({ id: 'r-old', status: 'success' }),
+        makeRun({ id: 'r-bad', status: 'failed' }),
+      ])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      const rows = await runRows()
+      expect(rows[1]).not.toHaveAttribute('data-active')
+      expect(rows[2]).not.toHaveAttribute('data-active')
+    })
+  })
+
   describe('tab switching', () => {
     it('shows Runs tab', async () => {
       renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })

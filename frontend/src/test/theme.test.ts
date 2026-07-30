@@ -109,3 +109,44 @@ describe('Arctic theme tokens (index.css)', () => {
     }
   })
 })
+
+describe('live-run row accent (index.css)', () => {
+  // `<TableRow active>` renders `data-active="true"` and a tint; the accent bar
+  // down the left edge of the row is a ::before declared here, because a
+  // box-shadow or border on a <tr> is unreliable under border-collapse. None of
+  // it is visible to the jsdom suite (css: false), so these assertions are the
+  // only automated guard that the rule still exists — the look itself is
+  // reviewed in `npm run screenshots`.
+  const accentRule = css.match(/tr\[data-active='true'\][^{]*::before\s*{[^}]*}/)?.[0]
+
+  it('hangs the accent bar off the row marked data-active', () => {
+    expect(accentRule).toBeDefined()
+  })
+
+  it('paints the bar in the info family the running badge already uses', () => {
+    expect(accentRule).toMatch(/var\(--info-subtle-foreground\)/)
+  })
+
+  it('keeps the rules unlayered so they outrank the utilities on the cell', () => {
+    // The gutter that stops the bar being drawn over the first column's text
+    // has to beat `first:pl-0` from ui/table.tsx, and Tailwind's `utilities`
+    // layer wins over `components` regardless of specificity. Written inside
+    // `@layer components` the padding silently does nothing. Unlayered rules
+    // start at column 0 — anything nested is indented by prettier.
+    expect(css).toMatch(/^tr\[data-active='true'] > :first-child \{/m)
+    expect(css).toMatch(/^tr\[data-active='true'] > :first-child::before \{/m)
+  })
+
+  it('pulses the bar, because motion is what pulls the eye across a long table', () => {
+    expect(accentRule).toMatch(/animation:/)
+    expect(css).toMatch(/@keyframes\s+row-accent-pulse/)
+  })
+
+  it('stops the pulse for users who asked for reduced motion', () => {
+    // A backup tool is left open on a screen for hours; a perpetual animation
+    // is exactly what that media query exists to turn off.
+    const at = css.indexOf('@media (prefers-reduced-motion: reduce)')
+    expect(at).toBeGreaterThan(-1)
+    expect(css.slice(at, at + 400)).toMatch(/animation:\s*none/)
+  })
+})

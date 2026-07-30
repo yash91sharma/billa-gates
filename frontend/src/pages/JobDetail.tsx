@@ -496,7 +496,7 @@ export default function JobDetail() {
                     </TableHeader>
                     <TableBody>
                       {(runs ?? []).map((r) => (
-                        <TableRow key={r.id}>
+                        <TableRow key={r.id} active={r.status === 'running'}>
                           <TableCell className="capitalize">{r.kind}</TableCell>
                           <TableCell>
                             <Link to={`/runs/${r.id}`} className="hover:underline">

@@ -264,6 +264,51 @@ test('Table - numeric alignment and tabular figures', async () => {
   await page.screenshot({ path: `${OUT}/Table.png` })
 })
 
+test('Table - active row (a live run)', async () => {
+  // `<TableRow active>` tints the row and hangs a pulsing accent bar off its
+  // first cell (a ::before declared in index.css). Neither is visible to the
+  // jsdom suite, so this PNG is the only review of it.
+  await WIDE()
+  const result = render(
+    <div style={{ width: 640, padding: 24 }}>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Job</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead numeric>Duration</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          <TableRow active>
+            <TableCell>Documents Backup</TableCell>
+            <TableCell>
+              <RunStatusBadge status="running" />
+            </TableCell>
+            <TableCell numeric>—</TableCell>
+          </TableRow>
+          <TableRow>
+            <TableCell>Photos &amp; Media</TableCell>
+            <TableCell>
+              <RunStatusBadge status="success" />
+            </TableCell>
+            <TableCell numeric>4,180s</TableCell>
+          </TableRow>
+          <TableRow>
+            <TableCell>System Configuration</TableCell>
+            <TableCell>
+              <RunStatusBadge status="failed" />
+            </TableCell>
+            <TableCell numeric>12s</TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
+    </div>
+  )
+  cleanup = result.unmount
+  await page.screenshot({ path: `${OUT}/Table--active-row.png` })
+})
+
 test('Skeleton - loading row', async () => {
   await WIDE()
   const result = render(

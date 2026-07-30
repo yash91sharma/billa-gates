@@ -191,3 +191,62 @@
     stroke-width: 1.5;
   }
 }
+
+/*
+ * The live-run row accent — the bar down the left edge of a `<TableRow active>`.
+ *
+ * The tint lives with the component (bg-info-subtle in ui/table.tsx); the bar
+ * has to live here because a `<tr>` under `border-collapse: collapse` does not
+ * paint a box-shadow reliably, and a real `border-left` would shift the first
+ * column's text out of line with every other row. A ::before on the first cell
+ * costs no layout.
+ *
+ * It pulses because motion is what actually pulls the eye down a long table —
+ * the same rhythm as the dot in the `running` badge (Tailwind's animate-pulse).
+ * The tint alone reads as "selected", not "happening now".
+ *
+ * Deliberately unlayered. The gutter below has to beat `first:pl-0` from
+ * ui/table.tsx, and Tailwind's `utilities` layer wins over `components`
+ * whatever the specificity — the first attempt at this sat in
+ * `@layer components` and the padding silently did nothing, leaving the bar
+ * drawn straight through the first column's text.
+ */
+tr[data-active='true'] > :first-child {
+  position: relative;
+  /*
+   * Table cells sit flush with the card's content edge, so the bar needs a
+   * gutter to occupy. It is padding on the cell rather than a negative offset
+   * on the bar itself: the table wrapper is `overflow-x-auto`, which clips
+   * anything left of x=0 instead of letting it hang into the card's padding.
+   */
+  padding-left: 0.625rem;
+}
+
+tr[data-active='true'] > :first-child::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  border-radius: 1px;
+  background-color: var(--info-subtle-foreground);
+  animation: row-accent-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/*
+ * A backup tool sits open on a screen for hours; a perpetual animation is
+ * precisely what this query exists to switch off. The bar stays — only its
+ * movement goes.
+ */
+@media (prefers-reduced-motion: reduce) {
+  tr[data-active='true'] > :first-child::before {
+    animation: none;
+  }
+}
+
+@keyframes row-accent-pulse {
+  50% {
+    opacity: 0.4;
+  }
+}

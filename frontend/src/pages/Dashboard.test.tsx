@@ -513,4 +513,47 @@ describe('Dashboard', () => {
       expect(vi.mocked(api.cancelRun)).not.toHaveBeenCalled()
     })
   })
+
+  describe('live run row highlight', () => {
+    // The status badge puts the only signal for a live run in one 90px cell of
+    // an eight-column table, ten rows deep. The row itself carries the
+    // highlight so the eye lands on it before it reads anything — the Stop
+    // button in that row is the one action that is time-sensitive.
+    const rowOfRun = (id: string) =>
+      screen.getByTestId(`kind-badge-${id}`).closest('tr') as HTMLElement
+
+    it('marks the row of a running run as active', async () => {
+      vi.mocked(api.getRecentRuns).mockResolvedValue([
+        makeRun({ id: 'run-running', status: 'running', check_status: null }),
+      ])
+      renderWithProviders(<Dashboard />)
+      await waitFor(() => expect(screen.getByTestId('kind-badge-run-running')).toBeInTheDocument())
+      expect(rowOfRun('run-running')).toHaveAttribute('data-active', 'true')
+    })
+
+    it('leaves finished runs unhighlighted, so the marked row is unambiguous', async () => {
+      vi.mocked(api.getRecentRuns).mockResolvedValue([
+        makeRun({ id: 'run-running', status: 'running', check_status: null }),
+        makeRun({ id: 'run-done', status: 'success', check_status: 'passed' }),
+        makeRun({ id: 'run-failed', status: 'failed', check_status: 'skipped' }),
+      ])
+      renderWithProviders(<Dashboard />)
+      await waitFor(() => expect(screen.getByTestId('kind-badge-run-done')).toBeInTheDocument())
+      expect(rowOfRun('run-done')).not.toHaveAttribute('data-active')
+      expect(rowOfRun('run-failed')).not.toHaveAttribute('data-active')
+    })
+
+    it('keeps the running badge in the row, so colour is never the only signal', async () => {
+      // WCAG 1.4.1: the tint is redundant reinforcement of text that is already
+      // there. Removing the badge in favour of the highlight would leave a
+      // screen reader — or anyone who cannot separate the two fills — with
+      // nothing.
+      vi.mocked(api.getRecentRuns).mockResolvedValue([
+        makeRun({ id: 'run-running', status: 'running', check_status: null }),
+      ])
+      renderWithProviders(<Dashboard />)
+      await waitFor(() => expect(screen.getByTestId('kind-badge-run-running')).toBeInTheDocument())
+      expect(within(rowOfRun('run-running')).getByText('running')).toBeInTheDocument()
+    })
+  })
 })

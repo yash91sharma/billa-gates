@@ -53,3 +53,51 @@ describe('Table', () => {
     expect(wrapper?.className).toContain('overflow-x-auto')
   })
 })
+
+describe('TableRow active', () => {
+  function renderRows() {
+    return render(
+      <Table>
+        <TableBody>
+          <TableRow active>
+            <TableCell>Live run</TableCell>
+          </TableRow>
+          <TableRow>
+            <TableCell>Finished run</TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
+    )
+  }
+
+  function rowOf(text: string): HTMLElement {
+    return screen.getByRole('cell', { name: text }).closest('tr') as HTMLElement
+  }
+
+  it('marks the row with data-active so the CSS accent bar can hook onto it', () => {
+    // The bar itself is a ::before in index.css — jsdom runs with css: false, so
+    // this attribute is the only part of it a unit test can see.
+    renderRows()
+    expect(rowOf('Live run')).toHaveAttribute('data-active', 'true')
+  })
+
+  it('leaves ordinary rows unmarked', () => {
+    renderRows()
+    expect(rowOf('Finished run')).not.toHaveAttribute('data-active')
+  })
+
+  it('tints the row in the same colour family as the running badge', () => {
+    renderRows()
+    expect(rowOf('Live run').className).toContain('bg-info-subtle')
+  })
+
+  it('keeps the tint on hover instead of falling back to the grey hover fill', () => {
+    // A row that turns grey under the pointer loses the highlight exactly when
+    // the user is reaching for its Stop button.
+    renderRows()
+    const active = rowOf('Live run')
+    expect(active.className).toContain('hover:bg-info-subtle')
+    expect(active.className).not.toContain('hover:bg-muted')
+    expect(rowOf('Finished run').className).toContain('hover:bg-muted')
+  })
+})

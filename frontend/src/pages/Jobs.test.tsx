@@ -458,6 +458,78 @@ describe('Jobs', () => {
     })
   })
 
+  describe('live run row highlight', () => {
+    // `last_run` is the most recent run, so `last_run.status === 'running'`
+    // means this job is backing up right now. The Jobs table is the page an
+    // operator lands on to check on things, and a badge in the Last Run column
+    // is the only thing that said so.
+    const runningRun = (overrides: Partial<NonNullable<BackupJob['last_run']>> = {}) => ({
+      id: 'run-live',
+      kind: 'backup' as const,
+      status: 'running' as const,
+      check_status: null,
+      started_at: '2024-01-15T10:00:00Z',
+      finished_at: null,
+      duration_seconds: null,
+      triggered_by: 'scheduler' as const,
+      ...overrides,
+    })
+
+    const rowOf = (name: string) => screen.getByText(name).closest('tr') as HTMLElement
+
+    it('marks the row of a job that is running right now', async () => {
+      vi.mocked(api.listJobs).mockResolvedValue([
+        makeJob({ id: 'job-1', name: 'Alpha', last_run: runningRun() }),
+      ])
+      renderWithProviders(<Jobs />)
+      await waitFor(() => expect(screen.getByText('Alpha')).toBeInTheDocument())
+      expect(rowOf('Alpha')).toHaveAttribute('data-active', 'true')
+    })
+
+    it('leaves idle jobs unmarked, whatever their last run did', async () => {
+      vi.mocked(api.listJobs).mockResolvedValue([
+        makeJob({ id: 'job-1', name: 'Alpha', last_run: runningRun() }),
+        makeJob({
+          id: 'job-2',
+          name: 'Beta',
+          last_run: runningRun({ id: 'run-ok', status: 'failed', check_status: 'skipped' }),
+        }),
+        makeJob({ id: 'job-3', name: 'Gamma', last_run: null }),
+      ])
+      renderWithProviders(<Jobs />)
+      await waitFor(() => expect(screen.getByText('Gamma')).toBeInTheDocument())
+      expect(rowOf('Beta')).not.toHaveAttribute('data-active')
+      expect(rowOf('Gamma')).not.toHaveAttribute('data-active')
+    })
+
+    it('polls while a job is running so the highlight clears itself', async () => {
+      // Without this the page only refetched on mount and on window focus, so a
+      // tab left open would keep shouting "running" at a job that finished
+      // hours ago — a highlight that lies is worse than none.
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        vi.mocked(api.listJobs).mockResolvedValue([
+          makeJob({ id: 'job-1', name: 'Alpha', last_run: runningRun() }),
+        ])
+        renderWithProviders(<Jobs />)
+        await waitFor(() => expect(vi.mocked(api.listJobs)).toHaveBeenCalled())
+        await vi.advanceTimersByTimeAsync(60_000)
+        await waitFor(() => expect(vi.mocked(api.listJobs)).toHaveBeenCalledTimes(2))
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('does not poll when nothing is running', async () => {
+      vi.mocked(api.listJobs).mockResolvedValue([makeJob({ id: 'job-1', name: 'Alpha' })])
+      renderWithProviders(<Jobs />)
+      await waitFor(() => expect(screen.getByText('Alpha')).toBeInTheDocument())
+      const calls = vi.mocked(api.listJobs).mock.calls.length
+      await new Promise((r) => setTimeout(r, 100))
+      expect(vi.mocked(api.listJobs).mock.calls.length).toBe(calls)
+    })
+  })
+
   describe('job list sorting', () => {
     it('shows all jobs when multiple exist', async () => {
       vi.mocked(api.listJobs).mockResolvedValue([

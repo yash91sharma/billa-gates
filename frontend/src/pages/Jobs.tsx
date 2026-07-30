@@ -33,6 +33,18 @@ import { parseApiError, type ConflictingJob } from '../lib/utils'
 
 const COLUMN_COUNT = 7
 
+/**
+ * A job whose most recent run is still going gets its row highlighted, so the
+ * list has to keep up with the run ending — a tab left open would otherwise
+ * keep shouting "running" at a job that finished hours ago, and a highlight
+ * that lies is worse than no highlight. Same 60s cadence as the Dashboard and
+ * JobDetail: anything faster hammers the backend for the whole duration of a
+ * multi-hour backup without saying anything new.
+ */
+function shouldPoll(jobs: BackupJob[]): boolean {
+  return jobs.some((job) => job.last_run?.status === 'running')
+}
+
 export default function Jobs() {
   const navigate = useNavigate()
   const [jobToDelete, setJobToDelete] = useState<BackupJob | null>(null)
@@ -52,6 +64,7 @@ export default function Jobs() {
     queryKey: ['jobs'],
     queryFn: api.listJobs,
     refetchOnWindowFocus: true,
+    refetchInterval: (query) => (shouldPoll(query.state.data ?? []) ? 60_000 : false),
   })
 
   // Mounts populate the Source/Destination dropdowns in the create form.
@@ -224,7 +237,9 @@ export default function Jobs() {
                 </TableHeader>
                 <TableBody>
                   {jobs.map((job) => (
-                    <TableRow key={job.id}>
+                    // `last_run` is the most recent run, so `running` here means
+                    // this job is backing up right now.
+                    <TableRow key={job.id} active={job.last_run?.status === 'running'}>
                       <TableCell className="font-medium">
                         <Link to={`/jobs/${job.id}`} className="text-primary hover:underline">
                           {job.name}
