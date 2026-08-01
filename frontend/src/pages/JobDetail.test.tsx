@@ -164,7 +164,7 @@ beforeEach(() => {
   vi.mocked(api.getJobCommands).mockResolvedValue(makeCommands())
   vi.mocked(api.getJobRuns).mockResolvedValue([])
   vi.mocked(api.getJobSnapshots).mockResolvedValue([])
-  vi.mocked(api.unlockJob).mockResolvedValue({ output: 'unlock successful' })
+  vi.mocked(api.unlockJob).mockResolvedValue({ removed: [], remaining: [], output: '' })
   vi.mocked(api.triggerRun).mockResolvedValue({ run_id: 'run-new' })
   vi.mocked(api.triggerPrune).mockResolvedValue({ run_id: 'prune-new' })
   vi.mocked(api.listSourceMounts).mockResolvedValue(['documents', 'photos'])
@@ -734,19 +734,110 @@ describe('JobDetail', () => {
     })
   })
 
-  describe('unlock output', () => {
-    it('shows unlock output after successful unlock', async () => {
+  describe('unlock result', () => {
+    // `restic unlock` exits 0 whether it removed every lock or none of them,
+    // so the page must report the locks the server saw disappear — never the
+    // fact that the request succeeded. Reporting the latter is what left an
+    // operator with a repository that stayed locked and a page that said the
+    // unlock had worked.
+    async function clickUnlock() {
       const user = userEvent.setup()
-      vi.mocked(api.unlockJob).mockResolvedValue({ output: 'successfully removed 1 locks' })
       vi.mocked(api.getJobRuns).mockResolvedValue([
         makeRun({ status: 'success', check_status: 'passed' }),
       ])
       renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
       await waitFor(() => screen.getByRole('button', { name: /unlock/i }))
       await user.click(screen.getByRole('button', { name: /unlock/i }))
-      await waitFor(() =>
-        expect(screen.getByText(/removed.*lock|successfully|output/i)).toBeInTheDocument()
-      )
+    }
+
+    it('names each lock it removed', async () => {
+      vi.mocked(api.unlockJob).mockResolvedValue({
+        removed: [
+          {
+            id: 'a'.repeat(64),
+            short_id: 'aaaaaaaa',
+            created_at: '2026-08-01T20:34:31Z',
+            age_seconds: 312,
+            hostname: 'ff4ff8965bb1',
+            username: 'root',
+            pid: 1,
+            exclusive: true,
+          },
+        ],
+        remaining: [],
+        output: 'successfully removed 1 locks',
+      })
+      await clickUnlock()
+
+      await waitFor(() => expect(screen.getByText(/removed 1 lock/i)).toBeInTheDocument())
+      expect(screen.getByText(/aaaaaaaa/)).toBeInTheDocument()
+      expect(screen.getByText(/exclusive/i)).toBeInTheDocument()
+      expect(screen.getByText(/ff4ff8965bb1/)).toBeInTheDocument()
+      expect(screen.getByText(/pid 1/i)).toBeInTheDocument()
+    })
+
+    it('says plainly when there was nothing to remove', async () => {
+      vi.mocked(api.unlockJob).mockResolvedValue({ removed: [], remaining: [], output: '' })
+      await clickUnlock()
+
+      await waitFor(() => expect(screen.getByText(/no locks/i)).toBeInTheDocument())
+    })
+
+    it('warns when a lock survived instead of claiming success', async () => {
+      vi.mocked(api.unlockJob).mockResolvedValue({
+        removed: [],
+        remaining: [
+          {
+            id: 'b'.repeat(64),
+            short_id: 'bbbbbbbb',
+            created_at: null,
+            age_seconds: null,
+            hostname: null,
+            username: null,
+            pid: null,
+            exclusive: null,
+          },
+        ],
+        output: '',
+      })
+      await clickUnlock()
+
+      await waitFor(() => expect(screen.getByText(/could not be removed/i)).toBeInTheDocument())
+      expect(screen.getByText(/bbbbbbbb/)).toBeInTheDocument()
+      expect(screen.queryByText(/^removed \d+ lock/i)).not.toBeInTheDocument()
+    })
+
+    it('describes a lock whose metadata could not be read', async () => {
+      vi.mocked(api.unlockJob).mockResolvedValue({
+        removed: [
+          {
+            id: 'c'.repeat(64),
+            short_id: 'cccccccc',
+            created_at: null,
+            age_seconds: null,
+            hostname: null,
+            username: null,
+            pid: null,
+            exclusive: null,
+          },
+        ],
+        remaining: [],
+        output: '',
+      })
+      await clickUnlock()
+
+      await waitFor(() => expect(screen.getByText(/removed 1 lock/i)).toBeInTheDocument())
+      expect(screen.getByText(/cccccccc/)).toBeInTheDocument()
+    })
+
+    it('shows the server error when the repository could not be reached', async () => {
+      vi.mocked(api.unlockJob).mockRejectedValue({
+        status: 503,
+        data: { detail: 'The destination is probably not mounted.' },
+      })
+      await clickUnlock()
+
+      await waitFor(() => expect(screen.getByText(/not mounted/i)).toBeInTheDocument())
     })
   })
 

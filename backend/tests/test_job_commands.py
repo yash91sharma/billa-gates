@@ -269,6 +269,17 @@ async def test_metadata_steps_match_their_wrappers():
     assert steps["parent_lookup"]["argv"] == restic.build_latest_snapshot_args()
 
 
+async def test_the_two_unlocks_are_shown_as_the_different_commands_they_are():
+    """The pre-run step removes only what restic judges stale; the button
+    removes every lock in the repository. Rendering them as one command would
+    tell an operator their scheduled backup clears locks it does not clear."""
+    steps = _by_step(job_commands.build_job_commands(_make_job()))
+
+    assert steps["unlock"]["argv"] == ["restic", "unlock"]
+    assert steps["unlock_manual"]["argv"] == ["restic", "unlock", "--remove-all"]
+    assert "--remove-all" in steps["unlock_manual"]["command"]
+
+
 async def test_steps_are_listed_in_pipeline_order():
     job = _make_job(**FULL_RETENTION)
     steps = [
@@ -504,6 +515,7 @@ async def test_run_backup_uses_the_options_and_retention_the_preview_shows(engin
 REAL_LATEST_SNAPSHOT_ID = restic.restic_latest_snapshot_id
 
 PARENT_ID = "b" * 64
+LOCK_ID = "c" * 64
 _SUBSET_FLAG_RE = re.compile(r"^--read-data-subset=\d+%$")
 
 
@@ -513,6 +525,8 @@ def _normalize(argv: List[str]) -> tuple:
     for index, token in enumerate(argv):
         if index > 0 and argv[index - 1] == "--parent":
             out.append(job_commands.PARENT_SNAPSHOT_PLACEHOLDER)
+        elif index == 3 and argv[:3] == ["restic", "cat", "lock"]:
+            out.append(job_commands.LOCK_ID_PLACEHOLDER)
         elif _SUBSET_FLAG_RE.match(token):
             out.append(
                 f"--read-data-subset={job_commands.CHECK_SUBSET_PERCENT_PLACEHOLDER}%"
@@ -539,6 +553,10 @@ def _recording_spawn(recorded: List[List[str]]):
             return _make_process(0, stdout="{}")
         if argv[:2] == ["restic", "snapshots"]:
             return _make_process(0, stdout=json.dumps([{"id": PARENT_ID}]))
+        # A locked repository, so Unlock's per-lock describe step is exercised
+        # too — otherwise the preview would list a command nothing ever runs.
+        if argv[:3] == ["restic", "list", "locks"]:
+            return _make_process(0, stdout=f"{LOCK_ID}\n")
         if argv[:2] == ["restic", "backup"]:
             summary = {"message_type": "summary", "snapshot_id": "a" * 64}
             return _make_process(0, stdout=json.dumps(summary))
@@ -664,7 +682,11 @@ async def test_on_demand_commands_are_the_ones_the_buttons_run():
     steps = _by_step(job_commands.build_job_commands(_make_job()))
 
     assert steps["prune"]["argv"] == restic.build_prune_args()
-    assert steps["unlock_manual"]["argv"] == restic.build_unlock_args()
+    assert steps["unlock_manual"]["argv"] == restic.build_unlock_args(remove_all=True)
+    assert steps["inspect_locks"]["argv"] == restic.build_list_locks_args()
+    assert steps["describe_lock"]["argv"] == restic.build_cat_lock_args(
+        job_commands.LOCK_ID_PLACEHOLDER
+    )
     assert steps["check_structural"]["argv"] == restic.build_check_args(
         "structural", None
     )
@@ -736,7 +758,8 @@ async def test_get_commands_lists_the_button_triggered_commands_separately(clien
     assert on_demand["prune"]["command"] == "restic prune"
     assert on_demand["check_structural"]["command"] == "restic check"
     assert on_demand["check_full"]["command"] == "restic check --read-data"
-    assert on_demand["unlock_manual"]["command"] == "restic unlock"
+    assert on_demand["unlock_manual"]["command"] == "restic unlock --remove-all"
+    assert on_demand["inspect_locks"]["command"] == "restic list locks --no-lock"
     assert "--read-data-subset=" in on_demand["check_subset"]["command"]
     # Each one has to name the user action that issues it, so the page can't
     # read as "this is what your schedule does".

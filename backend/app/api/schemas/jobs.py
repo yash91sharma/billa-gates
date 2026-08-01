@@ -424,6 +424,39 @@ class JobCommandResponse(BaseModel):
     command: Optional[str] = None
 
 
+class LockInfo(BaseModel):
+    """One restic lock, described for the operator.
+
+    Everything but the id is optional: this describes locks that have just been
+    deleted, and a lock restic could not describe was still removed. Naming it
+    by id beats dropping it from the report.
+    """
+
+    id: str
+    short_id: str
+    created_at: Optional[UTCDateTime] = None
+    age_seconds: Optional[int] = None
+    hostname: Optional[str] = None
+    username: Optional[str] = None
+    pid: Optional[int] = None
+    exclusive: Optional[bool] = None
+
+
+class UnlockResponse(BaseModel):
+    """What the Unlock button actually did.
+
+    `removed` and `remaining` are computed by listing the repository's locks on
+    both sides of the unlock, never from restic's exit code — `restic unlock`
+    exits 0 whether it deleted every lock or none of them, which is how this
+    endpoint used to report success while the repository stayed locked and
+    every subsequent run failed.
+    """
+
+    removed: List[LockInfo]
+    remaining: List[LockInfo]
+    output: str
+
+
 class JobCheckRequest(BaseModel):
     """Payload to trigger a manual integrity check."""
 

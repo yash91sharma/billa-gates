@@ -1,5 +1,7 @@
 """Tests for POST/GET/PUT/DELETE /api/jobs and sub-routes."""
 
+import contextlib
+import json
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -1252,15 +1254,154 @@ async def test_enable_not_found(client):
 # ── POST /api/jobs/{id}/unlock ────────────────────────────────────────────────
 
 
-async def test_unlock_job(client):
+_LOCK_A = "a" * 64
+_LOCK_B = "b" * 64
+
+
+def _lock_json(**over) -> str:
+    body = {
+        "time": "2026-08-01T13:34:31.950505756-07:00",
+        "exclusive": True,
+        "hostname": "ff4ff8965bb1",
+        "username": "root",
+        "pid": 1,
+    }
+    body.update(over)
+    return json.dumps(body)
+
+
+@contextlib.contextmanager
+def _repo_locks(before, after, *, unlock=(0, "successfully removed 1 locks", "")):
+    """Stage `restic list locks` answering `before`, then `after`.
+
+    The two listings are what the route compares — restic's own exit code says
+    nothing, since `unlock` exits 0 whether it removed everything or nothing.
+    """
+    listings = iter([before, after])
+
+    async def fake_list(*args, **kwargs):
+        return (0, "".join(f"{i}\n" for i in next(listings)), "")
+
+    async def fake_cat(repo_path, password, lock_id, *args, **kwargs):
+        return (0, _lock_json(exclusive=lock_id == _LOCK_A), "")
+
+    async def fake_unlock(*args, **kwargs):
+        return unlock
+
+    with (
+        patch("app.services.restic.restic_list_locks", side_effect=fake_list),
+        patch("app.services.restic.restic_cat_lock", side_effect=fake_cat),
+        patch("app.services.restic.restic_unlock", side_effect=fake_unlock) as u,
+    ):
+        yield u
+
+
+async def test_unlock_job_reports_the_locks_that_were_removed(client):
+    """The response names what went, because that is the only thing the
+    operator can act on — and the thing restic's exit code will not tell them.
+    """
     with patch("os.path.isdir", return_value=True):
         created = (await client.post("/api/jobs", json=make_job_payload())).json()
-    with patch(
-        "app.services.restic.restic_unlock", return_value=(0, "Lock removed", "")
+
+    with _repo_locks(before=[_LOCK_A, _LOCK_B], after=[]):
+        resp = await client.post(f"/api/jobs/{created['id']}/unlock")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [lock["id"] for lock in body["removed"]] == [_LOCK_A, _LOCK_B]
+    assert body["removed"][0]["short_id"] == "a" * 8
+    assert body["removed"][0]["exclusive"] is True
+    assert body["removed"][0]["hostname"] == "ff4ff8965bb1"
+    assert body["removed"][0]["pid"] == 1
+    assert body["removed"][0]["age_seconds"] is not None
+    assert body["remaining"] == []
+
+
+async def test_unlock_job_forces_removal_of_locks_restic_calls_fresh(client):
+    """The button's whole purpose: a lock restic will not touch on its own
+    (young, or written by a container that no longer exists). Bare `unlock`
+    would exit 0 having removed nothing."""
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    with _repo_locks(before=[_LOCK_A], after=[]) as unlock:
+        await client.post(f"/api/jobs/{created['id']}/unlock")
+
+    assert unlock.await_args.kwargs["remove_all"] is True
+
+
+async def test_unlock_job_on_a_repository_with_no_locks_says_so(client):
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    with _repo_locks(before=[], after=[]):
+        resp = await client.post(f"/api/jobs/{created['id']}/unlock")
+
+    assert resp.status_code == 200
+    assert resp.json()["removed"] == []
+    assert resp.json()["remaining"] == []
+
+
+async def test_unlock_job_reports_a_lock_that_survived(client):
+    """rc=0 with the lock still there is exactly the state this endpoint used
+    to report as success."""
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    with _repo_locks(before=[_LOCK_A], after=[_LOCK_A]):
+        resp = await client.post(f"/api/jobs/{created['id']}/unlock")
+
+    body = resp.json()
+    assert body["removed"] == []
+    assert [lock["id"] for lock in body["remaining"]] == [_LOCK_A]
+
+
+async def test_unlock_job_names_a_lock_whose_metadata_cannot_be_read(client):
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    listings = iter([[_LOCK_A], []])
+
+    async def fake_list(*args, **kwargs):
+        return (0, "".join(f"{i}\n" for i in next(listings)), "")
+
+    with (
+        patch("app.services.restic.restic_list_locks", side_effect=fake_list),
+        patch("app.services.restic.restic_cat_lock", return_value=(1, "", "gone")),
+        patch("app.services.restic.restic_unlock", return_value=(0, "", "")),
     ):
         resp = await client.post(f"/api/jobs/{created['id']}/unlock")
-    assert resp.status_code == 200
-    assert "output" in resp.json()
+
+    body = resp.json()
+    assert [lock["id"] for lock in body["removed"]] == [_LOCK_A]
+    assert body["removed"][0]["hostname"] is None
+
+
+async def test_unlock_job_on_an_unreachable_repository_is_503(client):
+    """A detached drive is not an unlocked repository — same rule as
+    GET /snapshots, and the opposite of reporting success."""
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    with patch(
+        "app.services.restic.restic_list_locks",
+        return_value=(10, "", "Fatal: repository does not exist"),
+    ):
+        resp = await client.post(f"/api/jobs/{created['id']}/unlock")
+
+    assert resp.status_code == 503
+    assert "does not exist" in resp.json()["detail"]
+
+
+async def test_unlock_job_failing_unlock_is_503_not_a_silent_success(client):
+    with patch("os.path.isdir", return_value=True):
+        created = (await client.post("/api/jobs", json=make_job_payload())).json()
+
+    with _repo_locks(before=[_LOCK_A], after=[], unlock=(1, "", "permission denied")):
+        resp = await client.post(f"/api/jobs/{created['id']}/unlock")
+
+    assert resp.status_code == 503
+    assert "permission denied" in resp.json()["detail"]
 
 
 async def test_unlock_job_active_run_returns_409(client):

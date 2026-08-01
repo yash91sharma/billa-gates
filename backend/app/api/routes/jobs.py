@@ -21,8 +21,10 @@ from app.api.schemas.jobs import (
     JobCreate,
     JobResponse,
     JobUpdate,
+    LockInfo,
     RunSummarySchema,
     SnapshotResponse,
+    UnlockResponse,
     _validate_schedule_value,
 )
 from app.core import fs
@@ -774,14 +776,80 @@ async def disable_job(
 # ── POST /api/jobs/{id}/unlock ────────────────────────────────────────────────
 
 
-@router.post("/{job_id}/unlock")
+# Metadata is fetched per lock, so a repository holding a pathological number
+# of them would mean one restic process each. Past this many, the extra locks
+# are still reported — by id, which is what identifies them — but not described.
+_LOCK_DETAIL_LIMIT = 20
+
+
+@log_call
+async def _describe_locks(
+    repo_path: str, password: str, timeout: int
+) -> list[dict[str, Any]]:
+    """Every lock in the repository, described.
+
+    Raises 503 rather than returning an empty list when the listing itself
+    fails: a detached destination is not an unlocked repository, and reporting
+    "no locks" for one is the same class of lie as `GET /snapshots` returning
+    `200 []` for a drive that is not mounted.
+    """
+    rc, stdout, stderr = await restic.restic_list_locks(repo_path, password, timeout)
+    if rc != 0:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Could not read the lock list for the repository at "
+                f"'{repo_path}'. The destination is probably not mounted.\n\n"
+                f"restic: {(stderr or stdout).strip()}"
+            ),
+        )
+
+    now = datetime.now(timezone.utc)
+    locks: list[dict[str, Any]] = []
+    for index, lock_id in enumerate(restic.parse_lock_ids(stdout)):
+        detail_stdout = ""
+        if index < _LOCK_DETAIL_LIMIT:
+            cat_rc, cat_stdout, _ = await restic.restic_cat_lock(
+                repo_path, password, lock_id, timeout
+            )
+            if cat_rc == 0:
+                detail_stdout = cat_stdout
+        info = restic.parse_lock_details(lock_id, detail_stdout)
+        created_at = info.get("created_at")
+        info["age_seconds"] = (
+            int((now - created_at).total_seconds()) if created_at else None
+        )
+        locks.append(info)
+    return locks
+
+
+@router.post("/{job_id}/unlock", response_model=UnlockResponse)
 @log_call
 async def unlock_job(
     job_id: str, session: AsyncSession = Depends(get_session)
-) -> dict[str, str]:
-    """Run 'restic unlock' on the job's repository.
+) -> dict[str, Any]:
+    """Remove every lock in the job's repository, and report which ones went.
 
-    Returns 409 if a backup run is currently active (the lock may be in use).
+    `--remove-all`, not bare `restic unlock`. restic removes only the locks it
+    judges *stale*, and it judges nothing stale that is younger than ~30
+    minutes or was written under another hostname — which describes every lock
+    left behind by a container killed mid-prune and then recreated, since a new
+    container id is a new hostname. That is the case this button exists for,
+    and the narrow command answers it by exiting 0 having removed nothing.
+
+    Force-removing is safe here because the lock can only be this job's: a
+    repository belongs to exactly one job (destination_label + name is unique
+    per destination), so no other job's run can hold a lock in it, and a run of
+    *this* job is refused below with 409.
+
+    The lock list is read before and after, and the response names the locks
+    that actually disappeared. Reporting from restic's exit code instead is
+    what made this endpoint return 200 with an empty body while the repository
+    stayed locked and every following run failed — leaving the operator no way
+    to tell a working unlock from a no-op.
+
+    Returns 409 while a run of this job is in flight (that run holds the lock),
+    and 503 when the repository cannot be reached or the unlock itself fails.
     """
     job = await _get_job_or_404(job_id, session)
 
@@ -794,12 +862,39 @@ async def unlock_job(
     settings = await session.get(AppSettings, 1)
     timeout = settings.metadata_timeout_seconds if settings else 600
     repo_path = repository.build_repo_path(job.destination_label, job.name)
-    _rc, stdout, stderr = await restic.restic_unlock(
-        repo_path=repo_path, password=job.restic_password, timeout_seconds=timeout
-    )
-    logger.info("repository unlocked job_id=%s", job_id)
 
-    return {"output": stdout or stderr}
+    before = await _describe_locks(repo_path, job.restic_password, timeout)
+
+    rc, stdout, stderr = await restic.restic_unlock(
+        repo_path=repo_path,
+        password=job.restic_password,
+        timeout_seconds=timeout,
+        remove_all=True,
+    )
+    if rc != 0:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"restic could not remove the locks on the repository at "
+                f"'{repo_path}'.\n\nrestic: {(stderr or stdout).strip()}"
+            ),
+        )
+
+    remaining = await _describe_locks(repo_path, job.restic_password, timeout)
+    remaining_ids = {lock["id"] for lock in remaining}
+    removed = [lock for lock in before if lock["id"] not in remaining_ids]
+
+    logger.info(
+        "unlock job_id=%s removed=%d remaining=%d",
+        job_id,
+        len(removed),
+        len(remaining),
+    )
+    return {
+        "removed": [LockInfo(**lock) for lock in removed],
+        "remaining": [LockInfo(**lock) for lock in remaining],
+        "output": (stdout or stderr).strip(),
+    }
 
 
 # ── GET /api/jobs/{id}/runs ───────────────────────────────────────────────────

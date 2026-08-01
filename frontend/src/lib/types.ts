@@ -123,6 +123,34 @@ export interface Snapshot {
   size_bytes: number | null
 }
 
+/** One restic lock. Everything but the id is optional: this describes locks
+ *  that have just been deleted, and a lock restic could not describe was still
+ *  removed — naming it by id beats dropping it from the report. */
+export interface LockInfo {
+  id: string
+  short_id: string
+  created_at: string | null
+  age_seconds: number | null
+  hostname: string | null
+  username: string | null
+  pid: number | null
+  exclusive: boolean | null
+}
+
+/** What Unlock actually did.
+ *
+ * `removed` and `remaining` come from the server listing the repository's
+ * locks on both sides of the unlock, never from restic's exit code — `restic
+ * unlock` exits 0 whether it deleted every lock or none of them. Render both:
+ * a `removed` of length 0 with a non-empty `remaining` is the case that used
+ * to be reported as success while every backup kept failing.
+ */
+export interface UnlockResult {
+  removed: LockInfo[]
+  remaining: LockInfo[]
+  output: string
+}
+
 export interface AppSettings {
   id: number
   ntfy_server_url: string

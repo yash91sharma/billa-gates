@@ -20,7 +20,7 @@ import RunStatusBadge from '../components/RunStatusBadge'
 import TriggeredByIcon from '../components/TriggeredByIcon'
 import { StopRunDialog } from './Dashboard'
 import * as api from '../lib/api'
-import type { BackupRun, JobCommand } from '../lib/types'
+import type { BackupRun, JobCommand, LockInfo, UnlockResult } from '../lib/types'
 import { formatBytes, parseApiError, type ConflictingJob } from '../lib/utils'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
@@ -63,13 +63,89 @@ const ACTION_HELP = {
   cancelEdit:
     'Closes the edit form and discards any unsaved changes. The job keeps its current settings.',
   unlock:
-    'Removes stale restic locks from this job’s repository — the ones left behind when a previous run was killed mid-write and every later run fails with "repository is already locked". Snapshots and their data are not touched.',
+    'Removes every restic lock from this job’s repository — including the ones restic refuses to clear on its own, which is what a run killed mid-write leaves behind when every later run then fails with "repository is already locked". Only this job’s repository is touched, and snapshots and their data are not. The result lists the locks that were actually removed.',
   unlockDisabled:
     'Unavailable while this job has a run in progress or an integrity check still finishing — that run holds the lock, and removing a live lock risks corrupting the repository.',
 } as const
 
 function shouldPoll(runs: BackupRun[]): boolean {
   return runs.some((r) => r.status === 'running' || r.check_status === null)
+}
+
+function formatLockAge(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`
+  return `${Math.floor(seconds / 86400)}d`
+}
+
+/** One lock, in the terms that decide what the operator does next: whether it
+ *  blocked everything or only writers, who held it, and how old it was. */
+function LockLine({ lock }: { lock: LockInfo }) {
+  const held = [
+    lock.pid != null ? `PID ${lock.pid}` : null,
+    lock.hostname ? `on ${lock.hostname}` : null,
+  ]
+    .filter(Boolean)
+    .join(' ')
+  return (
+    <li className="font-mono text-xs">
+      <span className="font-semibold">{lock.short_id}</span>
+      {lock.exclusive != null && <> · {lock.exclusive ? 'exclusive' : 'shared'}</>}
+      {held && <> · held by {held}</>}
+      {lock.age_seconds != null && <> · {formatLockAge(lock.age_seconds)} old</>}
+    </li>
+  )
+}
+
+/** What Unlock did, taken from the lock listings the server made on both sides
+ *  of the removal.
+ *
+ * Never phrased from the fact that the request succeeded: `restic unlock`
+ * exits 0 whether it removed every lock or none of them, so a page that
+ * reports "unlocked" on a 200 tells an operator their repository is usable at
+ * the exact moment it is not. The three outcomes are visually distinct on
+ * purpose — locks removed, nothing there to remove, and locks that survived —
+ * because only the last one means the job is still stuck.
+ */
+function UnlockReport({ result }: { result: UnlockResult }) {
+  const { removed, remaining } = result
+  return (
+    <div className="space-y-2">
+      {removed.length > 0 ? (
+        <div className="rounded-lg border border-success/30 bg-success-subtle px-3 py-2 text-sm text-success-subtle-foreground">
+          <p>
+            Removed {removed.length} lock{removed.length === 1 ? '' : 's'}:
+          </p>
+          <ul className="mt-1 space-y-0.5">
+            {removed.map((lock) => (
+              <LockLine key={lock.id} lock={lock} />
+            ))}
+          </ul>
+        </div>
+      ) : (
+        remaining.length === 0 && (
+          <p className="rounded-lg border border-border bg-muted px-3 py-2 text-sm text-muted-foreground">
+            No locks were present on this repository — nothing to remove.
+          </p>
+        )
+      )}
+      {remaining.length > 0 && (
+        <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm">
+          <p>
+            {remaining.length} lock{remaining.length === 1 ? '' : 's'} could not be removed. Another
+            process may be using this repository — check that no restic command is running against
+            it, then try again.
+          </p>
+          <ul className="mt-1 space-y-0.5">
+            {remaining.map((lock) => (
+              <LockLine key={lock.id} lock={lock} />
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
 }
 
 /** Renders the server's command strings verbatim.
@@ -122,7 +198,7 @@ export default function JobDetail() {
   const [tab, setTab] = useState<Tab>('runs')
   const [runError, setRunError] = useState<string | null>(null)
   const [pruneError, setPruneError] = useState<string | null>(null)
-  const [unlockOutput, setUnlockOutput] = useState<string | null>(null)
+  const [unlockResult, setUnlockResult] = useState<UnlockResult | null>(null)
   const [unlockError, setUnlockError] = useState<string | null>(null)
   const [isEditing, setIsEditing] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
@@ -246,12 +322,14 @@ export default function JobDetail() {
   async function handleUnlock() {
     if (!job) return
     setUnlockError(null)
-    setUnlockOutput(null)
+    setUnlockResult(null)
     try {
-      const result = await api.unlockJob(job.id)
-      setUnlockOutput(result.output)
-    } catch {
-      setUnlockError('Failed to unlock repository.')
+      setUnlockResult(await api.unlockJob(job.id))
+    } catch (err) {
+      // The server's reason is the useful half here — an unreachable
+      // destination and a refused removal need different actions from the
+      // operator, and "failed to unlock" tells them apart from neither.
+      setUnlockError(parseApiError(err).message ?? 'Failed to unlock repository.')
     }
   }
 
@@ -384,11 +462,7 @@ export default function JobDetail() {
 
         {runError && <p className="text-sm text-destructive">{runError}</p>}
         {pruneError && <p className="text-sm text-destructive">{pruneError}</p>}
-        {unlockOutput && (
-          <p className="rounded-lg border border-success/30 bg-success-subtle px-3 py-2 text-sm text-success-subtle-foreground">
-            Output: {unlockOutput}
-          </p>
-        )}
+        {unlockResult && <UnlockReport result={unlockResult} />}
         {unlockError && <p className="text-sm text-destructive">{unlockError}</p>}
 
         <div className="flex items-start gap-2.5 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs">

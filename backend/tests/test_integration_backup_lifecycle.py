@@ -101,6 +101,15 @@ async def test_full_backup_lifecycle_success(client: AsyncClient) -> None:
             "app.services.restic.restic_cat_config",
             new=AsyncMock(return_value=(0, "{}", "")),
         ),
+        # Without this the Step 4.5 auto-unlock reaches the *real* restic
+        # binary whenever one is on PATH (it is, in the dev container): the
+        # suite's rule is that no test invokes a real restic, and the variable
+        # cost of spawning one is what intermittently pushed this test past the
+        # 5s poll budget below.
+        patch(
+            "app.services.restic.restic_unlock",
+            new=AsyncMock(return_value=(0, "", "")),
+        ),
         patch(
             "app.services.restic.restic_backup",
             new=AsyncMock(
@@ -208,6 +217,15 @@ async def test_full_backup_lifecycle_failure(client: AsyncClient) -> None:
         patch(
             "app.services.restic.restic_cat_config",
             new=AsyncMock(return_value=(0, "{}", "")),
+        ),
+        # Without this the Step 4.5 auto-unlock reaches the *real* restic
+        # binary whenever one is on PATH (it is, in the dev container): the
+        # suite's rule is that no test invokes a real restic, and the variable
+        # cost of spawning one is what intermittently pushed this test past the
+        # 5s poll budget below.
+        patch(
+            "app.services.restic.restic_unlock",
+            new=AsyncMock(return_value=(0, "", "")),
         ),
         patch(
             "app.services.restic.restic_backup",

@@ -45,6 +45,7 @@ from tests.conftest import make_fake_process
 REPO = "/destinations/main/photos"
 PASSWORD = "s3cr3t"
 SOURCE = "/sources/documents"
+LOCK_ID = "a" * 64
 
 # Commands issued as part of a run, and therefore cancelable: each takes a
 # `run_id` and must be reachable through the process registry while it runs.
@@ -58,13 +59,14 @@ RUN_SCOPED = (
     "check",
     "unlock",
 )
-# `version` runs at startup and `snapshots` inside an API request — neither
-# belongs to a run, so neither takes a run_id. They are still restic
-# subprocesses and still need the timeout, the SIGTERM and the containment.
-ALL_COMMANDS = RUN_SCOPED + ("version", "snapshots")
+# `version` runs at startup, and `snapshots`, `list_locks` and `cat_lock`
+# inside an API request — none belongs to a run, so none takes a run_id. They
+# are still restic subprocesses and still need the timeout, the SIGTERM and the
+# containment.
+ALL_COMMANDS = RUN_SCOPED + ("version", "snapshots", "list_locks", "cat_lock")
 # Everything except `restic version`, which is the one command that needs no
 # repository and is given no repository environment.
-REPO_SCOPED = RUN_SCOPED + ("snapshots",)
+REPO_SCOPED = RUN_SCOPED + ("snapshots", "list_locks", "cat_lock")
 
 # The builder each command's argv must come from. Named here rather than
 # inlined so a command added without a builder has nowhere to be listed.
@@ -79,6 +81,8 @@ BUILDERS: Dict[str, str] = {
     "unlock": "build_unlock_args",
     "version": "build_version_args",
     "snapshots": "build_snapshots_args",
+    "list_locks": "build_list_locks_args",
+    "cat_lock": "build_cat_lock_args",
 }
 
 
@@ -123,6 +127,10 @@ async def _invoke(
         )
     if name == "version":
         return await restic.restic_version()
+    if name == "list_locks":
+        return await restic.restic_list_locks(REPO, PASSWORD, timeout_seconds)
+    if name == "cat_lock":
+        return await restic.restic_cat_lock(REPO, PASSWORD, LOCK_ID, timeout_seconds)
     if name == "snapshots":
         return await snapshot_listing.list_snapshots(
             REPO, PASSWORD, timeout_seconds=timeout_seconds, use_cache=False

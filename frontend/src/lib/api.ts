@@ -8,6 +8,7 @@ import type {
   RenameDestinationResult,
   ResticUpdateCheck,
   Snapshot,
+  UnlockResult,
 } from './types'
 
 const BASE = '/api'
@@ -69,7 +70,7 @@ export const enableJob = (id: string) =>
 export const disableJob = (id: string) =>
   request<{ id: string; enabled: boolean }>(`/jobs/${id}/disable`, { method: 'POST' })
 export const unlockJob = (id: string) =>
-  request<{ output: string }>(`/jobs/${id}/unlock`, { method: 'POST' })
+  request<UnlockResult>(`/jobs/${id}/unlock`, { method: 'POST' })
 export const getJobRuns = (id: string) => request<BackupRun[]>(`/jobs/${id}/runs`)
 export const getJobSnapshots = (id: string) => request<Snapshot[]>(`/jobs/${id}/snapshots`)
 export const getJobCommands = (id: string) => request<JobCommand[]>(`/jobs/${id}/commands`)

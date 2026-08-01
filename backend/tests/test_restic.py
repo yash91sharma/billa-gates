@@ -14,6 +14,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.services.restic import (
+    build_cat_lock_args,
+    build_list_locks_args,
+    build_unlock_args,
+    parse_lock_details,
+    parse_lock_ids,
     restic_backup,
     restic_cat_config,
     restic_check,
@@ -1294,6 +1299,131 @@ async def test_unlock_default_timeout_is_60_seconds():
 
     sig = inspect.signature(restic_unlock)
     assert sig.parameters["timeout_seconds"].default == 60
+
+
+# ── the two unlocks: stale-only vs. force ────────────────────────────────────
+#
+# restic only removes a lock it judges *stale*, and it judges nothing stale
+# that is younger than 30 minutes or was written under a different hostname —
+# which is every lock a killed-and-recreated container leaves behind, since a
+# new container id is a new hostname. So the operator-triggered button needs
+# --remove-all, while the automatic pre-run step must not have it: removing a
+# lock another process is still holding is the two-writer accident locks exist
+# to prevent.
+
+
+def test_build_unlock_args_is_stale_only_by_default():
+    assert build_unlock_args() == ["restic", "unlock"]
+
+
+def test_build_unlock_args_can_force_remove_every_lock():
+    assert build_unlock_args(remove_all=True) == ["restic", "unlock", "--remove-all"]
+
+
+async def test_unlock_passes_remove_all_through_to_the_argv():
+    proc = _make_process(0, stdout="successfully removed 2 locks")
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["argv"] = list(args)
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await restic_unlock(REPO, PASSWORD, remove_all=True)
+
+    assert captured["argv"] == build_unlock_args(remove_all=True)
+
+
+async def test_unlock_without_remove_all_never_sends_the_flag():
+    proc = _make_process(0)
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["argv"] = list(args)
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await restic_unlock(REPO, PASSWORD)
+
+    assert "--remove-all" not in captured["argv"]
+
+
+# ── listing locks: what actually went ────────────────────────────────────────
+#
+# `restic unlock` exits 0 whether it removed every lock or none of them, so the
+# only way to report the truth is to read the lock list on both sides of it.
+
+
+def test_build_list_locks_args_never_takes_a_lock():
+    """This command runs precisely when the repository may be locked. Taking a
+    lock to ask what holds a lock would block on the answer."""
+    assert build_list_locks_args() == ["restic", "list", "locks", "--no-lock"]
+
+
+def test_build_cat_lock_args_never_takes_a_lock():
+    assert build_cat_lock_args("abc123") == [
+        "restic",
+        "cat",
+        "lock",
+        "abc123",
+        "--no-lock",
+    ]
+
+
+def test_parse_lock_ids_reads_one_id_per_line():
+    stdout = f"{'a' * 64}\n{'b' * 64}\n"
+    assert parse_lock_ids(stdout) == ["a" * 64, "b" * 64]
+
+
+def test_parse_lock_ids_of_an_unlocked_repository_is_empty():
+    assert parse_lock_ids("") == []
+    assert parse_lock_ids("\n\n") == []
+
+
+def test_parse_lock_ids_ignores_anything_that_is_not_an_id():
+    """A stray diagnostic on stdout must not become a phantom lock in the UI."""
+    stdout = f"repository 3fd2bce5 opened\n{'c' * 64}\nsomething else\n"
+    assert parse_lock_ids(stdout) == ["c" * 64]
+
+
+def test_parse_lock_details_reads_every_field_the_ui_shows():
+    lock_id = "d" * 64
+    stdout = json.dumps(
+        {
+            "time": "2026-08-01T13:34:31.950505756-07:00",
+            "exclusive": True,
+            "hostname": "ff4ff8965bb1",
+            "username": "root",
+            "pid": 1,
+        }
+    )
+    info = parse_lock_details(lock_id, stdout)
+
+    assert info["id"] == lock_id
+    assert info["short_id"] == "d" * 8
+    assert info["exclusive"] is True
+    assert info["hostname"] == "ff4ff8965bb1"
+    assert info["username"] == "root"
+    assert info["pid"] == 1
+    assert info["created_at"] is not None
+    assert info["created_at"].utcoffset().total_seconds() == 0
+
+
+def test_parse_lock_details_of_unreadable_output_still_names_the_lock():
+    """A lock whose metadata cannot be read was still removed, and saying so is
+    the whole point of the response. Never raise here."""
+    for stdout in ("", "not json", "[]", "null"):
+        info = parse_lock_details("e" * 64, stdout)
+        assert info["id"] == "e" * 64
+        assert info["short_id"] == "e" * 8
+        assert info["created_at"] is None
+        assert info["hostname"] is None
+
+
+def test_parse_lock_details_survives_fields_of_the_wrong_type():
+    info = parse_lock_details("f" * 64, json.dumps({"pid": "one", "exclusive": "yes"}))
+    assert info["pid"] is None
+    assert info["exclusive"] is None
 
 
 # ── restic_backup: flag coverage ──────────────────────────────────────────────

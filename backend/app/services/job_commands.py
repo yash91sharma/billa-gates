@@ -54,6 +54,11 @@ PARENT_SNAPSHOT_PLACEHOLDER: str = "<id-of-latest-snapshot>"
 # time, not from the job, so no stored value could be shown honestly here.
 CHECK_SUBSET_PERCENT_PLACEHOLDER: str = "<percent>"
 
+# And for the lock id: Unlock describes each lock it is about to remove, so the
+# id is whatever the repository happens to hold at click time — one command per
+# lock found, none at all on a repository that is not locked.
+LOCK_ID_PLACEHOLDER: str = "<id-of-each-lock>"
+
 # The repository password is never echoed back to the client — not in a job
 # response, and not here.
 MASKED_PASSWORD: str = "<this job's repository password>"
@@ -303,20 +308,60 @@ def _on_demand_commands(env: Dict[str, str]) -> List[Dict[str, Any]]:
             condition="Runs when you pick Full in the Integrity Check dialog.",
         ),
         _step(
-            "unlock_manual",
-            "Unlock",
+            "inspect_locks",
+            "Unlock — list locks",
             (
-                "Removes stale restic locks from this job's repository — the "
-                "ones left behind when a previous run was killed mid-write and "
-                "every later run fails with “repository is already locked”."
+                "Lists the locks currently held on this job's repository. Runs "
+                "twice around the unlock below, because `restic unlock` exits "
+                "0 whether it removed every lock or none of them — comparing "
+                "the two listings is what lets the result name the locks that "
+                "actually went."
             ),
-            restic.build_unlock_args(),
+            restic.build_list_locks_args(),
             env=env,
             runs=True,
             group=GROUP_ON_DEMAND,
             condition=(
-                "Runs when you click “Unlock”. The same command also runs "
-                "inside a backup — see “Clear stale locks” above."
+                "Runs when you click “Unlock”, before and after the removal. Read-only."
+            ),
+        ),
+        _step(
+            "describe_lock",
+            "Unlock — describe a lock",
+            (
+                "Reads one lock's owner, age and kind before it is removed, so "
+                "the result can say what was cleared instead of just how many. "
+                "Runs once per lock found, and not at all on a repository that "
+                "holds none."
+            ),
+            restic.build_cat_lock_args(LOCK_ID_PLACEHOLDER),
+            env=env,
+            runs=True,
+            group=GROUP_ON_DEMAND,
+            condition=(
+                f"Runs when you click “Unlock”. {LOCK_ID_PLACEHOLDER} is "
+                "resolved by the listing above. Read-only."
+            ),
+        ),
+        _step(
+            "unlock_manual",
+            "Unlock",
+            (
+                "Removes every restic lock from this job's repository, "
+                "including ones restic will not remove on its own — a lock "
+                "left by a run that was killed mid-write is not considered "
+                "stale for 30 minutes, and never at all once the container "
+                "that wrote it has been replaced. Snapshots and their data are "
+                "not touched."
+            ),
+            restic.build_unlock_args(remove_all=True),
+            env=env,
+            runs=True,
+            group=GROUP_ON_DEMAND,
+            condition=(
+                "Runs when you click “Unlock”. A backup runs the narrower "
+                "form of this command, without --remove-all — see “Clear "
+                "stale locks” above."
             ),
         ),
     ]

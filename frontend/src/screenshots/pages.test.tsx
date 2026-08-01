@@ -516,6 +516,45 @@ test('JobDetail - commands tab', async () => {
   await capture(`${OUT}/JobDetail-commands.png`)
 })
 
+test('JobDetail - unlock result', async () => {
+  // The block that reports what Unlock removed. jsdom cannot see any of this
+  // (the unit suite runs with css: false), and it is the only place in the app
+  // that has to distinguish "removed these" from "these survived" at a glance.
+  vi.mocked(api.unlockJob).mockResolvedValue({
+    removed: [
+      {
+        id: '1948602f9cc1a3e669696588096cef22af9b23345301ab408148046d91bf3894',
+        short_id: '1948602f',
+        created_at: '2026-06-01T11:52:00Z',
+        age_seconds: 480,
+        hostname: 'a2826ce112f1',
+        username: 'root',
+        pid: 1,
+        exclusive: true,
+      },
+    ],
+    remaining: [],
+    output: 'successfully removed 1 locks',
+  })
+  const result = renderPage('/jobs/:id', <JobDetail />)
+  cleanup = result.unmount
+  await waitFor(() => {
+    if (!result.container.textContent?.includes('Documents Backup')) {
+      throw new Error('job detail not ready')
+    }
+  })
+  const unlock = Array.from(result.container.querySelectorAll('button')).find(
+    (b) => b.textContent?.trim() === 'Unlock'
+  ) as HTMLElement
+  await userEvent.click(unlock)
+  await waitFor(() => {
+    if (!result.container.textContent?.includes('Removed 1 lock')) {
+      throw new Error('unlock result not ready')
+    }
+  })
+  await capture(`${OUT}/JobDetail--unlock-result.png`)
+})
+
 test('RunDetail - success', async () => {
   const result = renderPage('/runs/:id', <RunDetail />)
   cleanup = result.unmount

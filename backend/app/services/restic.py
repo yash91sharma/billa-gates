@@ -126,9 +126,49 @@ def build_latest_snapshot_args() -> List[str]:
     return [RESTIC_BIN, "snapshots", "--latest", "1", "--json", "--no-lock"]
 
 
-def build_unlock_args() -> List[str]:
-    """argv for stale-lock removal."""
-    return [RESTIC_BIN, "unlock"]
+def build_unlock_args(*, remove_all: bool = False) -> List[str]:
+    """argv for lock removal — stale-only by default, every lock with
+    `remove_all`.
+
+    The two callers need different commands, and the difference is not a
+    preference. Bare `restic unlock` removes only locks restic judges *stale*,
+    and it judges nothing stale that is younger than ~30 minutes or was written
+    under a hostname other than the current one. A container that is killed
+    mid-prune and then **recreated** (a new container id is a new hostname)
+    leaves exactly such a lock: every later run fails with "repository is
+    already locked", and bare `unlock` answers by exiting 0 having removed
+    nothing.
+
+    So the automatic pre-run step keeps the narrow form — force-removing a lock
+    another process is still holding is the two-writer accident locks exist to
+    prevent — and the operator-triggered Unlock button passes remove_all=True.
+    That button is safe precisely because a repository belongs to exactly one
+    job (destination_label + name is unique), so no other job's run can hold a
+    lock in it, and a run of *this* job is refused with 409 before we get here.
+    """
+    args = [RESTIC_BIN, "unlock"]
+    if remove_all:
+        args.append("--remove-all")
+    return args
+
+
+def build_list_locks_args() -> List[str]:
+    """argv for enumerating the repository's lock ids.
+
+    `--no-lock` is not an optimization here: this command runs precisely when
+    the repository may be locked, and taking a lock in order to ask what holds
+    a lock would block on the answer.
+    """
+    return [RESTIC_BIN, "list", "locks", "--no-lock"]
+
+
+def build_cat_lock_args(lock_id: str) -> List[str]:
+    """argv for one lock's metadata (who holds it, since when, exclusive?).
+
+    Read *before* removing, since the lock is gone afterwards — naming what was
+    removed is the whole point of the response.
+    """
+    return [RESTIC_BIN, "cat", "lock", lock_id, "--no-lock"]
 
 
 def build_prune_args() -> List[str]:
@@ -457,22 +497,133 @@ async def restic_unlock(
     timeout_seconds: int = 60,
     *,
     run_id: Optional[_uuid.UUID] = None,
+    remove_all: bool = False,
 ) -> Tuple[int, str, str]:
-    """Remove stale locks.
+    """Remove locks — stale ones by default, all of them with `remove_all`.
 
-    Called both during init-check stale-lock recovery and in Step 4.5
-    auto-unlock. A hung backend during unlock previously wedged the runner;
-    60s is far more than needed for a metadata-only delete on a healthy
-    backend.
+    Called during init-check stale-lock recovery and in Step 4.5 auto-unlock
+    (both stale-only), and from the Unlock button (`remove_all=True` — see
+    :func:`build_unlock_args` for why the button needs a different command).
+    A hung backend during unlock previously wedged the runner; 60s is far more
+    than needed for a metadata-only delete on a healthy backend.
+
+    **The exit code says nothing about what was removed.** restic exits 0
+    whether it deleted every lock or judged them all live and deleted none, so
+    a caller reporting success from rc=0 is guessing. Read the lock list on
+    both sides with :func:`restic_list_locks` instead.
     """
     return await _run_captured(
-        build_unlock_args(),
+        build_unlock_args(remove_all=remove_all),
         repo_path,
         password,
         timeout_seconds,
         run_id=run_id,
         timed_out_message="unlock timed out",
     )
+
+
+@log_call
+async def restic_list_locks(
+    repo_path: str,
+    password: str,
+    timeout_seconds: int = 60,
+    *,
+    run_id: Optional[_uuid.UUID] = None,
+) -> Tuple[int, str, str]:
+    """List the repository's lock ids, one per line on stdout.
+
+    Parse with :func:`parse_lock_ids`. A non-zero rc means the repository could
+    not be read at all (a detached destination), which is not the same as "no
+    locks" — the caller must keep those apart, exactly as the snapshots route
+    does.
+    """
+    return await _run_captured(
+        build_list_locks_args(),
+        repo_path,
+        password,
+        timeout_seconds,
+        run_id=run_id,
+        timed_out_message="list locks timed out",
+    )
+
+
+@log_call
+async def restic_cat_lock(
+    repo_path: str,
+    password: str,
+    lock_id: str,
+    timeout_seconds: int = 60,
+    *,
+    run_id: Optional[_uuid.UUID] = None,
+) -> Tuple[int, str, str]:
+    """One lock's metadata as JSON on stdout. Parse with
+    :func:`parse_lock_details`, which never raises: a lock whose metadata
+    cannot be read was still removed, and saying so still helps."""
+    return await _run_captured(
+        build_cat_lock_args(lock_id),
+        repo_path,
+        password,
+        timeout_seconds,
+        run_id=run_id,
+        timed_out_message="cat lock timed out",
+    )
+
+
+# `restic list locks` prints one 64-char hex id per line. Matching the shape
+# rather than taking every line keeps a stray diagnostic on stdout from
+# becoming a phantom lock in the UI.
+_LOCK_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+@log_call
+def parse_lock_ids(stdout: str) -> List[str]:
+    """The lock ids in a `restic list locks` response, in restic's order."""
+    return [
+        line.strip()
+        for line in stdout.splitlines()
+        if _LOCK_ID_RE.fullmatch(line.strip())
+    ]
+
+
+@log_call
+def parse_lock_details(lock_id: str, stdout: str) -> Dict[str, Any]:
+    """One lock described for the operator: who holds it, since when, and
+    whether it blocks everything or only writers.
+
+    Every field is optional and the function never raises. It is called while
+    reporting locks that have just been deleted, so a lock restic could not
+    describe must still come back named — an id alone is more useful than an
+    error, and an exception here would turn a successful unlock into a 500.
+    """
+    info: Dict[str, Any] = {
+        "id": lock_id,
+        "short_id": lock_id[:8],
+        "created_at": None,
+        "hostname": None,
+        "username": None,
+        "pid": None,
+        "exclusive": None,
+    }
+    try:
+        raw = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return info
+    if not isinstance(raw, dict):
+        return info
+
+    info["created_at"] = _parse_snapshot_time(raw.get("time"))
+    for key in ("hostname", "username"):
+        value = raw.get(key)
+        if isinstance(value, str) and value:
+            info[key] = value
+    # bool is a subclass of int, so the pid check must exclude it explicitly.
+    pid = raw.get("pid")
+    if isinstance(pid, int) and not isinstance(pid, bool):
+        info["pid"] = pid
+    exclusive = raw.get("exclusive")
+    if isinstance(exclusive, bool):
+        info["exclusive"] = exclusive
+    return info
 
 
 # ── The parent-snapshot lookup ───────────────────────────────────────────────
