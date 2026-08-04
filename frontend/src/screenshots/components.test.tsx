@@ -20,6 +20,7 @@ import CapacityBar from '../components/CapacityBar'
 import EmptyState from '../components/EmptyState'
 import FieldLabel from '../components/FieldLabel'
 import PageHeader from '../components/PageHeader'
+import RefreshCountdown from '../components/RefreshCountdown'
 import RunStatusBadge from '../components/RunStatusBadge'
 import ScheduleInput from '../components/ScheduleInput'
 import SnapshotList from '../components/SnapshotList'
@@ -337,4 +338,53 @@ test('CapacityBar - tones and unknown', async () => {
   )
   cleanup = result.unmount
   await capture(`${OUT}/CapacityBar.png`)
+})
+
+// ── RefreshCountdown — the three states of the Job detail freshness bar ───────
+//
+// Every prop is fixed rather than left to the clock, so these three PNGs are
+// byte-identical run to run and only move when the styling actually does.
+
+test('RefreshCountdown - auto-refresh on', async () => {
+  await WIDE()
+  const result = render(
+    <div style={{ width: 720, padding: 24 }}>
+      {/* A whole interval remaining reads as "1:00" whatever the wall clock. */}
+      <RefreshCountdown updatedAt={Date.now()} intervalMs={60_000} onRefresh={() => {}} />
+    </div>
+  )
+  cleanup = result.unmount
+  await capture(`${OUT}/RefreshCountdown--live.png`)
+})
+
+test('RefreshCountdown - auto-refresh off', async () => {
+  await WIDE()
+  const result = render(
+    <div style={{ width: 720, padding: 24 }}>
+      <RefreshCountdown
+        updatedAt={Date.now() - 3 * 60_000}
+        intervalMs={null}
+        onRefresh={() => {}}
+      />
+    </div>
+  )
+  cleanup = result.unmount
+  await capture(`${OUT}/RefreshCountdown--idle.png`)
+})
+
+test('RefreshCountdown - refresh in flight', async () => {
+  await WIDE()
+  const result = render(
+    <div style={{ width: 720, padding: 24 }}>
+      <RefreshCountdown
+        updatedAt={Date.now()}
+        intervalMs={60_000}
+        isFetching
+        isRefreshing
+        onRefresh={() => {}}
+      />
+    </div>
+  )
+  cleanup = result.unmount
+  await capture(`${OUT}/RefreshCountdown--refreshing.png`)
 })

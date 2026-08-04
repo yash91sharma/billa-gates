@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import * as api from '../lib/api'
 import type { BackupJob, BackupRun, JobCommand, Snapshot } from '../lib/types'
@@ -1325,6 +1325,91 @@ describe('JobDetail', () => {
 
       await user.click(screen.getByRole('button', { name: /prune/i }))
       expect(vi.mocked(api.triggerPrune)).toHaveBeenCalledWith('job-1')
+    })
+  })
+
+  // The page polls its run list every 60s, but only while something is live —
+  // and until now it said so nowhere, so an operator watching a multi-hour
+  // backup could not tell fresh numbers from ten-minute-old ones.
+  describe('auto-refresh countdown', () => {
+    it('shows the live state while a run is in progress', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([
+        makeRun({ status: 'running', finished_at: null, check_status: null }),
+      ])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+
+      expect(await screen.findByText('Auto-updating')).toBeInTheDocument()
+      expect(screen.getByText(/Next update in/)).toBeInTheDocument()
+    })
+
+    // The second, easily-missed arm of shouldPoll: the backup is over but the
+    // integrity check is still running, so the page is still updating.
+    it('shows the live state while a finished run is still being checked', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([
+        makeRun({ status: 'success', check_status: null }),
+      ])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+
+      expect(await screen.findByText('Auto-updating')).toBeInTheDocument()
+    })
+
+    it('shows the idle state once every run is finished and checked', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([makeRun()])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+
+      expect(await screen.findByText('Auto-update off')).toBeInTheDocument()
+      expect(screen.queryByText(/Next update in/)).not.toBeInTheDocument()
+    })
+
+    // Refresh means the whole page, not just the polled query: the snapshot
+    // list and the command preview are fetched once on mount and never again.
+    it('refetches the job, its runs, its snapshots and its commands', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.getJobRuns).mockResolvedValue([makeRun()])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await screen.findByText('Auto-update off')
+
+      await user.click(screen.getByRole('button', { name: /refresh/i }))
+
+      await waitFor(() => {
+        expect(vi.mocked(api.getJob)).toHaveBeenCalledTimes(2)
+        expect(vi.mocked(api.getJobRuns)).toHaveBeenCalledTimes(2)
+        expect(vi.mocked(api.getJobSnapshots)).toHaveBeenCalledTimes(2)
+        expect(vi.mocked(api.getJobCommands)).toHaveBeenCalledTimes(2)
+      })
+    })
+
+    it('polls the run list once a minute while a run is in progress', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        vi.mocked(api.getJobRuns).mockResolvedValue([
+          makeRun({ status: 'running', finished_at: null, check_status: null }),
+        ])
+        renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+        await waitFor(() => expect(vi.mocked(api.getJobRuns)).toHaveBeenCalled())
+
+        // act() because the countdown's 1s ticker re-renders on the way
+        // through — nothing else on this page updates state from a raw timer.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(60_000)
+        })
+
+        await waitFor(() => expect(vi.mocked(api.getJobRuns)).toHaveBeenCalledTimes(2))
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('does not poll once nothing is live', async () => {
+      vi.mocked(api.getJobRuns).mockResolvedValue([makeRun()])
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await screen.findByText('Auto-update off')
+
+      // Real time, deliberately: proving a timer does *not* fire is the one
+      // case fake timers cannot make faster.
+      await new Promise((r) => setTimeout(r, 100))
+
+      expect(vi.mocked(api.getJobRuns)).toHaveBeenCalledTimes(1)
     })
   })
 })

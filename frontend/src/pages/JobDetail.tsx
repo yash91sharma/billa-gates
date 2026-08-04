@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
   History,
@@ -16,6 +16,7 @@ import ActionTooltip from '../components/ActionTooltip'
 import EmptyState from '../components/EmptyState'
 import JobForm from '../components/JobForm'
 import PageHeader from '../components/PageHeader'
+import RefreshCountdown from '../components/RefreshCountdown'
 import RunStatusBadge from '../components/RunStatusBadge'
 import TriggeredByIcon from '../components/TriggeredByIcon'
 import { StopRunDialog } from './Dashboard'
@@ -67,6 +68,11 @@ const ACTION_HELP = {
   unlockDisabled:
     'Unavailable while this job has a run in progress or an integrity check still finishing — that run holds the lock, and removing a live lock risks corrupting the repository.',
 } as const
+
+// At most once a minute — see Dashboard.tsx for the rationale. Named here
+// because RefreshCountdown counts down against the same number: a bar that
+// disagreed with the interval it describes would be worse than no bar.
+const POLL_INTERVAL_MS = 60_000
 
 function shouldPoll(runs: BackupRun[]): boolean {
   return runs.some((r) => r.status === 'running' || r.check_status === null)
@@ -215,11 +221,14 @@ export default function JobDetail() {
     queryFn: () => api.getJob(id ?? ''),
   })
 
-  const { data: runs } = useQuery({
+  const {
+    data: runs,
+    dataUpdatedAt: runsUpdatedAt,
+    isFetching: runsFetching,
+  } = useQuery({
     queryKey: ['jobRuns', id],
     queryFn: () => api.getJobRuns(id ?? ''),
-    // At most once a minute — see Dashboard.tsx for rationale.
-    refetchInterval: (q) => (shouldPoll(q.state.data ?? []) ? 60_000 : false),
+    refetchInterval: (q) => (shouldPoll(q.state.data ?? []) ? POLL_INTERVAL_MS : false),
   })
 
   const { data: snapshots, error: snapshotsError } = useQuery({
@@ -244,6 +253,23 @@ export default function JobDetail() {
   const { data: destinationMounts } = useQuery({
     queryKey: ['mounts', 'destinations'],
     queryFn: api.listDestinationMounts,
+  })
+
+  // "Refresh" means the page, not just the query that polls: the snapshot list
+  // and the command preview are fetched once on mount and never again, so a
+  // button that only reloaded the run list would leave two tabs stale while
+  // claiming the page was current. A mutation rather than four bare refetches
+  // because `isPending` then covers the whole round trip — invalidateQueries
+  // awaits the refetch it triggers. The mount lists are deliberately left out:
+  // they feed the edit form's dropdowns and cannot change while a job runs.
+  const refresh = useMutation({
+    mutationFn: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['job', id] }),
+        queryClient.invalidateQueries({ queryKey: ['jobRuns', id] }),
+        queryClient.invalidateQueries({ queryKey: ['jobSnapshots', id] }),
+        queryClient.invalidateQueries({ queryKey: ['jobCommands', id] }),
+      ]),
   })
 
   if (jobError) {
@@ -272,6 +298,10 @@ export default function JobDetail() {
 
   // Kept clickable while already editing so the form can still be closed.
   const editDisabled = !!activeRun && !isEditing
+
+  // The same predicate the query above polls on, so the countdown cannot claim
+  // an update that is not coming.
+  const pollIntervalMs = shouldPoll(runs ?? []) ? POLL_INTERVAL_MS : null
 
   const backupRunCommands = (commands ?? []).filter((c) => c.group === 'backup_run')
   const onDemandCommands = (commands ?? []).filter((c) => c.group === 'on_demand')
@@ -458,6 +488,14 @@ export default function JobDetail() {
               </ActionTooltip>
             </>
           }
+        />
+
+        <RefreshCountdown
+          updatedAt={runsUpdatedAt}
+          intervalMs={pollIntervalMs}
+          isFetching={runsFetching}
+          isRefreshing={refresh.isPending}
+          onRefresh={() => refresh.mutate()}
         />
 
         {runError && <p className="text-sm text-destructive">{runError}</p>}
