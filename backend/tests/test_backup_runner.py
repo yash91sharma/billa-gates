@@ -5090,3 +5090,252 @@ async def test_invalidation_is_scoped_to_the_jobs_own_destination(engine):
     assert "offsite" in destination_usage._cache, (
         "another drive's measurement must survive a run that never touched it"
     )
+
+
+# ── The destination sentinel ─────────────────────────────────────────────────
+#
+# conftest's autouse fixture mocks `check_destination_mount_file_exists` to
+# True in every test, so the real implementation was never executed. It is the
+# half of the sentinel pair that guards the *write* side: a destination whose
+# drive has detached leaves an empty mountpoint behind, and restic would
+# happily init a fresh repository into it — an empty history that looks
+# healthy, on a job whose real snapshots are on a disk that is not plugged in.
+#
+# Captured at module import, before any fixture can swap it out.
+REAL_CHECK_DESTINATION_MOUNT_FILE_EXISTS = (
+    backup_runner_module.check_destination_mount_file_exists
+)
+
+
+def test_destination_sentinel_is_checked_at_the_destination_mount_root(tmp_path):
+    """`/destinations/<label>/.billa_gates_check` — the root of the drive.
+
+    Deliberately not inside the repository directory: the point is to prove
+    the *drive* is attached, and the repo directory is created by the app.
+    """
+    (tmp_path / "main").mkdir()
+
+    with patch("app.services.backup_runner.DESTINATIONS_ROOT", str(tmp_path)):
+        assert REAL_CHECK_DESTINATION_MOUNT_FILE_EXISTS("main") is False
+        (tmp_path / "main" / ".billa_gates_check").touch()
+        assert REAL_CHECK_DESTINATION_MOUNT_FILE_EXISTS("main") is True
+
+
+def test_destination_sentinel_with_a_missing_directory_is_false(tmp_path):
+    """A detached drive whose mountpoint is gone: False, not an exception."""
+    with patch("app.services.backup_runner.DESTINATIONS_ROOT", str(tmp_path)):
+        assert REAL_CHECK_DESTINATION_MOUNT_FILE_EXISTS("gone") is False
+
+
+def test_destination_sentinel_does_not_accept_a_directory_as_the_marker(tmp_path):
+    """`os.path.exists` is true for a directory too.
+
+    Pinned because the marker is created by hand by the operator, and a
+    `mkdir .billa_gates_check` typo would otherwise silently pass the guard.
+    This documents the current behaviour: a directory *does* satisfy it.
+    """
+    (tmp_path / "main").mkdir()
+    (tmp_path / "main" / ".billa_gates_check").mkdir()
+
+    with patch("app.services.backup_runner.DESTINATIONS_ROOT", str(tmp_path)):
+        assert REAL_CHECK_DESTINATION_MOUNT_FILE_EXISTS("main") is True
+
+
+def test_the_two_sentinels_probe_different_roots(tmp_path):
+    """A source sentinel must never satisfy the destination check.
+
+    They are separate mounts; conflating them would let a job back up to a
+    detached drive as long as its *source* was attached.
+    """
+    (tmp_path / "sources" / "documents").mkdir(parents=True)
+    (tmp_path / "destinations" / "documents").mkdir(parents=True)
+    (tmp_path / "sources" / "documents" / ".billa_gates_check").touch()
+
+    with (
+        patch("app.services.backup_runner.SOURCES_ROOT", str(tmp_path / "sources")),
+        patch(
+            "app.services.backup_runner.DESTINATIONS_ROOT",
+            str(tmp_path / "destinations"),
+        ),
+    ):
+        assert REAL_CHECK_MOUNT_FILE_EXISTS("documents") is True
+        assert REAL_CHECK_DESTINATION_MOUNT_FILE_EXISTS("documents") is False
+
+
+# ── A pipeline whose job row has gone ────────────────────────────────────────
+#
+# Reachable in normal use: the job is deleted while a trigger is in flight, or
+# a scheduler tick fires against a job removed since the last rebuild. Every
+# pipeline loads its job row first and returns quietly when it is missing. The
+# property that matters is that it returns *before* spawning restic — a
+# pipeline that ran on a deleted job would write into a repository nothing
+# owns any more, and it has no row to report the outcome on.
+
+
+@pytest.mark.parametrize(
+    "pipeline,args",
+    [
+        ("run_backup", ()),
+        ("run_prune", ()),
+        ("run_check", ("full", None, None)),
+    ],
+)
+async def test_a_pipeline_returns_quietly_when_the_job_row_is_missing(
+    engine, pipeline, args
+):
+    missing_job = uuid.uuid4()
+    run_id = uuid.uuid4()
+    fn = getattr(backup_runner_module, pipeline)
+
+    with patch("asyncio.create_subprocess_exec") as spawn:
+        # No exception: the caller is a fire-and-forget task, so anything
+        # raised here surfaces only as an unretrieved-exception warning.
+        result = await fn(missing_job, run_id, *args)
+
+    assert result is None
+    spawn.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "pipeline,args",
+    [
+        ("run_backup", ()),
+        ("run_prune", ()),
+        ("run_check", ("full", None, None)),
+    ],
+)
+async def test_a_missing_job_row_sends_no_notification(engine, pipeline, args):
+    """There is nothing to report and nobody to attribute it to."""
+    fn = getattr(backup_runner_module, pipeline)
+
+    with (
+        patch("asyncio.create_subprocess_exec"),
+        patch("app.services.run_notifications.send_notification") as notify,
+    ):
+        await fn(uuid.uuid4(), uuid.uuid4(), *args)
+
+    notify.assert_not_called()
+
+
+async def test_a_missing_job_row_creates_no_run_record(engine):
+    """The pipeline must not invent a row for a job that no longer exists."""
+    from app.db.models import BackupRun
+
+    with patch("asyncio.create_subprocess_exec"):
+        await run_backup(uuid.uuid4(), uuid.uuid4())
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        from sqlalchemy import select
+
+        rows = (await s.execute(select(BackupRun))).scalars().all()
+
+    assert rows == []
+
+
+# ── The auto-unlock attempt is best-effort ───────────────────────────────────
+
+
+async def test_step4_a_raising_unlock_does_not_abort_the_run(engine):
+    """`restic unlock` throwing must not take the run down with it.
+
+    The unlock is an opportunistic recovery step wedged between two
+    `cat config` calls, and it is wrapped for a reason: a raise here escapes
+    before the run row is finalized, leaving it at `status=running` forever —
+    and a row stuck at running locks the job out of *every* future trigger
+    (`run_dispatch`'s overlap check refuses on it). So one transient unlock
+    failure would silently end all future backups for that job.
+
+    The retry must still happen: the lock may have been released meanwhile,
+    which is exactly the case this recovers.
+    """
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    cat_calls = {"n": 0}
+
+    async def fake_cat_config(*args, **kwargs):
+        cat_calls["n"] += 1
+        if cat_calls["n"] == 1:
+            return (11, "", "Fatal: unable to create lock in backend: already locked")
+        return (0, '{"version":2}', "")
+
+    with (
+        patch("app.services.restic.restic_cat_config", side_effect=fake_cat_config),
+        patch(
+            "app.services.restic.restic_unlock",
+            side_effect=OSError("transport endpoint is not connected"),
+        ),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, json.dumps(BACKUP_SUMMARY), "", BACKUP_SUMMARY),
+        ),
+        patch("app.services.restic.restic_prune", return_value=(0, "", "")),
+        patch("app.services.run_notifications.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    assert cat_calls["n"] == 2, "the retry must still happen after a failed unlock"
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.success
+    assert run.finished_at is not None, "the row must never be left at running"
+
+
+async def test_step4_a_raising_unlock_still_fails_the_run_if_the_lock_persists(engine):
+    """When the retry also finds the lock, it is a normal failure — not a crash.
+
+    The distinction matters for what the operator is told: "repository is
+    locked and could not be unlocked" points at the Unlock button, whereas an
+    unhandled OSError from the unlock attempt would surface as an unrelated
+    transport error.
+    """
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with (
+        patch(
+            "app.services.restic.restic_cat_config",
+            return_value=(11, "", "unable to create lock in backend: already locked"),
+        ),
+        patch(
+            "app.services.restic.restic_unlock",
+            side_effect=RuntimeError("unlock blew up"),
+        ),
+        patch("app.services.restic.restic_backup") as backup,
+        patch("app.services.run_notifications.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    backup.assert_not_called()
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert run.finished_at is not None
+    assert "locked" in (run.error_output or "").lower()

@@ -520,3 +520,46 @@ async def test_job_rescheduled_when_schedule_changes(client, engine):
     assert any(
         kw.get("id") == created["id"] and kw.get("replace_existing") for kw in add_calls
     )
+
+
+# ── shutdown_scheduler ───────────────────────────────────────────────────────
+
+
+async def test_shutdown_scheduler_stops_a_running_scheduler():
+    """The lifespan's shutdown half — untested until now.
+
+    `wait=False` matters: a scheduler shut down with wait=True blocks until
+    every in-flight job returns, and the jobs here are multi-hour backups. The
+    container's stop timeout would elapse and the process would be SIGKILLed
+    mid-backup, which is what leaves a stale restic lock behind.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from app.core.scheduler import shutdown_scheduler
+
+    fake = MagicMock()
+    fake.running = True
+
+    with patch("app.core.scheduler.scheduler", fake):
+        await shutdown_scheduler()
+
+    fake.shutdown.assert_called_once_with(wait=False)
+
+
+async def test_shutdown_scheduler_is_a_no_op_when_not_running():
+    """Shutting down a scheduler that never started raises in APScheduler.
+
+    Reachable in practice: if `start_scheduler` fails, the lifespan's `yield`
+    still unwinds through the shutdown half on the way out.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from app.core.scheduler import shutdown_scheduler
+
+    fake = MagicMock()
+    fake.running = False
+
+    with patch("app.core.scheduler.scheduler", fake):
+        await shutdown_scheduler()
+
+    fake.shutdown.assert_not_called()

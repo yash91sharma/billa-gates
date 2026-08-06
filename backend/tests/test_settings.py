@@ -750,3 +750,227 @@ async def test_send_notification_logs_error_on_http_failure():
     mock_post.assert_called_once()
     mock_logger_error.assert_called_once()
     assert "notification failed" in mock_logger_error.call_args[0][0]
+
+
+# ── test-ntfy / restic-update-check / health: the remaining failure paths ────
+#
+# The sections above cover the happy paths and a non-200 from ntfy. What was
+# left unexercised is everything that goes wrong *around* the request — an
+# unreachable host, an auth token, a response that is not the payload we
+# expect, a dead database. Each one is a case where the endpoint's contract is
+# to degrade into a readable answer rather than raise, because all three are
+# rendered inline on the Settings page.
+#
+# All of these patch the AsyncClient CLASS, never its methods: the test
+# `client` fixture is itself an httpx.AsyncClient, so patching
+# `httpx.AsyncClient.post` would intercept the request under test on its way
+# into the app. Replacing the class only affects instances built afterwards —
+# i.e. the one the route constructs.
+
+
+async def _set_ntfy(engine, *, topic="backups", token=None, server="https://ntfy.sh"):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import AppSettings
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        row = await s.get(AppSettings, 1)
+        if row is None:
+            row = AppSettings(id=1, default_job_timeout_hours=24)
+            s.add(row)
+        row.ntfy_server_url = server
+        row.ntfy_topic = topic
+        row.ntfy_token = token
+        await s.commit()
+
+
+def _fake_http(**attrs):
+    """An AsyncClient stand-in that yields itself from `async with`."""
+    mock_http = AsyncMock()
+    mock_http.__aenter__.return_value = mock_http
+    for key, value in attrs.items():
+        setattr(mock_http, key, value)
+    return mock_http
+
+
+async def test_test_ntfy_sends_the_bearer_token_when_one_is_stored(client, engine):
+    """A protected topic 403s without it, which reads to the operator as
+    "ntfy is broken" rather than "your token is not being sent"."""
+    await _set_ntfy(engine, token="tok-abc")
+
+    mock_response = AsyncMock()
+    mock_response.status_code = 200
+    mock_http = _fake_http(post=AsyncMock(return_value=mock_response))
+
+    with patch("httpx.AsyncClient", return_value=mock_http):
+        resp = await client.post("/api/settings/test-ntfy")
+
+    assert resp.status_code == 200
+    assert (
+        mock_http.post.call_args.kwargs["headers"]["Authorization"] == "Bearer tok-abc"
+    )
+
+
+async def test_test_ntfy_sends_no_auth_header_without_a_token(client, engine):
+    """Public ntfy.sh topics take no auth; an empty Bearer header can 401."""
+    await _set_ntfy(engine, token=None)
+
+    mock_response = AsyncMock()
+    mock_response.status_code = 200
+    mock_http = _fake_http(post=AsyncMock(return_value=mock_response))
+
+    with patch("httpx.AsyncClient", return_value=mock_http):
+        await client.post("/api/settings/test-ntfy")
+
+    assert "Authorization" not in mock_http.post.call_args.kwargs["headers"]
+
+
+async def test_test_ntfy_strips_a_trailing_slash_from_the_server_url(client, engine):
+    """`https://ntfy.sh/` must not become a POST to `https://ntfy.sh//`."""
+    await _set_ntfy(engine, server="https://ntfy.example/")
+
+    mock_response = AsyncMock()
+    mock_response.status_code = 200
+    mock_http = _fake_http(post=AsyncMock(return_value=mock_response))
+
+    with patch("httpx.AsyncClient", return_value=mock_http):
+        await client.post("/api/settings/test-ntfy")
+
+    assert mock_http.post.call_args.args[0] == "https://ntfy.example"
+
+
+async def test_test_ntfy_reports_a_network_error_instead_of_raising(client, engine):
+    """An unreachable host comes back as ok=False with the reason.
+
+    This endpoint exists to diagnose exactly this failure, so it must not be
+    the thing that 500s when the server is down — the page would then show a
+    generic error instead of "Name or service not known".
+    """
+    await _set_ntfy(engine)
+
+    mock_http = _fake_http(
+        post=AsyncMock(side_effect=OSError("Name or service not known"))
+    )
+
+    with patch("httpx.AsyncClient", return_value=mock_http):
+        resp = await client.post("/api/settings/test-ntfy")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert "Name or service not known" in body["error"]
+
+
+async def test_restic_update_check_reports_unknown_when_the_tag_is_missing(
+    client, engine
+):
+    """An absent `tag_name` must not render as "you are out of date".
+
+    `"".lstrip("v")` is falsy, so `latest` is None and the comparison is
+    skipped — without that, an unexpected GitHub payload would tell every
+    operator an update exists, permanently.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import AppSettings
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        row = await s.get(AppSettings, 1)
+        if row is None:
+            row = AppSettings(id=1, ntfy_server_url="https://ntfy.sh", ntfy_topic="")
+            s.add(row)
+        row.restic_version = "0.19.1"
+        await s.commit()
+
+    mock_response = MagicMock()
+    mock_response.json = MagicMock(return_value={"name": "0.19.1"})
+    mock_http = _fake_http(get=AsyncMock(return_value=mock_response))
+
+    with patch("httpx.AsyncClient", return_value=mock_http):
+        resp = await client.get("/api/settings/restic-update-check")
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "current": "0.19.1",
+        "latest": None,
+        "update_available": None,
+    }
+
+
+async def test_restic_update_check_degrades_when_the_body_is_not_json(client, engine):
+    """GitHub's rate-limit and error pages are not the release payload."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import AppSettings
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        row = await s.get(AppSettings, 1)
+        if row is None:
+            row = AppSettings(id=1, ntfy_server_url="https://ntfy.sh", ntfy_topic="")
+            s.add(row)
+        row.restic_version = "0.19.1"
+        await s.commit()
+
+    mock_response = MagicMock()
+    mock_response.json = MagicMock(side_effect=ValueError("not json"))
+    mock_http = _fake_http(get=AsyncMock(return_value=mock_response))
+
+    with patch("httpx.AsyncClient", return_value=mock_http):
+        resp = await client.get("/api/settings/restic-update-check")
+
+    assert resp.json() == {
+        "current": "0.19.1",
+        "latest": None,
+        "update_available": None,
+    }
+
+
+async def test_restic_update_check_does_not_call_github_without_a_known_version(client):
+    """With nothing to compare against there is no question to ask.
+
+    GitHub rate-limits unauthenticated callers, so a request that cannot
+    produce an answer must not be spent.
+    """
+    mock_http = _fake_http(get=AsyncMock())
+
+    with patch("httpx.AsyncClient", return_value=mock_http):
+        resp = await client.get("/api/settings/restic-update-check")
+
+    assert resp.json() == {"current": None, "latest": None, "update_available": None}
+    mock_http.get.assert_not_called()
+
+
+async def test_health_reports_a_db_failure_without_erroring(client):
+    """A dead database must still answer 200 with db_ok=False.
+
+    `/api/health` is what a container HEALTHCHECK and the UI banner read. If
+    it raised, both would see a connection error and could not tell "the
+    database is unreachable" from "the app is not running at all" — and the
+    field that exists to report exactly that distinction would never be seen.
+    """
+    from app.api.deps import get_session
+    from app.main import app
+
+    class _BrokenSession:
+        async def execute(self, *args, **kwargs):
+            raise OSError("database is locked")
+
+        async def get(self, *args, **kwargs):
+            return None
+
+    async def _broken():
+        yield _BrokenSession()
+
+    app.dependency_overrides[get_session] = _broken
+    try:
+        resp = await client.get("/api/health")
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["db_ok"] is False
+    assert body["restic_version"] is None

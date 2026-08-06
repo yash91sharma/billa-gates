@@ -1,5 +1,6 @@
 """Tests for app.core.logging — request ID traceability."""
 
+import inspect
 import logging
 import re
 
@@ -518,3 +519,60 @@ async def test_log_call_skips_return_repr_when_debug_is_disabled_async(caplog):
         with caplog.at_level(logging.DEBUG):
             await returns_a_blob_async()
         assert mock_repr.call_count == 1
+
+
+# ── _sensitive_positions: degrading when a signature cannot be read ──────────
+
+
+def test_sensitive_positions_returns_empty_for_an_uninspectable_callable():
+    """Some C-implemented callables have no inspectable signature.
+
+    `@log_call` resolves positional redaction indices once at decoration time.
+    If that raised, decorating such a callable would fail at *import*, taking
+    the module down rather than merely logging less precisely.
+
+    `type` is used because `inspect.signature(type)` genuinely raises
+    ValueError ("no signature found for builtin"); most builtins (`len`,
+    `print`) do expose a signature and would exercise the ordinary path
+    instead, quietly passing without ever reaching the handler.
+    """
+    from app.core.logging import _sensitive_positions
+
+    with pytest.raises(ValueError):
+        inspect.signature(type)
+
+    assert _sensitive_positions(type) == set()
+
+
+def test_sensitive_positions_finds_positional_secrets_by_name():
+    """The restic wrappers take the repo password positionally, where there is
+    no dict key for `sanitize` to match on."""
+    from app.core.logging import _sensitive_positions
+
+    def wrapper(repo_path, password, timeout_seconds):  # noqa: ARG001
+        pass
+
+    assert _sensitive_positions(wrapper) == {1}
+
+
+def test_sensitive_positions_ignores_keyword_only_parameters():
+    """Keyword-only arguments arrive in kwargs, where redaction is by key.
+
+    Counting them as positions would shift the indices of the real positional
+    parameters and redact the wrong argument.
+    """
+    from app.core.logging import _sensitive_positions
+
+    def wrapper(repo_path, *, password=None):  # noqa: ARG001
+        pass
+
+    assert _sensitive_positions(wrapper) == set()
+
+
+def test_sensitive_positions_is_empty_when_no_parameter_is_sensitive():
+    from app.core.logging import _sensitive_positions
+
+    def wrapper(repo_path, timeout_seconds):  # noqa: ARG001
+        pass
+
+    assert _sensitive_positions(wrapper) == set()

@@ -2253,3 +2253,133 @@ async def test_check_unknown_mode_adds_no_flags():
         await restic_check(REPO, PASSWORD, "not-a-mode", 50, 60)
 
     assert captured["args"] == ["restic", "check"]
+
+
+# ── Snapshot rows restic should never send, but that must not fail a run ─────
+#
+# `_newest_snapshot` walks whatever JSON restic produced. Every row below is a
+# shape the parser has to survive, because the alternative is a ResticError,
+# and the caller treats that as "skip the backup" — one malformed row would
+# stop the job entirely rather than costing it an incremental parent.
+
+
+async def test_latest_snapshot_id_skips_non_dict_rows():
+    """A row that is not an object is stepped over, not crashed on.
+
+    `snapshot.get(...)` on a string or None is an AttributeError, which would
+    escape as a 500-equivalent and fail the run.
+    """
+    from app.services.restic import restic_latest_snapshot_id
+
+    good = "a" * 64
+    out = json.dumps(
+        [
+            "unexpected string row",
+            None,
+            42,
+            {"id": good, "time": "2026-05-17T10:00:00Z", "hostname": "billa-gates"},
+        ]
+    )
+    proc = _make_process(0, stdout=out)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await restic_latest_snapshot_id(REPO, PASSWORD)
+
+    assert result == good
+
+
+async def test_latest_snapshot_id_raises_when_no_row_is_usable():
+    """A non-empty list holding no object at all has no parent to offer.
+
+    Distinct from an empty list (a fresh repo → None): here restic answered
+    with rows we cannot read, which is a real fault worth surfacing rather
+    than silently backing up with no parent.
+    """
+    from app.services.restic import ResticError, restic_latest_snapshot_id
+
+    proc = _make_process(0, stdout=json.dumps(["nope", None]))
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with pytest.raises(ResticError, match="no usable snapshot record"):
+            await restic_latest_snapshot_id(REPO, PASSWORD)
+
+
+async def test_latest_snapshot_id_keeps_restic_order_as_the_tie_break():
+    """Identical timestamps resolve to the later row.
+
+    `>=` in the comparison is what does it. With `>` the *first* of two equal
+    stamps would win, which flips the parent chosen for two snapshots written
+    inside the same second — reproducible on a fast local repo.
+    """
+    from app.services.restic import restic_latest_snapshot_id
+
+    first = "1" * 64
+    second = "2" * 64
+    same = "2026-05-17T10:00:00Z"
+    out = json.dumps(
+        [
+            {"id": first, "time": same, "hostname": "billa-gates"},
+            {"id": second, "time": same, "hostname": "billa-gates"},
+        ]
+    )
+    proc = _make_process(0, stdout=out)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await restic_latest_snapshot_id(REPO, PASSWORD)
+
+    assert result == second
+
+
+async def test_latest_snapshot_id_ignores_an_unreadable_time_beside_a_readable_one():
+    """One bad stamp must not cost the parent when another row is fine.
+
+    The bad row is *newer* by position, so a parser that gave up at the first
+    unreadable value — or fell straight through to the last row — would take
+    it instead of the row that actually has a timestamp.
+    """
+    from app.services.restic import restic_latest_snapshot_id
+
+    good = "a" * 64
+    out = json.dumps(
+        [
+            {"id": good, "time": "2026-05-17T10:00:00Z", "hostname": "billa-gates"},
+            {"id": "b" * 64, "time": "whenever", "hostname": "other-host"},
+        ]
+    )
+    proc = _make_process(0, stdout=out)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await restic_latest_snapshot_id(REPO, PASSWORD)
+
+    assert result == good
+
+
+# Note: a non-list JSON body and a non-string id are already covered, more
+# thoroughly, by the parametrized `test_latest_snapshot_id_raises_on_non_list_json`
+# and `test_latest_snapshot_id_raises_when_id_is_not_a_string` above.
+
+
+# ── restic_version: every failure is the same answer ─────────────────────────
+
+
+async def test_version_returns_none_when_the_output_has_no_version_string():
+    """ "unknown" is the honest answer — the health endpoint renders it as such."""
+    proc = _make_process(0, stdout="some unrelated banner text\n")
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        assert await restic_version() is None
+
+
+async def test_version_returns_none_when_stdout_is_not_decodable():
+    """A non-UTF-8 byte must not raise out of a version probe.
+
+    `restic_version` runs at startup; an exception here would abort the
+    lifespan and take the whole app down over a cosmetic field.
+    """
+    proc = _make_process(0)
+    proc.communicate = AsyncMock(return_value=(b"\xff\xfe restic 0.19.1", b""))
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        assert await restic_version() is None
+
+
+async def test_version_returns_none_when_the_binary_cannot_be_launched():
+    """A missing restic binary reports unknown, not a crash."""
+    with patch(
+        "asyncio.create_subprocess_exec", side_effect=FileNotFoundError("restic")
+    ):
+        assert await restic_version() is None

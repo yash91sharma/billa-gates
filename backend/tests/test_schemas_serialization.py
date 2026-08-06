@@ -166,3 +166,74 @@ def test_naive_isoformat_variants(value, expected):
     run = RunSummarySchema(**_base_run_payload(started_at=value))
     data = run.model_dump(mode="json")
     assert data["started_at"] == expected
+
+
+# ── Optional datetimes that are actually absent ──────────────────────────────
+#
+# `_utc_iso`'s None branch was the one line of the module the suite never
+# executed. It is not decoration: `finished_at` is null for the whole duration
+# of a run, which is precisely when the UI is being watched. A serializer that
+# raised on None — or that rendered the string "None" with a Z stapled to it —
+# would break the run detail page for every in-flight backup while leaving
+# every finished one looking perfect.
+
+
+def test_finished_at_is_null_while_a_run_is_still_going():
+    run = RunSummarySchema(**_base_run_payload(status="running", finished_at=None))
+
+    data = run.model_dump(mode="json")
+
+    assert data["finished_at"] is None
+
+
+def test_a_null_datetime_is_not_rendered_as_a_string():
+    """`null`, not `"None"` / `"NoneZ"` — `new Date("NoneZ")` is Invalid Date."""
+    run = RunSummarySchema(**_base_run_payload(status="running", finished_at=None))
+
+    data = run.model_dump(mode="json")
+
+    assert not isinstance(data["finished_at"], str)
+
+
+def test_a_null_datetime_survives_json_encoding():
+    """The serializer runs for real during response encoding, not just dump."""
+    import json as _json
+
+    run = RunSummarySchema(**_base_run_payload(status="running", finished_at=None))
+
+    payload = _json.loads(run.model_dump_json())
+
+    assert payload["finished_at"] is None
+    assert payload["started_at"].endswith("Z")
+
+
+def test_a_null_datetime_stays_none_in_python_mode():
+    run = RunSummarySchema(**_base_run_payload(status="running", finished_at=None))
+
+    assert run.model_dump()["finished_at"] is None
+
+
+def test_the_run_detail_schema_handles_a_null_finished_at():
+    """RunDetail is the page that is open while a backup is running."""
+    detail = RunDetailSchema(**_base_run_payload(status="running", finished_at=None))
+
+    data = detail.model_dump(mode="json")
+
+    assert data["finished_at"] is None
+    assert data["started_at"].endswith("Z")
+
+
+def test_an_aware_non_utc_datetime_is_normalized_to_utc():
+    """restic stamps snapshots with the writing machine's local offset.
+
+    A value that reached the schema still carrying `-07:00` must be converted,
+    not merely relabelled — stapling a Z onto a local clock reading moves the
+    instant by the offset.
+    """
+    pacific = timezone(timedelta(hours=-7))
+    aware = datetime(2026, 5, 17, 3, 0, 0, tzinfo=pacific)
+
+    run = RunSummarySchema(**_base_run_payload(started_at=aware))
+    rendered = run.model_dump(mode="json")["started_at"]
+
+    assert rendered == "2026-05-17T10:00:00Z"

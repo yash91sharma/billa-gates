@@ -480,3 +480,40 @@ async def test_trim_history_without_a_settings_row_falls_back_to_100(factory):
             .all()
         )
     assert set(kept) == set(ids)
+
+
+# ── A row that is not there ──────────────────────────────────────────────────
+
+
+async def test_cancel_on_a_missing_row_returns_none_instead_of_raising(engine):
+    """Cancelling a run whose row is gone must not raise.
+
+    `cancel` is called from the pipeline's cancel path, which runs *after* the
+    Stop click has already been acknowledged with a 202. An exception here
+    escapes into the pipeline's own teardown, and the row it was unwinding —
+    if a different one still exists — is left at `status=running`, which locks
+    the job out of every future trigger. Returning None keeps the teardown on
+    its normal path.
+
+    The row can genuinely be absent: `trim_history` deletes old runs, so a
+    cancel racing history trimming on a `keep_last_runs=1` install finds
+    nothing.
+    """
+    factory = run_records.session_factory(engine)
+
+    result = await run_records.cancel(factory, uuid.uuid4())
+
+    assert result is None
+
+
+async def test_cancel_on_a_missing_row_leaves_no_row_behind(engine):
+    """It must not resurrect the run it failed to find."""
+    factory = run_records.session_factory(engine)
+    missing = uuid.uuid4()
+
+    await run_records.cancel(factory, missing)
+
+    async with factory() as s:
+        rows = (await s.execute(select(BackupRun))).scalars().all()
+
+    assert rows == []
