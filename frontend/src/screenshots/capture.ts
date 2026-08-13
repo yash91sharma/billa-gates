@@ -1,6 +1,10 @@
 import { commands, page } from '@vitest/browser/context'
 
-declare module '@vitest/browser/context' {
+// `BrowserCommands` is declared in `vitest/browser` as of vitest 4 (it was in
+// `@vitest/browser/context` in v3). The runtime import above is unaffected —
+// only the interface being augmented moved, and augmenting the old module
+// silently types `commands.writeScreenshotIfChanged` as non-existent.
+declare module 'vitest/browser' {
   interface BrowserCommands {
     writeScreenshotIfChanged(relativePath: string, base64: string): Promise<'written' | 'unchanged'>
   }

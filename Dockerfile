@@ -12,7 +12,9 @@
 # RESTIC_ARCH is required (no default) — build fails loudly without it.
 
 # ─── Stage 1 — frontend-builder ───────────────────────────────────────────────
-FROM node:22-alpine AS frontend-builder
+# Node 24 (LTS). Build-time only — no node reaches the runtime stage. Mirrored
+# in .devcontainer/Dockerfile so the bundle is built on the major it is tested on.
+FROM node:24-alpine AS frontend-builder
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci --prefer-offline
@@ -55,7 +57,7 @@ RUN python -m venv /venv
 # 25.0.1, which carries five advisories fixed across 25.3–26.1.2. Upgrade before
 # installing anything, so the vulnerable copy is never the one that lands in
 # /venv. Mirrored in .devcontainer/Dockerfile.
-RUN /venv/bin/pip install --no-cache-dir --upgrade "pip>=26.1.2"
+RUN /venv/bin/pip install --no-cache-dir --upgrade "pip>=26.2.1"
 COPY backend/requirements.txt /tmp/requirements.txt
 RUN /venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
 # Output: /venv/

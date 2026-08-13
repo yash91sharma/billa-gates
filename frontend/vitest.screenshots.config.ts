@@ -3,6 +3,10 @@ import path from 'path'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+// Vitest 4 takes `browser.provider` as a factory rather than the string
+// 'playwright' it accepted in v3; the provider itself moved out into this
+// package. A stale string here is a startup error, not a silent fallback.
+import { playwright } from '@vitest/browser-playwright'
 
 /**
  * Screenshot test config — runs tests in a real headless Chromium via
@@ -38,7 +42,7 @@ export default defineConfig({
     browser: {
       enabled: true,
       headless: true,
-      provider: 'playwright',
+      provider: playwright(),
       screenshotDirectory: 'screenshots',
       instances: [{ browser: 'chromium' }],
       // The tests capture through `capture()` (src/screenshots/capture.ts),
