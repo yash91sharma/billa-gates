@@ -48,6 +48,11 @@ yarn-error.log*
 frontend/dist/
 frontend/build/
 
+# Vitest's automatic on-failure browser screenshots. The reviewed gallery is
+# frontend/screenshots/ and is tracked; these are debugging leftovers named
+# after the test that failed, and they must never join the review list.
+frontend/.vitest-screenshot-failures/
+
 # Environment / secrets
 .env
 .env.local
