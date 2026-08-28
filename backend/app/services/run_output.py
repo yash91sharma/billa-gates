@@ -21,7 +21,7 @@ Two properties are load-bearing and apply to every formatter below:
 
 import json
 import re
-from typing import Dict, List, Sequence, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from app.core.logging import get_logger
 
@@ -57,6 +57,125 @@ RETENTION_SKIPPED_PARTIAL_NOTE: str = (
     "backup that reads everything — until then this repository keeps growing, "
     "so fix the unreadable items above."
 )
+
+
+# ── Which kind of failure this was ───────────────────────────────────────────
+#
+# Every wrapper in app/services/restic.py reports in `(rc, stdout, stderr)`,
+# and ``-1`` is its sentinel for "restic produced no exit code at all" — the
+# process was stopped at its deadline, or it never started. The value was
+# chosen so it cannot collide with restic's own codes, which also means it is
+# not one of them: printing it as "restic exit code -1" describes a code restic
+# has never returned, on exactly the runs where this row is the only thing the
+# operator has to go on.
+#
+# The two outcomes hiding behind it need opposite responses — wait for a
+# destination that did not answer, versus go and look at an image with no
+# restic in it — so the reason text carries the distinction and the headline
+# names the step it came from instead of inventing a number.
+
+NO_EXIT_CODE: int = -1
+
+# restic's documented exit codes (stable since 0.17), in the terms that decide
+# what the operator does next. `run_backup` already branches on 10/11/12 by
+# number and writes its own sentence for each; prune, check and retention
+# branch on nothing, so without this they show a bare number and restic's
+# stderr, and a locked repository looks like every other failure.
+#
+# Only the codes that mean the same thing whichever command returned them live
+# here — verified against 0.19.1's own `--help` for backup, forget, prune,
+# check, cat, snapshots and unlock.
+_EXIT_CODE_MEANINGS: Dict[int, str] = {
+    1: "restic reported a general error",
+    10: "the repository was not found at that path",
+    11: "the repository is locked by another process",
+    12: "the repository password was not accepted",
+}
+
+# Exit code 3 is the one whose meaning belongs to the *command* rather than to
+# restic, so it cannot be looked up by number alone — from 0.19.1's `--help`:
+#
+#   backup: "some source data could not be read (incomplete snapshot created)"
+#   forget: "there was an error removing one or more snapshots"
+#
+# and no other command this app runs documents a 3 at all. A single shared
+# sentence is therefore wrong for one of them, and here the wrong one is worse
+# than none: a failed retention headlined "some files could not be read; the
+# snapshot was still written" tells the operator their data was saved and the
+# source is at fault, when what actually happened is that old snapshots could
+# not be removed — the unbounded repository growth this app promotes to a
+# `warning` precisely so it cannot pass unnoticed. Restated: this sentence is
+# the first 200 characters `RunNotifier.failed` pushes, so it is the whole of
+# the alert. A command with no entry gets the number and restic's stderr, which
+# says nothing untrue.
+_COMMAND_EXIT_3_MEANINGS: Dict[str, str] = {
+    "backup": "some files could not be read; the snapshot was still written",
+    "forget": "one or more snapshots could not be removed",
+}
+
+
+def describe_restic_failure(
+    operation: str, rc: int, reason: str = "", *, command: str = ""
+) -> str:
+    """One sentence naming what kind of failure ``operation`` hit.
+
+    The headline of every failed step. It is deliberately the first thing in
+    the column: ``RunNotifier.failed`` pushes only the first 200 characters, so
+    whatever goes here is the whole of the alert on a phone.
+
+    ``reason`` is only read for :data:`NO_EXIT_CODE`, where it *is* the
+    explanation (restic never got far enough to have an opinion). For a real
+    exit code the number leads, because that is what an operator searches for,
+    and restic's own output follows below via :func:`format_step_error`.
+
+    ``command`` is the restic subcommand that returned ``rc``, and it is only
+    consulted for exit code 3 — the one code two commands define differently
+    (see :data:`_COMMAND_EXIT_3_MEANINGS`). Callers pass it rather than having
+    it inferred from ``operation``, which is display text: the labels are
+    reworded for the run page, and a reworded label must not silently change
+    what the app claims restic said.
+    """
+    if rc == NO_EXIT_CODE:
+        detail: str = reason.strip() or "restic produced no exit code and no message"
+        return f"{operation} did not complete — {detail}"
+    meaning: Optional[str] = (
+        _COMMAND_EXIT_3_MEANINGS.get(command)
+        if rc == 3
+        else _EXIT_CODE_MEANINGS.get(rc)
+    )
+    explanation: str = f" — {meaning}" if meaning else ""
+    return f"{operation} failed with restic exit code {rc}{explanation}."
+
+
+def failure_slug(rc: int) -> str:
+    """The same fact as a log token, so a container log can be filtered by cause.
+
+    A log line carrying only ``rc=-1`` is not greppable as a cause — it is the
+    same three characters for a timeout and for a missing binary. The row and
+    the log have to agree about which of the two happened, which is why both
+    are derived from the same constant rather than written out twice.
+    """
+    return "no_exit_code" if rc == NO_EXIT_CODE else f"exit_code_{rc}"
+
+
+def format_step_error(
+    operation: str, rc: int, stderr: str, *, command: str = ""
+) -> str:
+    """The text a non-backup step writes into its error column.
+
+    Used by prune, integrity check, the repository access check and the
+    retention step — all of which previously wrote restic's bare stderr, which
+    says nothing at all when restic never ran and produced none.
+
+    restic's own words are kept below the headline, because the headline says
+    what kind of failure it was and only stderr says what restic saw. They are
+    not repeated for :data:`NO_EXIT_CODE`: there the reason is already the
+    headline, and printing it twice pads the 200 characters the push carries.
+    """
+    parts: List[str] = [describe_restic_failure(operation, rc, stderr, command=command)]
+    if rc != NO_EXIT_CODE and stderr.strip():
+        parts.extend(("", stderr.strip()))
+    return "\n".join(parts)
 
 
 class FailedItem(str):
@@ -375,11 +494,19 @@ def format_scan_errors(failed_items: List[str]) -> str:
 def format_backup_error(rc: int, json_errors: List[str], stderr: str) -> str:
     """Build the user-visible error_output string for a failed backup run.
 
-    Always includes the restic exit code and stderr, plus the per-file error
+    Always includes what restic reported and stderr, plus the per-file error
     lines restic emitted before giving up — they name the specific
     path/operation that caused the failure, which a post-mortem fatal does not.
     Order is chosen so the operator sees the high-level summary first, then the
     granular per-file context (gaps.md H5).
+
+    The headline comes from :func:`describe_restic_failure` rather than being
+    written here, so the one case that has no exit code — the backup was
+    stopped at its deadline, or restic never started — stops being reported as
+    "restic exit code -1". That is this app's sentinel, not restic's, and the
+    production path for a timed-out backup goes through here: the wrapper
+    contains the deadline itself, so the runner's own `asyncio.TimeoutError`
+    branch never sees one.
 
     A recognised cause goes **above** the stderr dump, not below it:
     `RunNotifier.failed` pushes only the first 200 characters of this string, so
@@ -389,12 +516,12 @@ def format_backup_error(rc: int, json_errors: List[str], stderr: str) -> str:
     the partial-backup path uses. This one used to print every parsed item
     instead, so the two paths bounded the same DB column differently.
     """
-    parts: List[str] = [f"Backup failed (restic exit code {rc})."]
+    parts: List[str] = [describe_restic_failure("Backup", rc, stderr, command="backup")]
     diagnosis: str = diagnose_open_file_limit(stderr, *json_errors)
     if diagnosis:
         parts.append("")
         parts.append(diagnosis)
-    if stderr.strip():
+    if rc != NO_EXIT_CODE and stderr.strip():
         parts.append("")
         parts.append(stderr.strip())
     if json_errors:

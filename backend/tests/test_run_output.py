@@ -18,12 +18,16 @@ import pytest
 from app.services.run_output import (
     FAILED_ITEM_PARSE_LIMIT,
     MAX_REPORTED_FAILED_ITEMS,
+    NO_EXIT_CODE,
     RETENTION_SKIPPED_PARTIAL_NOTE,
+    describe_restic_failure,
     extract_failed_items,
+    failure_slug,
     filter_backup_output,
     format_backup_error,
     format_partial_backup_error,
     format_scan_errors,
+    format_step_error,
     render_failed_items,
 )
 
@@ -462,3 +466,120 @@ def test_retention_skipped_note_explains_the_trade_rather_than_a_fault():
     assert "not applied" in RETENTION_SKIPPED_PARTIAL_NOTE
     assert "nothing was deleted" in RETENTION_SKIPPED_PARTIAL_NOTE
     assert "keeps growing" in RETENTION_SKIPPED_PARTIAL_NOTE
+
+
+# ── Naming the kind of failure ───────────────────────────────────────────────
+#
+# `restic.py` reports "restic produced no exit code" as rc=-1, a sentinel that
+# cannot collide with restic's own codes. It is an internal marker, and every
+# formatter that prints it as though restic had returned it tells the operator
+# something untrue about a run that failed.
+
+
+def test_a_missing_exit_code_is_never_reported_as_one():
+    """-1 is this app's sentinel, not a restic exit code. Printing it as one
+    sends an operator searching restic's documentation for a code that does not
+    exist, instead of reading the reason (a timeout, or a binary that could not
+    be started) that is sitting right there."""
+    out = format_backup_error(NO_EXIT_CODE, [], "backup timed out after 24h 0m")
+    assert "exit code -1" not in out
+    assert "timed out after 24h 0m" in out
+
+
+def test_a_missing_exit_code_states_the_reason_once():
+    """The reason IS the headline in this case; repeating it below as though it
+    were restic's own stderr just pads the alert, which carries 200 chars."""
+    reason = "restic could not be started: FileNotFoundError: 'restic'"
+    out = format_step_error("Prune", NO_EXIT_CODE, reason)
+    assert out.count(reason) == 1
+    assert "exit code" not in out
+
+
+def test_a_real_exit_code_is_named_and_explained():
+    """The number is what an operator searches for; the phrase is what tells
+    them whether to look at the drive, the password or the lock."""
+    assert "exit code 11" in describe_restic_failure("Prune", 11)
+    assert "locked" in describe_restic_failure("Prune", 11)
+    assert "password" in describe_restic_failure("Repository access", 12)
+    assert "not found" in describe_restic_failure("Repository access", 10)
+
+
+def test_an_unknown_exit_code_still_names_itself():
+    """restic may grow codes we have no wording for; the number must survive."""
+    out = describe_restic_failure("Integrity check", 42)
+    assert "exit code 42" in out
+
+
+def test_format_step_error_keeps_restics_own_words_below_the_headline():
+    """The headline says what kind of failure it was; restic's stderr says what
+    restic saw. Losing the second leaves nothing to act on."""
+    out = format_step_error("Prune", 1, "Fatal: disk full")
+    assert "Prune" in out
+    assert "exit code 1" in out
+    assert "Fatal: disk full" in out
+    assert out.index("exit code 1") < out.index("Fatal: disk full")
+
+
+def test_format_step_error_is_never_empty():
+    """A step that failed with neither a code we know nor any output still has
+    to say that it failed."""
+    assert format_step_error("Prune", NO_EXIT_CODE, "").strip()
+    assert format_step_error("Prune", 1, "").strip()
+
+
+def test_the_log_slug_is_greppable_and_agrees_with_the_row():
+    """Logs and the run row describe one fact; the log form is a token so a
+    container log can be filtered on the cause across many runs."""
+    assert failure_slug(NO_EXIT_CODE) == "no_exit_code"
+    assert failure_slug(11) == "exit_code_11"
+
+
+# ── Exit code 3 belongs to the command, not to restic ────────────────────────
+#
+# Every other code this app names means one thing whichever command returned
+# it. 3 does not: `restic backup --help` defines it as "some source data could
+# not be read (incomplete snapshot created)" and `restic forget --help` as
+# "there was an error removing one or more snapshots" (both quoted from 0.19.1).
+# Looking it up by number alone therefore prints one command's meaning over the
+# other's, and the retention path is the one that gets it wrong.
+
+
+def test_exit_code_3_is_read_in_the_terms_of_the_command_that_returned_it():
+    """The two meanings are not variations on a theme — one says the source is
+    at fault and the snapshot survived, the other says the repository could not
+    be pruned. An operator acting on the wrong one goes to inspect a drive that
+    is fine while the repository keeps growing."""
+    backup = describe_restic_failure("Backup", 3, command="backup")
+    forget = describe_restic_failure("Retention (restic forget)", 3, command="forget")
+
+    assert "could not be read" in backup
+    assert "snapshots could not be removed" in forget
+    assert "could not be read" not in forget
+    assert "snapshot was still written" not in forget
+
+
+def test_a_failed_retention_never_claims_the_snapshot_was_written():
+    """The specific sentence that used to render here. It is not merely wrong,
+    it is reassuring: it reports a saved snapshot and a source-side fault, which
+    is the opposite of "old snapshots are piling up because forget failed" —
+    and it is the whole of the 200-character push."""
+    out = format_step_error(
+        "Retention (restic forget)",
+        3,
+        "unable to remove snapshot abc123: permission denied",
+        command="forget",
+    )
+
+    assert "some files could not be read" not in out
+    assert "snapshots could not be removed" in out
+    assert "unable to remove snapshot abc123" in out, "restic's own line survives"
+
+
+def test_exit_code_3_from_a_command_with_no_documented_3_says_only_the_number():
+    """prune, check and cat document no exit 3. If one ever returns it, the
+    honest report is the number and restic's stderr — inventing a meaning is how
+    the wrong sentence got printed in the first place."""
+    out = describe_restic_failure("Prune", 3, command="prune")
+
+    assert "exit code 3" in out
+    assert "—" not in out, "no explanation may be attached to a code we cannot read"

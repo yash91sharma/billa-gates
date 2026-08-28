@@ -4594,15 +4594,26 @@ async def test_backup_rc130_marks_the_run_failed(engine):
 
 @pytest.mark.parametrize("rc", (1, 2, 130, 137, -1))
 async def test_backup_nonzero_codes_other_than_three_all_fail(engine, rc):
-    """Anything that is not 0 or 3 is a failure, and the code is surfaced. This
-    is what keeps a future restic exit code from being silently absorbed into
-    `success`."""
+    """Anything that is not 0 or 3 is a failure, and what caused it reaches the
+    operator. This is what keeps a future restic exit code from being silently
+    absorbed into `success`.
+
+    What "reaches the operator" means differs for -1, and that is the point:
+    every real code is a fact about what restic decided, so the number is the
+    thing to surface. -1 is this app's marker for restic never having decided
+    anything, so the *reason* is — and printing it as an exit code names a code
+    restic has never returned."""
+    from app.db.models import CheckStatus, PruneStatus, RunStatus
+    from app.services.run_output import NO_EXIT_CODE
+
     run = await _run_with_backup_rc(engine, rc, stderr="something went wrong")
 
-    from app.db.models import CheckStatus, PruneStatus, RunStatus
-
     assert run.status == RunStatus.failed
-    assert str(rc) in (run.error_output or "")
+    if rc == NO_EXIT_CODE:
+        assert "something went wrong" in (run.error_output or "")
+        assert "exit code" not in (run.error_output or "")
+    else:
+        assert str(rc) in (run.error_output or "")
     assert run.prune_status == PruneStatus.skipped, "retention must not run"
     assert run.check_status == CheckStatus.skipped
 
@@ -5339,3 +5350,308 @@ async def test_step4_a_raising_unlock_still_fails_the_run_if_the_lock_persists(e
     assert run.status == RunStatus.failed
     assert run.finished_at is not None
     assert "locked" in (run.error_output or "").lower()
+
+
+# ── Saying which kind of failure this was ────────────────────────────────────
+#
+# Every restic wrapper reports "restic produced no exit code" as rc=-1 — the
+# process was stopped at its deadline, or it never started. Both reach the same
+# branches as a real non-zero exit, and a pipeline that prints that sentinel as
+# "restic exit code -1" describes a code restic does not have, on precisely the
+# runs where the operator has nothing else to go on.
+
+
+async def _make_run_row(engine, kind, run_id):
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                kind=kind,
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+
+async def test_a_prune_that_never_started_is_not_given_an_exit_code(engine):
+    """`restic could not be started` and `restic exited 1` need different
+    actions — check the image versus check the drive — and today both arrive as
+    a bare stderr string with a sentinel code in front of it."""
+    from app.db.models import RunKind, RunStatus
+
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    await _make_run_row(engine, RunKind.prune, run_id)
+
+    with patch(
+        "app.services.restic.restic_prune",
+        return_value=(
+            -1,
+            "",
+            "restic could not be started: FileNotFoundError: No such file",
+        ),
+    ):
+        await run_prune(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    output = run.prune_error_output or ""
+    assert "could not be started" in output
+    assert "exit code -1" not in output
+    assert "Prune" in output, "the operator has to know which step this was"
+
+
+async def test_a_prune_failure_names_the_code_and_keeps_restics_words(engine):
+    """The number is what gets searched for; restic's own line is what says
+    what happened. Neither may be dropped."""
+    from app.db.models import RunKind
+
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    await _make_run_row(engine, RunKind.prune, run_id)
+
+    with patch(
+        "app.services.restic.restic_prune",
+        return_value=(11, "", "unable to create lock: repository is already locked"),
+    ):
+        await run_prune(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    output = run.prune_error_output or ""
+    assert "exit code 11" in output
+    assert "locked" in output
+    assert "unable to create lock" in output
+
+
+async def test_a_prune_failure_logs_which_kind_it_was(engine, caplog):
+    """The row is for the operator; the log line is for whoever is grepping a
+    container log across many runs. `rc=-1` alone is not greppable as a cause."""
+    import logging
+
+    from app.db.models import RunKind
+
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    await _make_run_row(engine, RunKind.prune, run_id)
+
+    with caplog.at_level(logging.WARNING):
+        with patch(
+            "app.services.restic.restic_prune",
+            return_value=(-1, "", "prune timed out after 24h 0m"),
+        ):
+            await run_prune(JOB_ID, uuid.UUID(run_id))
+
+    assert "reason=no_exit_code" in caplog.text
+
+
+async def test_a_check_that_timed_out_reports_the_timeout(engine):
+    """A verification stopped at its deadline is not a corrupt repository, and
+    the run page is the only place that distinction is made."""
+    from app.db.models import CheckStatus, RunKind, RunStatus
+
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    await _make_run_row(engine, RunKind.check, run_id)
+
+    with patch(
+        "app.services.restic.restic_check",
+        return_value=(-1, "", "check timed out after 24h 0m"),
+    ):
+        await run_check(JOB_ID, uuid.UUID(run_id), "structural", None, None)
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    assert run.check_status == CheckStatus.failed
+    output = run.check_error_output or ""
+    assert "timed out after 24h 0m" in output
+    assert "exit code -1" not in output
+
+
+async def test_a_backup_that_never_produced_an_exit_code_is_not_given_one(engine):
+    """The production path for a backup timeout: the wrapper contains the
+    deadline and reports rc=-1, so the runner's own asyncio.TimeoutError branch
+    never sees it and the generic branch is what writes the row."""
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch("app.services.restic.restic_unlock", return_value=(0, "", "")),
+        patch("app.services.restic.restic_latest_snapshot_id", return_value=None),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(-1, "", "backup timed out after 24h 0m", None),
+        ),
+        patch("app.services.run_notifications.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    output = run.error_output or ""
+    assert "timed out after 24h 0m" in output
+    assert "exit code -1" not in output
+
+
+async def test_the_repository_check_does_not_invent_an_exit_code(engine):
+    """rc=-1 from `cat config` means the destination never answered. Reporting
+    it as "restic exit code -1" reads as a repository fault."""
+    from app.db.models import BackupRun, RunStatus, TriggeredBy
+
+    await _setup_job(engine)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with (
+        patch(
+            "app.services.restic.restic_cat_config",
+            return_value=(-1, "", "cat config timed out after 10m"),
+        ),
+        patch("app.services.run_notifications.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.failed
+    output = run.error_output or ""
+    assert "cat config timed out after 10m" in output
+    assert "exit code -1" not in output
+
+
+async def test_a_failed_retention_step_names_itself(engine):
+    """`restic forget` failing is reported in prune_error_output, the same
+    column a prune run uses — so the text has to say which of the two it was."""
+    from app.db.models import BackupRun, PruneStatus, RunStatus, TriggeredBy
+
+    await _setup_job(engine, retain_keep_last=5)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch("app.services.restic.restic_unlock", return_value=(0, "", "")),
+        patch("app.services.restic.restic_latest_snapshot_id", return_value=None),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, "", "", {"snapshot_id": "abc123"}),
+        ),
+        patch(
+            "app.services.restic.restic_forget",
+            return_value=(1, "", "Fatal: unable to open config file"),
+        ),
+        patch("app.services.run_notifications.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.prune_status == PruneStatus.failed
+    output = run.prune_error_output or ""
+    assert "Retention" in output
+    assert "exit code 1" in output
+    assert "unable to open config file" in output
+
+
+async def test_a_retention_that_could_not_remove_snapshots_says_so(engine):
+    """restic 0.19 returns 3 from `forget` when it fails to remove one or more
+    snapshots — a different fact from the 3 `backup` returns, which means source
+    data could not be read.
+
+    This is the call site that decides which of the two is printed, so it is
+    pinned here rather than only over the formatter: the runner passes the
+    restic command alongside the display label, and a run whose retention failed
+    must never be headlined with a sentence about unreadable files and a saved
+    snapshot. That reads as "your data is fine, your source is flaky" while what
+    actually happened is that the repository can no longer be pruned.
+    """
+    from app.db.models import BackupRun, PruneStatus, RunStatus, TriggeredBy
+
+    await _setup_job(engine, retain_keep_last=5)
+    run_id = str(uuid.uuid4())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(
+            BackupRun(
+                id=run_id,
+                job_id=str(JOB_ID),
+                status=RunStatus.running,
+                triggered_by=TriggeredBy.manual,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    with (
+        patch("app.services.restic.restic_cat_config", return_value=(0, "{}", "")),
+        patch("app.services.restic.restic_unlock", return_value=(0, "", "")),
+        patch("app.services.restic.restic_latest_snapshot_id", return_value=None),
+        patch(
+            "app.services.restic.restic_backup",
+            return_value=(0, "", "", {"snapshot_id": "abc123"}),
+        ),
+        patch(
+            "app.services.restic.restic_forget",
+            # Recorded from restic 0.19.1 with an unwritable snapshots/ dir.
+            return_value=(
+                3,
+                "",
+                "unable to remove snapshot/ee5d18d2 from the repository\n"
+                "failed to remove one or more snapshots",
+            ),
+        ),
+        patch("app.services.run_notifications.send_notification"),
+    ):
+        await run_backup(JOB_ID, uuid.UUID(run_id))
+
+    run = await _get_run(engine, run_id)
+    assert run.status == RunStatus.warning
+    assert run.prune_status == PruneStatus.failed
+    output = run.prune_error_output or ""
+    assert "exit code 3" in output
+    assert "snapshots could not be removed" in output
+    assert "failed to remove one or more snapshots" in output
+    assert "some files could not be read" not in output, (
+        "that is what exit 3 means to `backup`, not to `forget`"
+    )
+    assert "snapshot was still written" not in output

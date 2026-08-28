@@ -92,8 +92,14 @@ def _number(value: object) -> Optional[float]:
     return float(value)
 
 
-def _format_duration(seconds: float) -> str:
-    """A duration at the precision an operator reads at a glance."""
+def format_duration(seconds: float) -> str:
+    """A duration at the precision an operator reads at a glance.
+
+    Public because `restic.py` names the deadline it hit in the message it
+    returns when a command times out, and a second definition of "how long is
+    that" would eventually print the elapsed time on the progress line and the
+    limit in the failure message in two different shapes.
+    """
     total = int(seconds)
     if total < 60:
         return f"{total}s"
@@ -110,7 +116,7 @@ def _format_eta(seconds: object) -> Optional[str]:
     value = _number(seconds)
     if value is None or value <= 0:
         return None
-    return f"eta {_format_duration(value)}"
+    return f"eta {format_duration(value)}"
 
 
 def _format_rate(bytes_done: Optional[float], seconds_elapsed: Optional[float]) -> str:
@@ -341,7 +347,7 @@ def format_progress(status: Dict[str, Any], state: Optional[ScanState] = None) -
         parts.append(bytes_done)
 
     if state.elapsed:
-        parts.append(f"{_format_duration(state.elapsed)} elapsed")
+        parts.append(f"{format_duration(state.elapsed)} elapsed")
 
     rate = _format_rate(_number(status.get("bytes_done")), state.elapsed)
     if rate:
@@ -359,7 +365,7 @@ def format_progress(status: Dict[str, Any], state: Optional[ScanState] = None) -
 
     stalled = state.stalled_for
     if stalled:
-        parts.append(f"no data read for {_format_duration(stalled)}")
+        parts.append(f"no data read for {format_duration(stalled)}")
 
     error_count = status.get("error_count")
     if (

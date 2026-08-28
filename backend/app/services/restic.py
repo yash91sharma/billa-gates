@@ -46,6 +46,7 @@ from app.services import restic_process
 from app.services.restic_stream import (
     BackupOutputCollector,
     BoundedOutput,
+    format_duration,
     pump_stream,
 )
 
@@ -312,6 +313,18 @@ def build_forget_args(**retention_flags: Any) -> List[str]:
 # ── The captured-output commands ─────────────────────────────────────────────
 
 
+def _launch_failure_message(error: BaseException) -> str:
+    """What to put in the stderr slot when restic never ran.
+
+    Names the exception type as well as its text: `[Errno 2] No such file or
+    directory` on its own reads like something the destination did, and sends
+    an operator to look at a drive that is fine. The class is what says the
+    process could not be created at all — a missing binary, a failed fork, a
+    lost executable bit — which is a problem with the image, not the backup.
+    """
+    return f"restic could not be started: {type(error).__name__}: {error}"
+
+
 @log_call
 async def _run_captured(
     argv: List[str],
@@ -333,6 +346,14 @@ async def _run_captured(
     Decoding happens here rather than inside the runner so a non-UTF-8 byte in
     restic's output raises where it happened, instead of being reported as a
     failure to launch restic at all.
+
+    The two rc=-1 messages stand in for stderr all the way to the run page, so
+    each has to say which of the two it is. A timeout names the deadline it
+    hit — "prune timed out" alone cannot be told apart from a 60-second
+    metadata read and a 24-hour one, which is the difference between a slow
+    destination and one that never answered. A launch failure says restic never
+    started, because a bare OSError repr in the stderr slot reads like
+    something the repository did.
     """
     outcome = await restic_process.run_restic(
         argv,
@@ -341,9 +362,9 @@ async def _run_captured(
         run_id=run_id,
     )
     if outcome.timed_out:
-        return (-1, "", timed_out_message)
+        return (-1, "", f"{timed_out_message} after {format_duration(timeout_seconds)}")
     if outcome.error is not None:
-        return (-1, "", str(outcome.error))
+        return (-1, "", _launch_failure_message(outcome.error))
     return outcome.returncode, outcome.stdout.decode(), outcome.stderr.decode()
 
 
@@ -864,10 +885,18 @@ async def restic_backup(
 
     if outcome.timed_out:
         # Keep what was collected: on a timeout the partial record is the only
-        # evidence of where the run got to.
-        return (-1, collector.text(), "backup timed out", None)
+        # evidence of where the run got to. The limit goes in the message
+        # because this is the *only* place it is recorded — the wrapper
+        # contains the deadline, so the runner's own timeout branch never
+        # fires and never gets to name the job's configured hours.
+        return (
+            -1,
+            collector.text(),
+            f"backup timed out after {format_duration(timeout_seconds)}",
+            None,
+        )
     if outcome.error is not None:
-        return (-1, "", str(outcome.error), None)
+        return (-1, "", _launch_failure_message(outcome.error), None)
 
     # rc=3 is restic's "partial backup completed; snapshot was created" code —
     # the summary line is present and must be used so the snapshot can be

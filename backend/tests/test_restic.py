@@ -2383,3 +2383,93 @@ async def test_version_returns_none_when_the_binary_cannot_be_launched():
         "asyncio.create_subprocess_exec", side_effect=FileNotFoundError("restic")
     ):
         assert await restic_version() is None
+
+
+# ── What the two "restic produced no exit code" cases tell the operator ──────
+#
+# `_run_captured` folds three outcomes into one tuple, and rc=-1 covers two of
+# them: the command was stopped at its deadline, or it never started at all.
+# Those need different actions from the operator — wait for the drive versus
+# check the image — so the text that stands in for stderr has to say which,
+# and the timeout has to name the limit that was hit or "timed out" is a fact
+# with no size.
+
+
+async def test_a_timeout_names_the_limit_it_hit():
+    """ "prune timed out" alone leaves an operator unable to tell a 60-second
+    metadata deadline from a 24-hour one, which is the difference between a
+    slow drive and a drive that never answered."""
+    proc = _make_process(0)
+    proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
+    proc.kill = MagicMock()
+    proc.terminate = MagicMock()
+    proc.wait = AsyncMock()
+
+    async def fake_wait_for(coro, timeout):
+        if hasattr(coro, "close"):
+            coro.close()
+        raise asyncio.TimeoutError()
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch("asyncio.wait_for", side_effect=fake_wait_for),
+    ):
+        code, out, err = await restic_prune(REPO, PASSWORD, timeout_seconds=3600)
+
+    assert code == -1
+    assert "timed out" in err.lower()
+    assert "1h" in err, "the deadline that was hit has to appear in the message"
+
+
+async def test_a_binary_that_cannot_start_says_so():
+    """A raw OSError repr in the stderr slot reads like something the
+    repository did. It is not — restic never ran, and no amount of looking at
+    the drive will explain it."""
+    with patch(
+        "asyncio.create_subprocess_exec",
+        side_effect=FileNotFoundError(2, "No such file or directory"),
+    ):
+        code, out, err = await restic_prune(REPO, PASSWORD, timeout_seconds=60)
+
+    assert code == -1
+    assert "could not be started" in err.lower()
+    assert "FileNotFoundError" in err, "name the failure, not just its text"
+
+
+async def test_a_backup_that_cannot_start_says_so_too():
+    """restic_backup reports in its own shape and must not lose the reason."""
+    with patch(
+        "asyncio.create_subprocess_exec",
+        side_effect=FileNotFoundError(2, "No such file or directory"),
+    ):
+        code, out, err, summary = await restic_backup(
+            REPO, PASSWORD, "/sources/photos", 60
+        )
+
+    assert code == -1
+    assert summary is None
+    assert "could not be started" in err.lower()
+
+
+async def test_a_backup_timeout_names_the_limit_it_hit():
+    proc = _make_process(0)
+    proc.kill = MagicMock()
+    proc.terminate = MagicMock()
+    proc.wait = AsyncMock()
+
+    async def fake_wait_for(coro, timeout):
+        if hasattr(coro, "close"):
+            coro.close()
+        raise asyncio.TimeoutError()
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch("asyncio.wait_for", side_effect=fake_wait_for),
+    ):
+        code, out, err, summary = await restic_backup(
+            REPO, PASSWORD, "/sources/photos", 86400
+        )
+
+    assert code == -1
+    assert "timed out" in err.lower()
+    assert "24h" in err

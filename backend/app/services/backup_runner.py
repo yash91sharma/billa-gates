@@ -536,9 +536,16 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
             # Crucially we do NOT init here — that would corrupt the user's
             # mental model of "my repo wasn't found" when in fact the repo
             # is fine but temporarily unreachable.
+            # rc=-1 is not one of restic's codes — it is the wrapper's marker
+            # for "restic produced none", i.e. the destination did not answer
+            # within the metadata timeout or restic never started. Naming it as
+            # an exit code here sent the operator looking for a repository
+            # fault that the run had no evidence of.
             await _fail_init_check(
-                f"Failed to access repository (restic exit code {rc}): {stderr}",
-                log_tag=f"unrecognized_rc_{rc}",
+                run_output.format_step_error(
+                    "Repository access", rc, stderr, command="cat"
+                ),
+                log_tag=run_output.failure_slug(rc),
             )
             return
 
@@ -598,11 +605,15 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                 f"job_id={job_id} run_id={run_id} step=parent_lookup "
                 f"status=failed error={exc!r}"
             )
+            # The exception already names its own kind — timed out, could not
+            # launch, exit code N, malformed JSON. A "command failed" prefix in
+            # front of it re-labels a timeout as a failure restic reported,
+            # which is the one thing this text is here to distinguish.
             await run_records.update(
                 factory,
                 run_id,
                 status=RunStatus.failed,
-                error_output=f"snapshots command failed: {exc}",
+                error_output=f"Could not read the snapshot list: {exc}",
             )
             parent_lookup_success = False
 
@@ -779,7 +790,8 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                     # empty.
                     logger.error(
                         f"job_id={job_id} run_id={run_id} "
-                        f"step=backup_execution status=failed rc={rc}"
+                        f"step=backup_execution status=failed rc={rc} "
+                        f"reason={run_output.failure_slug(rc)}"
                     )
                     json_errors = run_output.extract_failed_items(stderr, stdout)
                     await run_records.update(
@@ -882,16 +894,25 @@ async def run_backup(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
                         f"job_id={job_id} run_id={run_id} step=forget status=passed"
                     )
                 else:
+                    # Named "Retention", not "forget": this column is also
+                    # where a standalone prune run writes, and the two are
+                    # different operations with different consequences.
                     await run_records.update(
                         factory,
                         run_id,
                         prune_status=PruneStatus.failed,
-                        prune_error_output=forget_err,
+                        prune_error_output=run_output.format_step_error(
+                            "Retention (restic forget)",
+                            rc,
+                            forget_err,
+                            command="forget",
+                        ),
                     )
                     retention_failed = True
                     logger.warning(
                         f"job_id={job_id} run_id={run_id} step=forget "
-                        f"status=failed rc={rc}"
+                        f"status=failed rc={rc} "
+                        f"reason={run_output.failure_slug(rc)}"
                     )
             else:
                 logger.info(
@@ -1074,14 +1095,17 @@ async def run_prune(job_id: uuid.UUID, run_id: uuid.UUID) -> None:
             )
         else:
             logger.warning(
-                f"job_id={job_id} run_id={run_id} step=prune status=failed rc={rc}"
+                f"job_id={job_id} run_id={run_id} step=prune status=failed "
+                f"rc={rc} reason={run_output.failure_slug(rc)}"
             )
             await run_records.finalize(
                 factory,
                 run_id,
                 status=RunStatus.failed,
                 prune_status=PruneStatus.failed,
-                prune_error_output=prune_err,
+                prune_error_output=run_output.format_step_error(
+                    "Prune", rc, prune_err, command="prune"
+                ),
                 check_status=CheckStatus.skipped,
             )
 
@@ -1185,14 +1209,16 @@ async def run_check(
         else:
             logger.warning(
                 f"job_id={job_id} run_id={run_id} step=integrity_check "
-                f"status=failed rc={rc}"
+                f"status=failed rc={rc} reason={run_output.failure_slug(rc)}"
             )
             await run_records.finalize(
                 factory,
                 run_id,
                 status=RunStatus.failed,
                 check_status=CheckStatus.failed,
-                check_error_output=check_err,
+                check_error_output=run_output.format_step_error(
+                    "Integrity check", rc, check_err, command="check"
+                ),
                 prune_status=PruneStatus.skipped,
             )
 
