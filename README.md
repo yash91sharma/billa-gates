@@ -8,22 +8,23 @@ A web app for scheduled [restic](https://restic.net/) backups — create
 backup jobs, run them on a schedule, apply retention, verify integrity, and get
 notified.
 
-> Note: I have used AI tools (Claude Code, Codex, Antigravity) to build this project, and I
-> use this to backup my NAS directories (Photos, documents, log files). If you are using this,
-> please first test (backup+restore) to make sure it works for your use case. Please do start
-> and issue if you find a bug.
+> I have used AI tools (Claude Code, Antigravity). I use it to back up my NAS (photos,
+> documents, logs). Please test (backup restore) for your own setup before relying on it, and
+> open an issue if you find a bug.
 
 ![Dashboard](frontend/screenshots/pages/Dashboard.png)
 
 ## Features
 
-- **Scheduled backups** — cron expressions or simple intervals (`6h`, `1d`, `30m`).
-- **Retention & pruning** — `forget`/`prune` policies applied after each run.
-- **Integrity checks** — optional `restic check` verification per job.
-- **Snapshot browsing** — view snapshots and run history in the UI.
-- **Drive capacity** — a Backup Destinations page showing total, used and free space per drive.
-- **Notifications** — push run results to [ntfy](https://ntfy.sh/).
-- **Single container** — FastAPI serves both the API and the React frontend.
+- **Scheduled backups** — cron expressions or intervals (`30m`, `6h`, `1d`).
+- **Retention** — `restic forget` runs after every backup; `restic prune` runs when you click
+  **Prune Old Files** on the job page.
+- **Integrity checks** — `restic check` (structural, subset or full) on demand from the job page.
+- **Snapshots and run history** — read live from restic, alongside the exact restic commands each
+  job runs.
+- **Destinations page** — total, used and free space per backup drive.
+- **Notifications** — run results pushed to ntfy.
+- **Single container** — one image serves the API and the UI; state is one SQLite file.
 
 ## Screenshots
 
@@ -31,16 +32,34 @@ notified.
 | -------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------- |
 | ![Jobs](frontend/screenshots/pages/Jobs.png) | ![Job detail](frontend/screenshots/pages/JobDetail.png) | ![Settings](frontend/screenshots/pages/Settings.png) |
 
-## Note
-
-Published images are **arm64 only**. If you need `amd64`, build your own image — instructions are in [deployment.md](deployment.md).
-
 ## Deploy
 
+Published images (`yash91sharma/billa-gates`) are **arm64 only**. For amd64, build your own —
+see [deployment.md](deployment.md).
+
+### 1. Mark your folders
+
+Billa-Gates refuses to back up from, or to, a folder without a `.billa_gates_check` file at its
+root. This is how a mounted drive is told apart from the empty directory a detached drive leaves
+behind — without it, a missing drive would produce an empty snapshot and retention would then
+delete the real ones.
+
 ```bash
-mkdir billa-gates && cd billa-gates
-mkdir data   # holds the SQLite DB, restic cache etc.
+touch /path/to/documents/.billa_gates_check     # every source
+touch /path/to/backup-drive/.billa_gates_check  # every destination
 ```
+
+Create the file on the drive or share itself, not on an empty mountpoint. If a run later fails
+with a missing-sentinel error, the mount has most likely dropped, and check it before recreating the
+file.
+
+### 2. Start the container
+
+```bash
+mkdir -p billa-gates/data && cd billa-gates
+```
+
+`docker-compose.yml`:
 
 ```yaml
 services:
@@ -50,70 +69,73 @@ services:
     ports:
       - '12345:12345'
     environment:
-      - TZ=America/Los_Angeles
+      - TZ=America/Los_Angeles # timezone for cron schedules
     volumes:
-      # ── Sources (read-only) ── one line per folder you want to back up.
-      # The label after /sources/ is what shows up in the UI dropdown.
-      - /path/to/back/up:/sources/documents:ro
+      # Sources (read-only): one line per folder to back up.
+      # The label after /sources/ is what the UI shows.
+      - /path/to/documents:/sources/documents:ro
       # - /path/to/photos:/sources/photos:ro
 
-      # ── Destinations (read-write) ── your backup drives.
-      # Each job creates its own restic repo at /destinations/{label}/{job name}.
-      - /path/to/backup/drive:/destinations/main
+      # Destinations (read-write): your backup drives.
+      # Each job gets its own restic repository at /destinations/{label}/{job name}.
+      - /path/to/backup-drive:/destinations/main
 
-      # ── App state (SQLite DB + restic cache) ── do not change the /app/data side.
+      # App state: SQLite DB and restic cache. Keep the /app/data side as is.
       - ./data:/app/data
     restart: unless-stopped
 ```
 
-## Sentinel files
-
-Billa-Gates won't run against a folder missing a sentinel file (`.billa_gates_check`) at its root:
-
 ```bash
-touch /path/to/back/up/.billa_gates_check       # each source mount
-touch /path/to/backup/drive/.billa_gates_check  # each destination
+docker compose up -d
 ```
 
-- **Sources** are mounted read-only under `/sources/{label}` and become selectable in the UI. A job backs up the whole mount, so the sentinel goes at its root.
-- **Destinations** are backup drives mounted under `/destinations/{label}`. Each job gets its own restic repository on that drive at `/destinations/{label}/{job name}`, created when you create the job.
+Open `http://<host>:12345`.
 
-| Job configuration                     | Effective backup path | Sentinel file                           |
-| ------------------------------------- | --------------------- | --------------------------------------- |
-| Source `documents`                    | `/sources/documents`  | `/sources/documents/.billa_gates_check` |
-| Destination `main` (any job using it) | `/destinations/main`  | `/destinations/main/.billa_gates_check` |
+A job backs up a whole source mount. To back up a subfolder, mount it as its own source.
 
-- Create the file once, on the underlying drive/share — not on a temporary mountpoint.
-- If a run fails with a missing-sentinel error, it usually means the mount actually dropped. Check the mount before recreating the file.
-- Application state (SQLite DB + restic cache) lives in `/app/data`.
+## Restore
 
-## Backup Destinations page
+Billa-Gates does not restore. Each repository is a plain restic repository at
+`/destinations/{destination}/{job name}`, so any restic binary works — on the host with the drive
+attached, or inside the container. The job page shows these commands with the path filled in:
 
-**Destinations** in the sidebar lists every drive mounted under `/destinations` (plus any destination a job still points at, even if its folder has gone) with total, used and free space.
+```bash
+docker exec -it billa-gates sh
+export RESTIC_REPOSITORY=/destinations/main/<job name>
+export RESTIC_PASSWORD=<job password>
+restic snapshots
+restic restore latest --target /destinations/main/restored   # any writable path
+```
 
-A few things about the numbers:
+## Losing the database or a job
 
-- **Used + free does not add up to total.** Filesystems hold blocks back. **Free** is the figure to plan against: it is what a backup can actually write, and it matches the `Avail` column of `df -h` exactly.
-- **The percentage is measured against total**, so it is derivable from the numbers beside it. `df` computes its `Use%` against used + free instead, so `df` reads a few points higher on the same drive. A drive can also show 95% used with **zero bytes free**, which is why the "no space left" flag keys on free space rather than on the percentage.
-- **Nothing is stored and no history is kept.** Figures are read from the filesystem when the page loads, and re-read after any job run finishes; **Refresh** forces a fresh read. Restarting the container simply measures again.
-- **Two labels can be folders on one drive** (or a label may not be a real mount at all, in which case it reports the container's own filesystem). Those rows are marked, and their capacities must not be added together — which is why the page shows no total.
-- **A drive that is detached, unreadable, or too slow to answer** shows dashes and a reason for that row alone; the other drives still load.
+The repository path is derived from the job, not from the database. If `data/` is lost or a job
+is deleted by mistake, create a job with the same **name**, **destination** and **password**: it
+adopts the existing repository with every snapshot intact and retention still applying. That is
+also why those three fields cannot be changed after creation.
 
-Note restic deduplicates and compresses, so a source larger than the free space shown may still fit. The page sizes the drive, not the next snapshot.
+Deleting a job leaves its repository on disk unless you tick **Also permanently delete the
+repository** in the delete dialog.
 
-## Recovering a job after losing the database
+## Destinations page
 
-A job's repository is named after the job itself — `/destinations/{destination}/{job name}` — so it never depends on the database to be found again. If `/app/data` is lost, or you delete a job by mistake, create a new job with the **same name, same destination, and same password**: it adopts the existing repository and carries on, with all previous snapshots intact and retention still applying to them.
+Figures are read from the filesystem when the page loads and again after every run — nothing is
+stored.
 
-Because of that, three fields are fixed once a job is created — `name`, `destination`, and `password` — since together they are the address of the repository. Deleting a job leaves its repository on disk by default. Select **Also permanently delete the repository** in the delete dialog if you really want the snapshots gone.
+- **Free** is what a backup can actually write and matches `df`'s `Avail`. Used + free is less
+  than total because filesystems reserve blocks.
+- The percentage is measured against total, so it reads a few points lower than `df`'s `Use%`. A
+  drive can be 95% used with zero bytes free — plan against **Free**.
+- Two labels on one drive are marked and not summed. restic deduplicates and compresses, so a
+  source larger than the free space may still fit.
 
 ## Quirks
 
-- **Interval schedules reset on container restart**:
-  Interval schedules (`6h`, `1d`, `30m`) count from application startup, not from the last backup. Restarting the container resets the countdown. If your container restarts frequently, use a cron schedule instead — cron fires at fixed wall-clock times and is unaffected by restarts.
-
-- Billa-Gates **must** run as a single-process container with exactly one (1) Uvicorn worker, and cannot be scaled horizontally:
-  The application uses Python's `asyncio.Lock` to coordinate and prevent overlapping backup, prune, or check runs on the same repository. Because locks are held in memory, running multiple Uvicorn workers (e.g., `--workers 4`) or scaling the container horizontally across multiple nodes will bypass this locking mechanism. If multiple workers or container replicas attempt to perform write operations (like backup, prune, or forget) on the same restic repository simultaneously, it will cause lock conflicts, failed runs, or potential repository write collisions.
+- **Interval schedules reset on restart.** `30m` / `6h` / `1d` count from application start, not
+  from the last run. If the container restarts often, use a cron schedule instead.
+- **One process, one worker.** Overlapping runs on a repository are prevented with in-memory
+  locks. Running multiple Uvicorn workers or container replicas bypasses them and lets two
+  processes write to the same repository at once.
 
 ## License
 
