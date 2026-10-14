@@ -22,6 +22,7 @@ import type {
   DestinationUsageResponse,
   HealthStatus,
   JobCommand,
+  RestoreInstructions,
   Snapshot,
 } from '../lib/types'
 import Dashboard from '../pages/Dashboard'
@@ -134,6 +135,32 @@ const resticEnv = {
   RESTIC_REPOSITORY: '/destinations/main/Documents Backup',
   RESTIC_PASSWORD: "<this job's repository password>",
   RESTIC_CACHE_DIR: '/app/data/restic-cache',
+}
+
+// GET /api/jobs/{id}/restore for "Documents Backup" (documents → main), on an
+// install without a /restore mount, which is the README's default.
+const restoreInstructions: RestoreInstructions = {
+  repository_folder: 'Documents Backup',
+  repository_contents: ['config', 'data/', 'index/', 'keys/', 'locks/', 'snapshots/'],
+  drive_marker: '.billa_gates_check',
+  destination_label: 'main',
+  destination_path: '/destinations/main',
+  repository_path: '/destinations/main/Documents Backup',
+  snapshot_path: '/sources/documents',
+  drive_placeholder: '/path/to/backup-drive',
+  target_placeholder: '/path/to/empty-folder',
+  compose_mapping: '/path/to/backup-drive:/destinations/main',
+  restore_root: '/restore',
+  restore_root_mounted: false,
+  linux_commands: [
+    "sudo restic -r '/path/to/backup-drive/Documents Backup' snapshots",
+    "sudo restic -r '/path/to/backup-drive/Documents Backup' restore latest:/sources/documents --target '/path/to/empty-folder' --sparse",
+  ],
+  desktop_commands: [
+    "restic -r '/path/to/backup-drive/Documents Backup' snapshots",
+    "restic -r '/path/to/backup-drive/Documents Backup' restore latest:/sources/documents --target '/path/to/empty-folder' --sparse",
+  ],
+  container_commands: [],
 }
 
 const jobCommands: JobCommand[] = [
@@ -350,6 +377,7 @@ beforeEach(() => {
   vi.mocked(api.getJobRuns).mockResolvedValue([run])
   vi.mocked(api.getJobSnapshots).mockResolvedValue([snapshot])
   vi.mocked(api.getJobCommands).mockResolvedValue(jobCommands)
+  vi.mocked(api.getRestoreInstructions).mockResolvedValue(restoreInstructions)
   vi.mocked(api.getRecentRuns).mockResolvedValue([run])
   vi.mocked(api.getRun).mockResolvedValue(run)
   vi.mocked(api.getHealth).mockResolvedValue(health)

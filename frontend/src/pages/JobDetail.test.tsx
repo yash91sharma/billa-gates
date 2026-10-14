@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import * as api from '../lib/api'
-import type { BackupJob, BackupRun, JobCommand, Snapshot } from '../lib/types'
+import type { BackupJob, BackupRun, JobCommand, RestoreInstructions, Snapshot } from '../lib/types'
 import { renderWithProviders } from '../test/utils'
 import JobDetail from './JobDetail'
 
@@ -89,6 +89,32 @@ const makeSnapshot = (overrides: Partial<Snapshot> = {}): Snapshot => ({
   ...overrides,
 })
 
+// Shaped exactly like GET /api/jobs/{id}/restore for this job. The commands are
+// the backend's, already shell-quoted: the page must print them verbatim.
+const makeRestoreInstructions = (): RestoreInstructions => ({
+  repository_folder: 'My Documents',
+  repository_contents: ['config', 'data/', 'index/', 'keys/', 'locks/', 'snapshots/'],
+  drive_marker: '.billa_gates_check',
+  destination_label: 'main',
+  destination_path: '/destinations/main',
+  repository_path: '/destinations/main/My Documents',
+  snapshot_path: '/sources/documents',
+  drive_placeholder: '/path/to/backup-drive',
+  target_placeholder: '/path/to/empty-folder',
+  compose_mapping: '/path/to/backup-drive:/destinations/main',
+  restore_root: '/restore',
+  restore_root_mounted: false,
+  linux_commands: [
+    "sudo restic -r '/path/to/backup-drive/My Documents' snapshots",
+    "sudo restic -r '/path/to/backup-drive/My Documents' restore latest:/sources/documents --target '/path/to/empty-folder' --sparse",
+  ],
+  desktop_commands: [
+    "restic -r '/path/to/backup-drive/My Documents' snapshots",
+    "restic -r '/path/to/backup-drive/My Documents' restore latest:/sources/documents --target '/path/to/empty-folder' --sparse",
+  ],
+  container_commands: [],
+})
+
 // Shaped exactly like GET /api/jobs/{id}/commands: the backend renders these
 // from the same builders the runner execs, so the page's only job is to show
 // them verbatim.
@@ -162,6 +188,7 @@ const makeCommands = (overrides: Partial<JobCommand>[] = []): JobCommand[] => {
 beforeEach(() => {
   vi.mocked(api.getJob).mockResolvedValue(makeJob())
   vi.mocked(api.getJobCommands).mockResolvedValue(makeCommands())
+  vi.mocked(api.getRestoreInstructions).mockResolvedValue(makeRestoreInstructions())
   vi.mocked(api.getJobRuns).mockResolvedValue([])
   vi.mocked(api.getJobSnapshots).mockResolvedValue([])
   vi.mocked(api.unlockJob).mockResolvedValue({ removed: [], remaining: [], output: '' })
@@ -454,44 +481,63 @@ describe('JobDetail', () => {
     })
   })
 
-  describe('restore snippet', () => {
-    it('shows a restore command snippet', async () => {
+  // The card's behaviour is tested in RestoreCard.test.tsx; these pin the
+  // page's half of it: where the commands come from and what feeds the card.
+  describe('restore card', () => {
+    // Whole-text match: each argument inside the <code> is its own element.
+    const isCommand = (command: string) => (_: string, el: Element | null) =>
+      el?.tagName === 'CODE' && el.textContent === command
+
+    it("fetches this job's restore instructions", async () => {
       renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
-      await waitFor(() =>
-        expect(screen.getByText(/restic restore|restic snapshots/i)).toBeInTheDocument()
+      await waitFor(() => expect(vi.mocked(api.getRestoreInstructions)).toHaveBeenCalled())
+      // Rendered outside a <Route>, so useParams yields no id in jsdom; assert
+      // it asks for the same job every other query on the page does.
+      expect(vi.mocked(api.getRestoreInstructions).mock.calls[0]).toEqual(
+        vi.mocked(api.getJob).mock.calls[0]
       )
     })
 
-    it('shows the repository path built from the destination label and job name', async () => {
-      // The path is keyed on the job's name, not its id — that is what makes
-      // it reconstructible by hand after the database is gone.
+    it('prints the commands the backend built, verbatim', async () => {
+      // The card used to be a template here and printed
+      // `export RESTIC_REPOSITORY=/destinations/main/My Documents`: unquoted,
+      // so a shell split it at the space and restic found no repository.
       renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
-      await waitFor(() => screen.getByText(/restic restore|restic snapshots/i))
-      const snippetEl = screen.getByText(/restic restore|restic snapshots/i).closest('pre')
-      expect(snippetEl?.textContent).toContain(
-        'export RESTIC_REPOSITORY=/destinations/main/My Documents'
-      )
-      expect(snippetEl?.textContent).not.toContain('job-1')
-    })
 
-    it('never shows the real restic password in the restore snippet', async () => {
-      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
-      await waitFor(() => screen.getByText(/restic restore|restic snapshots/i))
-      const snippetEl = screen
-        .getByText(/restic restore|restic snapshots/i)
-        .closest('pre, code, [data-testid]')
-      if (snippetEl) {
-        expect(snippetEl.textContent).not.toMatch(/s3cr3t|real_password/)
+      for (const command of makeRestoreInstructions().linux_commands) {
+        expect(await screen.findByText(isCommand(command))).toBeInTheDocument()
       }
-      expect(screen.queryByText(/RESTIC_PASSWORD=\w{8,}/)).not.toBeInTheDocument()
+      expect(screen.queryByText(/export RESTIC_REPOSITORY/)).not.toBeInTheDocument()
     })
 
-    it('shows placeholder password reference in restore snippet', async () => {
+    it('sizes the restore target from the newest snapshot, not the first listed', async () => {
+      vi.mocked(api.getJobSnapshots).mockResolvedValue([
+        makeSnapshot({
+          snapshot_id: 'old',
+          snapshot_time: '2024-01-10T00:00:00Z',
+          size_bytes: 1073741824,
+        }),
+        makeSnapshot({
+          snapshot_id: 'new',
+          snapshot_time: '2024-01-20T00:00:00Z',
+          size_bytes: 3 * 1073741824,
+        }),
+      ])
       renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+
       await waitFor(() =>
-        expect(
-          screen.getByText(/RESTIC_PASSWORD|\$\{password\}|your.password/i)
-        ).toBeInTheDocument()
+        expect(screen.getByRole('region', { name: /restore/i })).toHaveTextContent(
+          /at least 3 GB free/
+        )
+      )
+    })
+
+    it('never shows a password line', async () => {
+      renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
+      await screen.findByText(isCommand(makeRestoreInstructions().linux_commands[0]))
+
+      expect(screen.getByRole('region', { name: /restore/i }).textContent).not.toMatch(
+        /RESTIC_PASSWORD/
       )
     })
   })
@@ -1363,7 +1409,7 @@ describe('JobDetail', () => {
 
     // Refresh means the whole page, not just the polled query: the snapshot
     // list and the command preview are fetched once on mount and never again.
-    it('refetches the job, its runs, its snapshots and its commands', async () => {
+    it('refetches the job, its runs, its snapshots, its commands and its restore instructions', async () => {
       const user = userEvent.setup()
       vi.mocked(api.getJobRuns).mockResolvedValue([makeRun()])
       renderWithProviders(<JobDetail />, { route: '/jobs/job-1' })
@@ -1376,6 +1422,7 @@ describe('JobDetail', () => {
         expect(vi.mocked(api.getJobRuns)).toHaveBeenCalledTimes(2)
         expect(vi.mocked(api.getJobSnapshots)).toHaveBeenCalledTimes(2)
         expect(vi.mocked(api.getJobCommands)).toHaveBeenCalledTimes(2)
+        expect(vi.mocked(api.getRestoreInstructions)).toHaveBeenCalledTimes(2)
       })
     })
 

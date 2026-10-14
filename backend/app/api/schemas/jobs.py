@@ -424,6 +424,41 @@ class JobCommandResponse(BaseModel):
     command: Optional[str] = None
 
 
+class RestoreInstructionsResponse(BaseModel):
+    """How to restore this job's backups by hand. The app never restores.
+
+    Built by `job_commands.build_restore_instructions`. Every command is
+    shell-quoted by the backend and must be rendered verbatim: the card used to
+    assemble them in the frontend and printed an unquoted repository path. The
+    host-side commands contain `drive_placeholder` and `target_placeholder`,
+    which the operator replaces; the card explains each one.
+    """
+
+    # The folder at the top level of the backup drive that is this job's
+    # repository, and what restic keeps inside it.
+    repository_folder: str
+    repository_contents: List[str]
+    # The marker file at the top level of the drive (the sentinel every run
+    # checks for), so the operator can tell they have the right drive.
+    drive_marker: str
+    destination_label: str
+    # Paths as the app's container sees them.
+    destination_path: str
+    repository_path: str
+    # The path inside every snapshot (`latest:<snapshot_path>`).
+    snapshot_path: str
+    drive_placeholder: str
+    target_placeholder: str
+    # `<drive_placeholder>:<destination_path>`, as it appears in docker-compose.yml.
+    compose_mapping: str
+    restore_root: str
+    restore_root_mounted: bool
+    linux_commands: List[str]
+    desktop_commands: List[str]
+    # Empty unless a folder is mounted at `restore_root`.
+    container_commands: List[str]
+
+
 class LockInfo(BaseModel):
     """One restic lock, described for the operator.
 

@@ -7,6 +7,7 @@ import type {
   JobCommand,
   RenameDestinationResult,
   ResticUpdateCheck,
+  RestoreInstructions,
   Snapshot,
   UnlockResult,
 } from './types'
@@ -74,6 +75,8 @@ export const unlockJob = (id: string) =>
 export const getJobRuns = (id: string) => request<BackupRun[]>(`/jobs/${id}/runs`)
 export const getJobSnapshots = (id: string) => request<Snapshot[]>(`/jobs/${id}/snapshots`)
 export const getJobCommands = (id: string) => request<JobCommand[]>(`/jobs/${id}/commands`)
+export const getRestoreInstructions = (id: string) =>
+  request<RestoreInstructions>(`/jobs/${id}/restore`)
 
 // ── Runs ──────────────────────────────────────────────────────────────────────
 export const getRecentRuns = (limit = 10) => request<BackupRun[]>(`/runs/recent?limit=${limit}`)

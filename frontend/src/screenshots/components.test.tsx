@@ -10,6 +10,7 @@
  * Add or remove screenshots by editing the SCENARIOS list below.
  */
 import { render } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { page } from '@vitest/browser/context'
 import { capture } from './capture'
 import { afterEach, test } from 'vitest'
@@ -21,6 +22,7 @@ import EmptyState from '../components/EmptyState'
 import FieldLabel from '../components/FieldLabel'
 import PageHeader from '../components/PageHeader'
 import RefreshCountdown from '../components/RefreshCountdown'
+import RestoreCard from '../components/RestoreCard'
 import RunStatusBadge from '../components/RunStatusBadge'
 import ScheduleInput from '../components/ScheduleInput'
 import SnapshotList from '../components/SnapshotList'
@@ -35,7 +37,7 @@ import {
   TableRow,
 } from '../components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../components/ui/tooltip'
-import type { Snapshot } from '../lib/types'
+import type { RestoreInstructions, Snapshot } from '../lib/types'
 
 // All paths are relative to this test file; ../../screenshots resolves to
 // frontend/screenshots.
@@ -388,3 +390,66 @@ test('RefreshCountdown - refresh in flight', async () => {
   cleanup = result.unmount
   await capture(`${OUT}/RefreshCountdown--refreshing.png`)
 })
+
+// ── RestoreCard — every tab, and the in-container tab both ways ──────────────
+//
+// The card is how an operator gets their files back, usually in a hurry, so
+// each state is worth a look: a wrong word here costs more than anywhere else.
+
+const RESTORE: RestoreInstructions = {
+  repository_folder: 'Family Photos',
+  repository_contents: ['config', 'data/', 'index/', 'keys/', 'locks/', 'snapshots/'],
+  drive_marker: '.billa_gates_check',
+  destination_label: 'usb',
+  destination_path: '/destinations/usb',
+  repository_path: '/destinations/usb/Family Photos',
+  snapshot_path: '/sources/photos',
+  drive_placeholder: '/path/to/backup-drive',
+  target_placeholder: '/path/to/empty-folder',
+  compose_mapping: '/path/to/backup-drive:/destinations/usb',
+  restore_root: '/restore',
+  restore_root_mounted: true,
+  linux_commands: [
+    "sudo restic -r '/path/to/backup-drive/Family Photos' snapshots",
+    "sudo restic -r '/path/to/backup-drive/Family Photos' restore latest:/sources/photos --target '/path/to/empty-folder' --sparse",
+  ],
+  desktop_commands: [
+    "restic -r '/path/to/backup-drive/Family Photos' snapshots",
+    "restic -r '/path/to/backup-drive/Family Photos' restore latest:/sources/photos --target '/path/to/empty-folder' --sparse",
+  ],
+  container_commands: [
+    'docker exec -it billa-gates sh',
+    "restic -r '/destinations/usb/Family Photos' snapshots",
+    "restic -r '/destinations/usb/Family Photos' restore latest:/sources/photos --target '/restore/Family Photos' --sparse",
+  ],
+}
+
+const RESTORE_SCENARIOS: Array<{ name: string; tab: string | null; info: RestoreInstructions }> = [
+  { name: 'linux', tab: null, info: RESTORE },
+  { name: 'container', tab: 'Inside the container', info: RESTORE },
+  {
+    name: 'container-not-mounted',
+    tab: 'Inside the container',
+    info: { ...RESTORE, restore_root_mounted: false, container_commands: [] },
+  },
+  { name: 'desktop', tab: 'macOS / Windows', info: RESTORE },
+]
+
+for (const { name, tab, info } of RESTORE_SCENARIOS) {
+  test(`RestoreCard - ${name}`, async () => {
+    await page.viewport(1024, 1100)
+    const result = render(
+      <div style={{ width: 960, padding: 24 }}>
+        <RestoreCard instructions={info} latestSnapshotBytes={318_000_000} />
+      </div>
+    )
+    cleanup = result.unmount
+    if (tab) {
+      const trigger = Array.from(result.container.querySelectorAll('[role="tab"]')).find(
+        (t) => t.textContent?.trim() === tab
+      ) as HTMLElement
+      await userEvent.click(trigger)
+    }
+    await capture(`${OUT}/RestoreCard--${name}.png`)
+  })
+}

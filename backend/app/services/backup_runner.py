@@ -65,6 +65,11 @@ logger = get_logger(__name__)
 SOURCES_ROOT: str = "/sources"
 DESTINATIONS_ROOT: str = "/destinations"
 
+# The marker file that proves a drive is really attached (see the two checks
+# below). Also named on the Restore card, which is how an operator recognizes
+# the right drive on another computer.
+SENTINEL_FILENAME: str = ".billa_gates_check"
+
 # Restic exit codes (stable contract since 0.17). Branching on these is the
 # only reliable way to classify a failure — stderr message wording is not a
 # contract and has changed between restic releases (gaps.md H5). Defined in
@@ -109,9 +114,7 @@ def check_mount_file_exists(source_label: str) -> bool:
     directory exists either way, and restic would turn the empty one into a
     0-file snapshot that `restic forget` then prunes the real history against.
     """
-    check_file_path = os.path.join(
-        build_source_path(source_label), ".billa_gates_check"
-    )
+    check_file_path = os.path.join(build_source_path(source_label), SENTINEL_FILENAME)
     return os.path.exists(check_file_path)
 
 
@@ -122,7 +125,7 @@ def check_destination_mount_file_exists(destination_label: str) -> bool:
     Checks for .billa_gates_check at the root of the volume mount.
     """
     check_file_path = os.path.join(
-        DESTINATIONS_ROOT, destination_label, ".billa_gates_check"
+        DESTINATIONS_ROOT, destination_label, SENTINEL_FILENAME
     )
     return os.path.exists(check_file_path)
 

@@ -17,11 +17,12 @@ import EmptyState from '../components/EmptyState'
 import JobForm from '../components/JobForm'
 import PageHeader from '../components/PageHeader'
 import RefreshCountdown from '../components/RefreshCountdown'
+import RestoreCard from '../components/RestoreCard'
 import RunStatusBadge from '../components/RunStatusBadge'
 import TriggeredByIcon from '../components/TriggeredByIcon'
 import { StopRunDialog } from './Dashboard'
 import * as api from '../lib/api'
-import type { BackupRun, JobCommand, LockInfo, UnlockResult } from '../lib/types'
+import type { BackupRun, JobCommand, LockInfo, Snapshot, UnlockResult } from '../lib/types'
 import { formatBytes, parseApiError, type ConflictingJob } from '../lib/utils'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
@@ -76,6 +77,16 @@ const POLL_INTERVAL_MS = 60_000
 
 function shouldPoll(runs: BackupRun[]): boolean {
   return runs.some((r) => r.status === 'running' || r.check_status === null)
+}
+
+/** The newest snapshot by time, not by position: the restore card sizes the
+ *  target folder from it. */
+function newestSnapshot(snapshots: Snapshot[] | undefined): Snapshot | undefined {
+  return snapshots?.reduce<Snapshot | undefined>(
+    (newest, s) =>
+      !newest || Date.parse(s.snapshot_time) > Date.parse(newest.snapshot_time) ? s : newest,
+    undefined
+  )
 }
 
 function formatLockAge(seconds: number): string {
@@ -244,6 +255,13 @@ export default function JobDetail() {
     queryFn: () => api.getJobCommands(id ?? ''),
   })
 
+  // How to restore by hand, also rendered by the backend: shell-quoted
+  // commands and placeholders, printed verbatim by RestoreCard.
+  const { data: restoreInstructions, error: restoreError } = useQuery({
+    queryKey: ['jobRestore', id],
+    queryFn: () => api.getRestoreInstructions(id ?? ''),
+  })
+
   // Mounts feed the source/destination dropdowns in the edit form. Fetched
   // unconditionally so the data is ready the moment the user clicks Edit.
   const { data: sourceMounts } = useQuery({
@@ -255,10 +273,10 @@ export default function JobDetail() {
     queryFn: api.listDestinationMounts,
   })
 
-  // "Refresh" means the page, not just the query that polls: the snapshot list
-  // and the command preview are fetched once on mount and never again, so a
-  // button that only reloaded the run list would leave two tabs stale while
-  // claiming the page was current. A mutation rather than four bare refetches
+  // "Refresh" means the page, not just the query that polls: the snapshot list,
+  // the command preview and the restore instructions are fetched once on mount
+  // and never again, so a button that only reloaded the run list would leave
+  // them stale while claiming the page was current. A mutation rather than bare refetches
   // because `isPending` then covers the whole round trip — invalidateQueries
   // awaits the refetch it triggers. The mount lists are deliberately left out:
   // they feed the edit form's dropdowns and cannot change while a job runs.
@@ -269,6 +287,7 @@ export default function JobDetail() {
         queryClient.invalidateQueries({ queryKey: ['jobRuns', id] }),
         queryClient.invalidateQueries({ queryKey: ['jobSnapshots', id] }),
         queryClient.invalidateQueries({ queryKey: ['jobCommands', id] }),
+        queryClient.invalidateQueries({ queryKey: ['jobRestore', id] }),
       ]),
   })
 
@@ -789,20 +808,11 @@ export default function JobDetail() {
           </TabsContent>
         </Tabs>
 
-        <Card>
-          <CardHeader>
-            <CardTitle as="h2">Restore</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <pre className="overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
-              {`# Restore with restic
-export RESTIC_REPOSITORY=/destinations/${job.destination_label}/${job.name}
-export RESTIC_PASSWORD=your-password-here
-restic snapshots
-restic restore latest --target ./restored`}
-            </pre>
-          </CardContent>
-        </Card>
+        <RestoreCard
+          instructions={restoreInstructions}
+          error={restoreError}
+          latestSnapshotBytes={newestSnapshot(snapshots)?.size_bytes}
+        />
 
         <Dialog open={isCheckModalOpen} onOpenChange={setIsCheckModalOpen}>
           <DialogContent className="sm:max-w-md">

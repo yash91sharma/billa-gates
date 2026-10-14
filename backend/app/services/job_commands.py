@@ -28,11 +28,18 @@ and the test fails until it is listed here.
 
 The preview is derived on every request rather than stored, so an edit to the
 job is reflected immediately.
+
+The restore instructions at the bottom of this module are a different kind of
+command: ones the app never runs, handed to an operator to type by hand. See
+``build_restore_instructions``.
 """
 
+import os
+import posixpath
 import shlex
 from typing import Any, Dict, List, Optional
 
+from app.core import fs
 from app.core.logging import get_logger, log_call
 from app.db.models import BackupJob
 from app.services import backup_runner, repository, restic
@@ -384,3 +391,161 @@ def build_job_commands(
         *_backup_run_commands(job, repo_path, env, auto_unlock=auto_unlock),
         *_on_demand_commands(env),
     ]
+
+
+# ── Restore instructions ─────────────────────────────────────────────────────
+#
+# Billa-Gates never restores: the operator runs restic by hand, often after
+# something has already gone wrong, and sometimes on a computer where this app
+# is not running at all. These are the only commands the app hands someone to
+# type, so they are built here, shell-quoted, from the same path builders the
+# backups use, and never assembled in the frontend. The card used to be a
+# template there, which printed an unquoted repository path (a job named
+# "Documents Offsite" became "repository does not exist") and a relative
+# `--target ./restored` that resolved to the container's own disk.
+#
+# They are never executed by the app, so they don't go through
+# `restic.build_*_args()` and aren't part of the Commands-tab parity tests:
+# there is no runner to drift from. What they must agree with is the layout the
+# backups write, which is why every path comes from `build_repo_path` and
+# `build_source_path`.
+
+# Where the app's container sees a restore target. The app never creates it: the
+# operator maps a host folder here in docker-compose.yml. Without that mount a
+# restore inside the container lands on the container's own disk and is lost
+# when the container is recreated, so the in-container commands are withheld.
+RESTORE_ROOT: str = "/restore"
+
+# The app cannot know where a drive is mounted on the host, or on another
+# computer, so the host-side commands carry placeholders and the card says what
+# to put in their place.
+DRIVE_PLACEHOLDER: str = "/path/to/backup-drive"
+TARGET_PLACEHOLDER: str = "/path/to/empty-folder"
+
+# The container_name in the README's compose file; the card says to use yours.
+CONTAINER_NAME: str = "billa-gates"
+
+# restic's repository layout, so the operator can confirm they are pointing at
+# the right folder before typing a password into it. Recorded from a repository
+# this app created (restic 0.19.1).
+REPOSITORY_CONTENTS: List[str] = [
+    "config",
+    "data/",
+    "index/",
+    "keys/",
+    "locks/",
+    "snapshots/",
+]
+
+
+def _restore_argvs(repo: str, snapshot_ref: str, target: str) -> List[List[str]]:
+    """List the snapshots, then restore one into `target`.
+
+    `-r` rather than an `export RESTIC_REPOSITORY=` line: it survives `sudo`,
+    which drops exported variables on most Linux systems. No password: restic
+    prompts for it, so a password containing spaces, `&` or `$` cannot be
+    mis-quoted and does not end up in shell history.
+
+    `<snapshot>:<path>` restores the contents of that path straight into the
+    target, rather than under `<target>/sources/<label>/...`; verified on
+    restic 0.16.5, 0.17.0, 0.18.1 and 0.19.1. `--sparse` keeps sparse files,
+    such as VM images, from coming back fully allocated.
+    """
+    bin_ = restic.RESTIC_BIN
+    return [
+        [bin_, "-r", repo, "snapshots"],
+        [bin_, "-r", repo, "restore", snapshot_ref, "--target", target, "--sparse"],
+    ]
+
+
+def _join_for_editing(argv: List[str]) -> str:
+    """`shlex.join`, except that an argument holding a placeholder is always
+    single-quoted.
+
+    The operator types over the placeholders before running the command, and
+    `shlex.join` quotes only when it has to: `--target /path/to/empty-folder`
+    came out bare, so typing `/Users/me/Restored Files` over it split the path
+    into two arguments. Quoted, whatever they type stays one argument (a `'`
+    inside is escaped the same way `shlex.quote` does it).
+    """
+
+    def quote(arg: str) -> str:
+        if DRIVE_PLACEHOLDER in arg or TARGET_PLACEHOLDER in arg:
+            return "'" + arg.replace("'", "'\"'\"'") + "'"
+        return shlex.quote(arg)
+
+    return " ".join(quote(arg) for arg in argv)
+
+
+@log_call
+def build_restore_instructions(
+    job: BackupJob, *, restore_root_mounted: bool
+) -> Dict[str, Any]:
+    """Return everything the Restore card needs to tell someone how to get
+    this job's files back by hand.
+
+    Three ways, which the card keeps apart:
+
+    * ``linux_commands``: the NAS itself, or any Linux computer, with the drive
+      attached. `sudo`, because the container writes the repository as root
+      with owner-only permissions, and only root restores the original owners.
+    * ``desktop_commands``: the same commands without `sudo`, for macOS and
+      Windows. Those filesystems merge names that differ only in letter case
+      or Unicode form, so a full restore there can silently lose files; the
+      card says so. Measured: two photos overwritten without any error.
+    * ``container_commands``: inside the app's container, restoring into
+      `RESTORE_ROOT`. Empty unless a folder is actually mounted there.
+
+    Host-side paths use `DRIVE_PLACEHOLDER`, with the repository's position on
+    the drive taken from `build_repo_path`: the one fact that holds on every
+    computer is that the repository is a folder named after the job at the
+    top level of the drive.
+    """
+    repo_path: str = repository.build_repo_path(job.destination_label, job.name)
+    destination_path: str = posixpath.dirname(repo_path)
+    repository_folder: str = posixpath.relpath(repo_path, destination_path)
+    snapshot_path: str = backup_runner.build_source_path(job.source_label)
+    snapshot_ref: str = f"latest:{snapshot_path}"
+
+    host_repo: str = posixpath.join(DRIVE_PLACEHOLDER, repository_folder)
+    desktop = _restore_argvs(host_repo, snapshot_ref, TARGET_PLACEHOLDER)
+    linux = [["sudo", *argv] for argv in desktop]
+    container: List[List[str]] = []
+    if restore_root_mounted:
+        container = [
+            ["docker", "exec", "-it", CONTAINER_NAME, "sh"],
+            *_restore_argvs(
+                repo_path,
+                snapshot_ref,
+                posixpath.join(RESTORE_ROOT, repository_folder),
+            ),
+        ]
+
+    return {
+        "repository_folder": repository_folder,
+        "destination_label": job.destination_label,
+        "destination_path": destination_path,
+        "repository_path": repo_path,
+        "snapshot_path": snapshot_path,
+        "repository_contents": list(REPOSITORY_CONTENTS),
+        "drive_marker": backup_runner.SENTINEL_FILENAME,
+        "drive_placeholder": DRIVE_PLACEHOLDER,
+        "target_placeholder": TARGET_PLACEHOLDER,
+        "compose_mapping": f"{DRIVE_PLACEHOLDER}:{destination_path}",
+        "restore_root": RESTORE_ROOT,
+        "restore_root_mounted": restore_root_mounted,
+        "linux_commands": [_join_for_editing(argv) for argv in linux],
+        "desktop_commands": [_join_for_editing(argv) for argv in desktop],
+        "container_commands": [shlex.join(argv) for argv in container],
+    }
+
+
+@log_call
+async def restore_root_mounted() -> bool:
+    """Whether a host folder is mounted at `RESTORE_ROOT` in this container.
+
+    Probed through `fs.run_probe`, so a hung network share mapped to /restore
+    costs the in-container method rather than hanging the job page; a probe
+    that times out counts as not mounted.
+    """
+    return bool(await fs.run_probe(os.path.ismount, RESTORE_ROOT, default=False))

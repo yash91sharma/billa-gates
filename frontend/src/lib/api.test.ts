@@ -144,6 +144,11 @@ describe('request shapes', () => {
       call: () => api.getJobCommands('job-1'),
       path: '/api/jobs/job-1/commands',
     },
+    {
+      name: 'getRestoreInstructions',
+      call: () => api.getRestoreInstructions('job-1'),
+      path: '/api/jobs/job-1/restore',
+    },
     { name: 'getRun', call: () => api.getRun('run-1'), path: '/api/runs/run-1' },
     { name: 'listSourceMounts', call: () => api.listSourceMounts(), path: '/api/mounts/sources' },
     {

@@ -82,6 +82,10 @@ services:
 
       # App state: SQLite DB and restic cache. Keep the /app/data side as is.
       - ./data:/app/data
+
+      # Optional: an empty folder to restore into from inside the container
+      # (see Restore). Without it, the job page only offers restoring on the host.
+      # - /path/to/restore-space:/restore
     restart: unless-stopped
 ```
 
@@ -95,17 +99,45 @@ A job backs up a whole source mount. To back up a subfolder, mount it as its own
 
 ## Restore
 
-Billa-Gates does not restore. Each repository is a plain restic repository at
-`/destinations/{destination}/{job name}`, so any restic binary works — on the host with the drive
-attached, or inside the container. The job page shows these commands with the path filled in:
+Billa-Gates does not restore; restic does. Each job's repository is a plain restic repository: a
+folder named after the job, at the top level of its backup drive. The **Restore** card on the job
+page shows the commands below for that job, with every path filled in and quoted.
+
+**On the NAS, or any Linux computer with the drive attached.** This works even if the app is gone.
+Needs restic 0.16 or newer.
+
+```bash
+sudo restic -r '/path/to/backup-drive/<job name>' snapshots
+sudo restic -r '/path/to/backup-drive/<job name>' restore 'latest:/sources/<source>' \
+     --target '/path/to/empty-folder' --sparse
+```
+
+- `/path/to/backup-drive` is the left side of the drive's line in `docker-compose.yml`. That folder
+  holds a `.billa_gates_check` file and one folder per job; the job's folder contains `config`,
+  `data/`, `index/`, `keys/`, `locks/` and `snapshots/`.
+- restic asks for the job's password. The app never shows it again, so keep a copy somewhere other
+  than the NAS.
+- `sudo`, because the container writes the repository as root and readable only by root. Running as
+  root also restores the original file owners.
+- `latest:/sources/<source>` restores that folder's contents straight into the target. For an older
+  version, use a snapshot ID from the list instead of `latest`. If the drive is mounted read-only,
+  add `--no-lock`.
+
+**Inside the container**, only if a folder is mounted at `/restore` (the optional line in the
+compose file above). Otherwise the restored files land on the container's own disk and disappear
+when the container is recreated.
 
 ```bash
 docker exec -it billa-gates sh
-export RESTIC_REPOSITORY=/destinations/main/<job name>
-export RESTIC_PASSWORD=<job password>
-restic snapshots
-restic restore latest --target /destinations/main/restored   # any writable path
+restic -r '/destinations/main/<job name>' snapshots
+restic -r '/destinations/main/<job name>' restore 'latest:/sources/<source>' \
+     --target '/restore/<job name>' --sparse
 ```
+
+**On macOS or Windows**, use restic only to pick out individual files. Those filesystems treat
+names that differ only in upper/lower case, or in how an accented letter is encoded, as the same
+file, so a full restore keeps one and drops the other without any error. Restore whole folders on
+Linux.
 
 ## Losing the database or a job
 

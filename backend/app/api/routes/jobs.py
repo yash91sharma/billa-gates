@@ -22,6 +22,7 @@ from app.api.schemas.jobs import (
     JobResponse,
     JobUpdate,
     LockInfo,
+    RestoreInstructionsResponse,
     RunSummarySchema,
     SnapshotResponse,
     UnlockResponse,
@@ -941,6 +942,27 @@ async def list_job_commands(
     # pipeline uses when no settings row exists yet.
     auto_unlock = settings.auto_unlock if settings else True
     return job_commands.build_job_commands(job, auto_unlock=auto_unlock)
+
+
+# ── GET /api/jobs/{id}/restore ────────────────────────────────────────────────
+
+
+@router.get("/{job_id}/restore", response_model=RestoreInstructionsResponse)
+@log_call
+async def get_restore_instructions(
+    job_id: str, session: AsyncSession = Depends(get_session)
+) -> dict[str, object]:
+    """Return the commands for restoring this job's backups by hand.
+
+    Derived from the stored job on every request, like the command preview, so
+    an edited source label is reflected immediately. Whether a folder is
+    mounted at /restore is probed each time too: it changes only when the
+    container is recreated, but a stale answer would offer an in-container
+    restore that lands on the container's own disk.
+    """
+    job = await _get_job_or_404(job_id, session)
+    mounted = await job_commands.restore_root_mounted()
+    return job_commands.build_restore_instructions(job, restore_root_mounted=mounted)
 
 
 # ── GET /api/jobs/{id}/snapshots ──────────────────────────────────────────────

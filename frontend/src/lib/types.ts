@@ -114,6 +114,37 @@ export interface JobCommand {
   command: string | null
 }
 
+/** How to restore a job's backups by hand (`GET /api/jobs/{id}/restore`). The
+ *  app never restores; the operator runs these. Every command is shell-quoted
+ *  by the backend and must be rendered verbatim, never re-assembled here: the
+ *  card used to build them itself and printed an unquoted repository path. */
+export interface RestoreInstructions {
+  /** The folder at the top level of the drive that is this job's repository. */
+  repository_folder: string
+  /** What restic keeps inside it: how to tell it is the right folder. */
+  repository_contents: string[]
+  /** The marker file at the top level of the drive. */
+  drive_marker: string
+  destination_label: string
+  /** Paths as the app's container sees them. */
+  destination_path: string
+  repository_path: string
+  /** The path inside every snapshot (`latest:<snapshot_path>`). */
+  snapshot_path: string
+  drive_placeholder: string
+  target_placeholder: string
+  /** `<drive_placeholder>:<destination_path>`, as in docker-compose.yml. */
+  compose_mapping: string
+  restore_root: string
+  restore_root_mounted: boolean
+  /** The NAS itself or any Linux computer, with `sudo`. */
+  linux_commands: string[]
+  /** macOS and Windows: the same commands without `sudo`. */
+  desktop_commands: string[]
+  /** Inside the app's container; empty unless `restore_root` is mounted. */
+  container_commands: string[]
+}
+
 export interface Snapshot {
   snapshot_id: string
   snapshot_time: string
