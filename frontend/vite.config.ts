@@ -32,6 +32,12 @@ export default defineConfig({
     // screenshots`; exclude them from the default jsdom-only suite.
     exclude: ['node_modules/**', 'dist/**', 'src/screenshots/**'],
     pool: 'threads',
+    // Node 25+ ships a global `localStorage` (Web Storage) that is `undefined`
+    // unless `--localstorage-file` is given. It is already on globalThis when
+    // the jsdom environment populates the globals, so it shadows jsdom's
+    // working Storage and every `window.localStorage` call throws. Turning the
+    // Node feature off lets jsdom's implementation through.
+    execArgv: ['--no-experimental-webstorage'],
     poolOptions: {
       threads: {
         minThreads: 2,

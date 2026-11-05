@@ -627,7 +627,7 @@ def parse_lock_details(lock_id: str, stdout: str) -> Dict[str, Any]:
     }
     try:
         raw = json.loads(stdout)
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except json.JSONDecodeError, TypeError, ValueError:
         return info
     if not isinstance(raw, dict):
         return info

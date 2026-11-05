@@ -12,9 +12,9 @@
 # RESTIC_ARCH is required (no default) — build fails loudly without it.
 
 # ─── Stage 1 — frontend-builder ───────────────────────────────────────────────
-# Node 24 (LTS). Build-time only — no node reaches the runtime stage. Mirrored
+# Node 26 (LTS). Build-time only — no node reaches the runtime stage. Mirrored
 # in .devcontainer/Dockerfile so the bundle is built on the major it is tested on.
-FROM node:24-alpine AS frontend-builder
+FROM node:26-alpine AS frontend-builder
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci --prefer-offline
@@ -23,7 +23,7 @@ RUN npm run build
 # Output: /frontend/dist/
 
 # ─── Stage 2 — restic-fetcher ─────────────────────────────────────────────────
-FROM alpine:3.21 AS restic-fetcher
+FROM alpine:3.24 AS restic-fetcher
 RUN apk add --no-cache curl bzip2
 # 0.19.x is a floor, not just a bump: `--compression fastest|better` (offered
 # by JobForm and stored by CompressionMode) does not exist before 0.19.0, and a
@@ -49,21 +49,22 @@ RUN ARCHIVE="restic_${RESTIC_VERSION}_linux_${RESTIC_ARCH}.bz2" \
 # Output: /restic
 
 # ─── Stage 3 — python-builder ─────────────────────────────────────────────────
-FROM python:3.12-alpine AS python-builder
+FROM python:3.15-alpine AS python-builder
 RUN apk add --no-cache build-base
 RUN python -m venv /venv
 # The whole venv is copied into the runtime image, so the pip `venv` seeded from
-# the base image ships to production too — python:3.12-alpine still bundles
-# 25.0.1, which carries five advisories fixed across 25.3–26.1.2. Upgrade before
+# the base image ships to production too — and the bundled pip lags the release
+# (python:3.12-alpine shipped 25.0.1, carrying five advisories fixed across
+# 25.3–26.1.2; python:3.15-alpine ships 26.2.2). Upgrade before
 # installing anything, so the vulnerable copy is never the one that lands in
 # /venv. Mirrored in .devcontainer/Dockerfile.
-RUN /venv/bin/pip install --no-cache-dir --upgrade "pip>=26.2.1"
+RUN /venv/bin/pip install --no-cache-dir --upgrade "pip>=26.3"
 COPY backend/requirements.txt /tmp/requirements.txt
 RUN /venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
 # Output: /venv/
 
 # ─── Stage 4 — runtime ────────────────────────────────────────────────────────
-FROM python:3.12-alpine AS runtime
+FROM python:3.15-alpine AS runtime
 RUN apk add --no-cache ca-certificates
 
 COPY --from=frontend-builder /frontend/dist  /app/static

@@ -148,7 +148,7 @@ def _sensitive_positions(fn: Callable[..., object]) -> Set[int]:
     """
     try:
         params = list(inspect.signature(fn).parameters.values())
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return set()
     return {
         i
