@@ -8,6 +8,12 @@ name: Build and publish Docker image
 #
 # The tag name (minus the leading "v") becomes the image tag, and "latest" is
 # always moved to the newest tag built here.
+#
+# Once the image is pushed, a GitHub release is published for the same tag. Its
+# notes are the tag's annotation message (if it is an annotated tag, i.e.
+# `git tag -a v1.2.3 -m "..."`), followed by the list of commits since the
+# previous v* tag. The release step runs only after a successful push, so a
+# release never points at an image that does not exist.
 
 on:
   push:
@@ -15,7 +21,9 @@ on:
       - 'v*'
 
 permissions:
-  contents: read
+  # write: needed to create the GitHub release (the Docker push uses its own
+  # Docker Hub credentials and needs nothing from GITHUB_TOKEN).
+  contents: write
 
 jobs:
   build-and-push:
@@ -23,6 +31,15 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          # Full history + tags, so the release notes can list the commits
+          # since the previous tag.
+          fetch-depth: 0
+
+      # actions/checkout re-creates the pushed tag as a lightweight tag, which
+      # loses its annotation message. Re-fetch the real tag objects.
+      - name: Fetch tag objects
+        run: git fetch --force --tags origin
 
       - name: Derive version from tag
         id: version
@@ -59,3 +76,45 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/billa-gates:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Build release notes
+        env:
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/billa-gates:${{ steps.version.outputs.version }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          {
+            # Annotated tag → its message leads the notes. A lightweight tag
+            # points straight at a commit and has no message of its own.
+            if [ "$(git cat-file -t "$tag")" = "tag" ]; then
+              git tag -l --format='%(contents)' "$tag"
+              echo
+            fi
+
+            echo "## Docker image"
+            echo
+            echo '```bash'
+            echo "docker pull $IMAGE"
+            echo '```'
+            echo
+
+            echo "## Commits"
+            echo
+            prev="$(git describe --tags --abbrev=0 --match 'v*' "$tag^" 2>/dev/null || true)"
+            if [ -n "$prev" ]; then
+              git log --no-merges --pretty='- %s (%h)' "$prev..$tag"
+              echo
+              echo "**Full changelog:** https://github.com/$GITHUB_REPOSITORY/compare/$prev...$tag"
+            else
+              git log --no-merges --pretty='- %s (%h)' "$tag"
+            fi
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md

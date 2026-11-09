@@ -18,14 +18,19 @@ docker build --build-arg RESTIC_ARCH=amd64 -t billa-gates:latest .   # Intel / A
 
 ## Release
 
-`.github/workflows/docker-publish.yml` builds and pushes to Docker Hub when a `v*` tag is pushed.
-Branch pushes publish nothing.
+`.github/workflows/docker-publish.yml` builds and pushes to Docker Hub when a `v*` tag is pushed,
+then publishes a GitHub release for that tag. Branch pushes publish nothing.
 
 ```bash
 cd frontend && npm version patch   # or minor / major — bumps package.json, shown in the sidebar
 # commit, then:
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
+
+The release notes are a `docker pull` line for the image and the commits since the previous `v*`
+tag. An annotated tag (`git tag -a vX.Y.Z -m "..."`) also works, and its message leads the notes. The release is created only after the image push
+succeeds. If that step fails, re-run the workflow, or delete the half-made release first if one
+exists, since `gh release create` refuses a tag that already has one.
 
 ### Bumping restic
 
