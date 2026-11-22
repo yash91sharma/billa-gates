@@ -6,7 +6,7 @@
  * captured by shrinking the viewport on the Layout itself.
  */
 import { render } from '@testing-library/react'
-import { page } from '@vitest/browser/context'
+import { page } from 'vitest/browser'
 import { capture } from './capture'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, test } from 'vitest'

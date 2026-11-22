@@ -11,7 +11,7 @@
  */
 import { render } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { page } from '@vitest/browser/context'
+import { page } from 'vitest/browser'
 import { capture } from './capture'
 import { afterEach, test } from 'vitest'
 

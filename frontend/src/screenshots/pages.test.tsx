@@ -7,7 +7,7 @@
  */
 import { waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { page } from '@vitest/browser/context'
+import { page } from 'vitest/browser'
 import { capture } from './capture'
 import { Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, test, vi } from 'vitest'

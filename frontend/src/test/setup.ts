@@ -1,4 +1,4 @@
-import '@testing-library/jest-dom'
+import '@testing-library/jest-dom/vitest'
 import { configure } from '@testing-library/react'
 
 // Reduce waitFor timeout from the 1000ms default so failing tests don't stall.

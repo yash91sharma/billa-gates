@@ -1,9 +1,11 @@
-import { commands, page } from '@vitest/browser/context'
+import { commands, page } from 'vitest/browser'
 
-// `BrowserCommands` is declared in `vitest/browser` as of vitest 4 (it was in
-// `@vitest/browser/context` in v3). The runtime import above is unaffected —
-// only the interface being augmented moved, and augmenting the old module
-// silently types `commands.writeScreenshotIfChanged` as non-existent.
+// `vitest/browser` is both the runtime module and the one `BrowserCommands` is
+// declared in. vitest 4 moved the interface here; vitest 5 moved the runtime
+// too — `@vitest/browser/context` is now a stub that throws "can be imported
+// only inside the Browser Mode" even inside it, failing every test file that
+// imports it. Augmenting the old module silently types
+// `commands.writeScreenshotIfChanged` as non-existent.
 declare module 'vitest/browser' {
   interface BrowserCommands {
     writeScreenshotIfChanged(relativePath: string, base64: string): Promise<'written' | 'unchanged'>
